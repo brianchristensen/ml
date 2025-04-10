@@ -11,10 +11,10 @@ class Decoder(nn.Module):
             nn.ReLU()
         )
         self.deconv = nn.Sequential(
-            nn.Upsample(scale_factor=2, mode='bilinear'),  # [B, 128, 16, 16]
+            nn.Upsample(scale_factor=2, mode='nearest'),  # [B, 128, 16, 16]
             nn.Conv2d(128, 64, kernel_size=3, padding=1),
             nn.ReLU(),
-            nn.Upsample(scale_factor=2, mode='bilinear'),  # [B, 64, 32, 32]
+            nn.Upsample(scale_factor=2, mode='nearest'),  # [B, 64, 32, 32]
             nn.Conv2d(64, output_channels, kernel_size=3, padding=1),
             nn.Sigmoid()
         )
@@ -33,8 +33,8 @@ class SoftSOM(nn.Module):
 
     def forward(self, x):
         dists = torch.cdist(x.unsqueeze(1), self.prototypes.unsqueeze(0))  # [B, 1, D] vs [1, N, D]
-        weights = F.softmax(-dists.squeeze(1) / self.temperature, dim=-1)
-        blended = weights @ self.prototypes
+        weights = F.softmax(-dists.squeeze(1) / self.temperature, dim=-1)  # [B, num_prototypes]
+        blended = weights @ self.prototypes  # [B, D]
         return blended, weights
 
 # === Node ===
@@ -44,36 +44,40 @@ class Node(nn.Module):
         self.encoder_fc = nn.Linear(latent_dim, latent_dim)
         self.som = SoftSOM(latent_dim, som_dim, temperature)
         self.last_input = None
+        self.last_blended = None  # for decoder loss later
 
     def forward(self, x):
         z = self.encoder_fc(x)
         topo_z, weights = self.som(z)
         self.last_input = z
+        self.last_blended = topo_z
         return topo_z, weights
 
 # === HiTop ===
 class HiTop(nn.Module):
     def __init__(self, input_channels=3, latent_dim=256,
-                 num_nodes=4, som_dim=[80, 40, 20, 10], temperature=0.3, num_heads=4):
+                 num_nodes=4, som_dim=[8, 10, 12, 16], temperature=0.3, num_heads=4):
         super().__init__()
         self.num_nodes = num_nodes
         self.latent_dim = latent_dim
         self.num_heads = num_heads
 
         self.shared_encoder = nn.Sequential(
-            nn.Conv2d(input_channels, 32, kernel_size=5, stride=2, padding=1),  # 32x16x16
+            nn.Conv2d(input_channels, 32, kernel_size=5, stride=2, padding=1),
             nn.ReLU(),
-            nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1),              # 64x8x8
+            nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1),
             nn.ReLU(),
-            nn.Conv2d(64, 128, kernel_size=3, stride=1, padding=1),             # 128x8x8
+            nn.Conv2d(64, 128, kernel_size=3, stride=1, padding=1),
             nn.ReLU(),
-            nn.Conv2d(128, 256, kernel_size=3, stride=1, padding=1),            # 256x8x8
+            nn.Conv2d(128, 256, kernel_size=3, stride=1, padding=1),
             nn.ReLU(),
-            nn.Flatten(),                                                       # [B, 256*8*8]
+            nn.Flatten(),
             nn.Linear(256 * 8 * 8, latent_dim)
         )
 
-        self.decoder = Decoder(input_dim=latent_dim)
+        self.decoders = nn.ModuleList([
+            Decoder(input_dim=latent_dim) for _ in range(num_nodes)
+        ])
 
         self.nodes = nn.ModuleList([
             Node(latent_dim, som_dim[i], temperature)
@@ -113,31 +117,28 @@ class HiTop(nn.Module):
 
     def forward(self, x, y=None):
         z0 = self.shared_encoder(x)
-        x_recon = self.decoder(z0)
-        
-        z_in = z0
+
         topo_z_list = []
         for node in self.nodes:
-            topo_z, _ = node(z_in)
-            z_in = F.layer_norm(z0 + 0.5 * topo_z, [self.latent_dim])
-            topo_z_list.append(z_in)
+            topo_z, _ = node(z0)
+            topo_z_list.append(topo_z)
 
-        topo_stack = torch.stack(topo_z_list, dim=0)  # [num_nodes, B, latent_dim]
+        topo_stack = torch.stack(topo_z_list, dim=0)
 
         if y is not None:
-            query = self.query_proj(self.class_embeddings[y])  # [B, latent_dim]
+            query = self.query_proj(self.class_embeddings[y])
         else:
             query = self.query_proj(self.class_embeddings.mean(dim=0, keepdim=True)).expand(z0.size(0), -1)
 
         proj = self.attn_proj(self.node_embeddings).view(self.num_nodes, self.num_heads, self.latent_dim)
         outputs = []
         for h in range(self.num_heads):
-            keys = proj[:, h]                     # [num_nodes, latent_dim]
+            keys = proj[:, h]
             attn_logits = torch.einsum('bd,nd->bn', query, keys)
             attn_weights = F.softmax(attn_logits, dim=-1)
             fused = torch.einsum('bn,nbd->bd', attn_weights, topo_stack)
             outputs.append(fused)
 
-        fused_all = torch.cat(outputs, dim=1)     # [B, latent_dim * num_heads]
+        fused_all = torch.cat(outputs, dim=1)
         logits = self.classifier(fused_all)
-        return logits, fused_all, topo_z_list, x_recon
+        return logits

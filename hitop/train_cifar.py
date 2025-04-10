@@ -13,13 +13,13 @@ torch.manual_seed(42)
 torch.cuda.manual_seed_all(42)
 
 # === Hyperparameters ===
-epochs = 120
+epochs = 20
 num_nodes_default = 4
-som_dimensions_default = [10, 20, 30, 40]
+som_dimensions_default = [8, 10, 8, 5]
 latent_dim_default = 256
 temperature_default = 0.3
 # loss coefficients
-recon_loss_λ = 0.7
+recon_loss_λ = 1
 node_div_λ = 0.04
 graph_div_λ = 0.04
 base_usage_λ = 1.25
@@ -43,7 +43,7 @@ train_loader = DataLoader(train_data, batch_size=128, shuffle=True)
 test_data = datasets.CIFAR10("data", train=False, download=True, transform=transform_test)
 test_loader = DataLoader(test_data, batch_size=128)
 
-# GPU-native data augmentation pipeline (torchvision v2)
+# Intensive augments - better generality, harder to invert with decoder
 # gpu_train_aug = T.Compose([
 #     T.RandomCrop(32, padding=4),
 #     T.RandomHorizontalFlip(),
@@ -72,14 +72,19 @@ for epoch in range(1, epochs+1):
     for x, y in train_loader:
         x, y = x.to(device), y.to(device)
         x_aug = gpu_train_aug(x)
-        logits, fused_all, topo_z_list, x_recon = model(x_aug)
+        logits = model(x_aug)
 
         # Core losses
         loss_cls = F.cross_entropy(logits, y, label_smoothing=label_smoothing)
         graph_div = model.graph_diversity_loss()
         node_div = model.node_diversity_loss()
         usage_penalty = model.usage_penalty()
-        recon_loss = F.mse_loss(x_recon, x_aug)
+
+        recon_losses = [
+            F.mse_loss(model.decoders[i](model.nodes[i].last_blended), x)
+            for i in range(model.num_nodes)
+        ]
+        recon_loss = sum(recon_losses) / model.num_nodes
 
         # Total loss
         loss = (
@@ -128,7 +133,7 @@ total_samples = 0
 with torch.no_grad():
     for x, y in test_loader:
         x, y = x.to(device), y.to(device)
-        logits, fused_all, topo_z_list, x_recon = model(x)
+        logits = model(x)
 
         pred_topo = logits.argmax(dim=1)
         total_topo_acc += (pred_topo == y).sum().item()
