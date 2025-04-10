@@ -17,12 +17,11 @@ epochs = 20
 num_nodes_default = 4
 som_dimensions_default = [8, 10, 8, 5]
 latent_dim_default = 256
-temperature_default = 0.8
 # loss coefficients
 recon_loss_λ = 1
-node_div_λ = 0.04
-graph_div_λ = 0.04
-base_usage_λ = 1.25
+node_div_λ = 2
+graph_div_λ = 2
+base_usage_λ = 0.7
 proto_usage_penalty_λ = base_usage_λ * num_nodes_default
 label_smoothing = 0.1
 
@@ -31,7 +30,7 @@ def get_usage_lambda(epoch):
     return proto_usage_penalty_λ * 0.5 * (1 + math.cos(math.pi * epoch / epochs))
 
 # === Model ===
-model = TEA(num_nodes=num_nodes_default, som_dim=som_dimensions_default, latent_dim=latent_dim_default, temperature=temperature_default).to(device)
+model = TEA(num_nodes=num_nodes_default, som_dim=som_dimensions_default, latent_dim=latent_dim_default).to(device)
 optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-4)
 
 # === Data ===
@@ -119,8 +118,10 @@ for epoch in range(1, epochs+1):
           f"Recon: {total_recon_loss:.4f} | "
           f"Node Similarity: {total_node_div:.4f} | "
           f"Graph Similarity: {total_graph_div:.4f} | "
-          f"Usage Penalty: {total_usage_penalty:.4f} | "
-          f"Duration: {epoch_duration:.2f}s")
+          f"Usage Penalty: {total_usage_penalty:.4f}", end=" | ")
+    for i, node in enumerate(model.nodes):
+        print(f"Node{i}Tmp: {node.som.temperature.item():.4f}", end=" | ")
+    print(f"Duration: {epoch_duration:.2f}s")
 
 torch.save(model.state_dict(), "models/model_tea.pth")
 print("✅ Saved to models/model_tea.pth")

@@ -25,26 +25,30 @@ class Decoder(nn.Module):
 
 # === SoftSOM ===
 class SoftSOM(nn.Module):
-    def __init__(self, input_dim, som_dim, temperature):
+    def __init__(self, input_dim, som_dim, init_temperature=0.5):
         super().__init__()
         self.num_nodes = som_dim * som_dim
-        self.temperature = temperature
         self.prototypes = nn.Parameter(torch.randn(self.num_nodes, input_dim))
+        self.temp_raw = nn.Parameter(torch.tensor([init_temperature], dtype=torch.float32))
+
+    @property
+    def temperature(self):
+        return torch.sigmoid(self.temp_raw) * (1.0 - 1e-3) + 1e-3
 
     def forward(self, x):
         dists = torch.cdist(x.unsqueeze(1), self.prototypes.unsqueeze(0))  # [B, 1, D] vs [1, N, D]
-        weights = F.softmax(-dists.squeeze(1) / self.temperature, dim=-1)  # [B, num_prototypes]
-        blended = weights @ self.prototypes  # [B, D]
+        weights = F.softmax(-dists.squeeze(1) / self.temperature, dim=-1)
+        blended = weights @ self.prototypes
         return blended, weights
 
 # === Node ===
 class Node(nn.Module):
-    def __init__(self, latent_dim, som_dim, temperature):
+    def __init__(self, latent_dim, som_dim):
         super().__init__()
         self.encoder_fc = nn.Linear(latent_dim, latent_dim)
-        self.som = SoftSOM(latent_dim, som_dim, temperature)
+        self.som = SoftSOM(latent_dim, som_dim)
         self.last_input = None
-        self.last_blended = None  # for decoder loss later
+        self.last_blended = None
 
     def forward(self, x):
         z = self.encoder_fc(x)
@@ -56,7 +60,7 @@ class Node(nn.Module):
 # === TEA ===
 class TEA(nn.Module):
     def __init__(self, input_channels=3, latent_dim=256,
-                 num_nodes=4, som_dim=[8, 10, 12, 16], temperature=0.3, num_heads=4):
+                 num_nodes=4, som_dim=[8, 10, 12, 16], num_heads=4):
         super().__init__()
         self.num_nodes = num_nodes
         self.latent_dim = latent_dim
@@ -80,7 +84,7 @@ class TEA(nn.Module):
         ])
 
         self.nodes = nn.ModuleList([
-            Node(latent_dim, som_dim[i], temperature)
+            Node(latent_dim, som_dim[i])
             for i in range(num_nodes)
         ])
 
