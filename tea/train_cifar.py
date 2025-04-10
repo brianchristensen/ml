@@ -17,7 +17,7 @@ epochs = 20
 num_nodes_default = 4
 som_dimensions_default = [8, 10, 8, 5]
 latent_dim_default = 256
-temperature_default = 0.3
+temperature_default = 0.8
 # loss coefficients
 recon_loss_λ = 1
 node_div_λ = 0.04
