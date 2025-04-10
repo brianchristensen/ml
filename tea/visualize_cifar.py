@@ -6,7 +6,7 @@ from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 from sklearn.cluster import KMeans
 import matplotlib.pyplot as plt
-from model import HiTop
+from model import TEA
 import warnings
 
 warnings.simplefilter("ignore", FutureWarning)
@@ -18,7 +18,7 @@ num_nodes_default = 4
 som_dim_default = [8, 10, 8, 5]
 latent_dim = 256
 cluster_threshold = 100
-model_path = "models/model_hitop.pth"
+model_path = "models/model_tea.pth"
 explain_dir = "explain"
 os.makedirs(explain_dir, exist_ok=True)
 
@@ -53,8 +53,8 @@ def cluster_prototypes(prototypes, n_clusters=100):
 
 # === Main ===
 def main():
-    print("🧠 Loading HiTop model...")
-    model = HiTop(num_nodes=num_nodes_default, som_dim=som_dim_default, latent_dim=latent_dim)
+    print("🧠 Loading TEA model...")
+    model = TEA(num_nodes=num_nodes_default, som_dim=som_dim_default, latent_dim=latent_dim)
     model.load_state_dict(torch.load(model_path, map_location=device))
     model.to(device)
     model.eval()

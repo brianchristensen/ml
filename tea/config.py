@@ -13,7 +13,7 @@ class ModelConfig:
     num_heads: int = 4
     decoder_output_shape: Tuple[int, int] = (32, 32)
     task_type: str = "classification"  # or "regression"
-    model_save_path: str = "models/model_hitop.pth"
+    model_save_path: str = "models/model_tea.pth"
 
 @dataclass
 class TrainingConfig:

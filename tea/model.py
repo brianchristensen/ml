@@ -53,8 +53,8 @@ class Node(nn.Module):
         self.last_blended = topo_z
         return topo_z, weights
 
-# === HiTop ===
-class HiTop(nn.Module):
+# === TEA ===
+class TEA(nn.Module):
     def __init__(self, input_channels=3, latent_dim=256,
                  num_nodes=4, som_dim=[8, 10, 12, 16], temperature=0.3, num_heads=4):
         super().__init__()

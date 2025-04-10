@@ -6,7 +6,7 @@ from torchvision.transforms import v2 as T
 import time
 import math
 from datetime import datetime
-from model import HiTop
+from model import TEA
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 torch.manual_seed(42)
@@ -31,7 +31,7 @@ def get_usage_lambda(epoch):
     return proto_usage_penalty_λ * 0.5 * (1 + math.cos(math.pi * epoch / epochs))
 
 # === Model ===
-model = HiTop(num_nodes=num_nodes_default, som_dim=som_dimensions_default, latent_dim=latent_dim_default, temperature=temperature_default).to(device)
+model = TEA(num_nodes=num_nodes_default, som_dim=som_dimensions_default, latent_dim=latent_dim_default, temperature=temperature_default).to(device)
 optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-4)
 
 # === Data ===
@@ -59,7 +59,7 @@ gpu_train_aug = T.Compose([
 ])
 
 # === Training ===
-print(f"🧠 Training HiTop Model @ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+print(f"🧠 Training TEA Model @ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 print(f"🔧 Num Nodes: {num_nodes_default}, SOM Dimensions: {som_dimensions_default}, Latent Dim: {latent_dim_default}")
 start_time = time.time()
 for epoch in range(1, epochs+1):
@@ -122,8 +122,8 @@ for epoch in range(1, epochs+1):
           f"Usage Penalty: {total_usage_penalty:.4f} | "
           f"Duration: {epoch_duration:.2f}s")
 
-torch.save(model.state_dict(), "models/model_hitop.pth")
-print("✅ Saved to models/model_hitop.pth")
+torch.save(model.state_dict(), "models/model_tea.pth")
+print("✅ Saved to models/model_tea.pth")
 
 # === Evaluation ===
 model.eval()
