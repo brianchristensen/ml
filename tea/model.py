@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import math
 
 # === Decoder ===
 class Decoder(nn.Module):
@@ -178,7 +179,12 @@ class TEA(nn.Module):
         loss = 0.0
         for node in self.nodes:
             usage = torch.sigmoid(node.som.gate_logits)
-            loss += F.mse_loss(usage, torch.full_like(usage, 1.0 / usage.size(0)))
+            entropy = -(usage * torch.log(usage + 1e-8)).sum()
+            ideal_usage = torch.full_like(usage, 1.0 / usage.size(0))
+
+            # Scale usage penalty by entropy
+            scale = entropy / math.log(usage.numel())  # normalized entropy
+            loss += scale * F.mse_loss(usage, ideal_usage)
         return loss / len(self.nodes)
     
     def forward(self, x, y=None):
