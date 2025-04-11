@@ -25,10 +25,6 @@ base_usage_λ = 1
 proto_usage_penalty_λ = base_usage_λ * num_nodes_default
 label_smoothing = 0.1
 
-def get_usage_lambda(epoch):
-    # Cosine annealing from base_lambda → ~0 over training
-    return proto_usage_penalty_λ * 0.5 * (1 + math.cos(math.pi * epoch / epochs))
-
 # === Model ===
 model = TEA(num_nodes=num_nodes_default, som_dim=som_dimensions_default, latent_dim=latent_dim_default).to(device)
 optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-4)
