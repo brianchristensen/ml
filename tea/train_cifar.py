@@ -15,18 +15,16 @@ torch.cuda.manual_seed_all(42)
 # === Hyperparameters ===
 epochs = 20
 num_nodes_default = 4
-som_dimensions_default = [8, 10, 8, 5]
 latent_dim_default = 256
 # loss coefficients
 recon_loss_λ = 1
 proto_div_λ = 4
 node_div_λ = 4
-base_usage_λ = 1
-proto_usage_penalty_λ = base_usage_λ * num_nodes_default
+usage_λ = 0.7
 label_smoothing = 0.1
 
 # === Model ===
-model = TEA(num_nodes=num_nodes_default, som_dim=som_dimensions_default, latent_dim=latent_dim_default).to(device)
+model = TEA(num_nodes=num_nodes_default, latent_dim=latent_dim_default).to(device)
 optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-4)
 
 # === Data ===
@@ -56,7 +54,6 @@ gpu_train_aug = T.Compose([
 
 # === Training ===
 print(f"🧠 Training TEA Model @ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-print(f"🔧 Num Nodes: {num_nodes_default}, SOM Dimensions: {som_dimensions_default}, Latent Dim: {latent_dim_default}")
 start_time = time.time()
 for epoch in range(1, epochs+1):
     epoch_start_time = time.time()
@@ -87,7 +84,7 @@ for epoch in range(1, epochs+1):
             loss_cls +
             proto_div_λ * proto_div +
             node_div_λ * node_div +
-            proto_usage_penalty_λ * usage_penalty +
+            usage_λ * usage_penalty +
             recon_loss_λ * recon_loss
         )
 

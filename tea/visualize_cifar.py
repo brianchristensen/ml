@@ -15,8 +15,8 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # --- Config ---
 num_nodes_default = 4
-som_dim_default = [8, 10, 8, 5]
 latent_dim = 256
+max_grid_size = 256
 cluster_threshold = 100
 model_path = "models/model_tea.pth"
 explain_dir = "explain"
@@ -54,7 +54,7 @@ def cluster_prototypes(prototypes, n_clusters=100):
 # === Main ===
 def main():
     print("🧠 Loading TEA model...")
-    model = TEA(num_nodes=num_nodes_default, som_dim=som_dim_default, latent_dim=latent_dim)
+    model = TEA(num_nodes=num_nodes_default, max_grid_size=max_grid_size, latent_dim=latent_dim)
     model.load_state_dict(torch.load(model_path, map_location=device))
     model.to(device)
     model.eval()
@@ -64,17 +64,24 @@ def main():
         print(f"\n=== [Node {i}] ===")
         with torch.no_grad():
             prototypes = node.som.prototypes.detach()
-            proto_count = prototypes.size(0)
-            decoder = model.decoders[i].eval() if hasattr(model, "decoders") else model.decoder.eval()
+            usage = torch.sigmoid(node.som.gate_logits)
+            active_mask = usage > 0.01
+            active_protos = prototypes[active_mask]
+
+            proto_count = active_protos.size(0)
+            if proto_count == 0:
+                print(f"⚠️  Node {i} has no active prototypes. Skipping visualization.")
+                continue
+            decoder = model.decoders[i].eval()
 
             if proto_count > cluster_threshold:
-                print(f"📊 Clustering {proto_count} prototypes...")
-                cluster_centers = cluster_prototypes(prototypes, n_clusters=100)
+                print(f"📊 Clustering {proto_count} active prototypes...")
+                cluster_centers = cluster_prototypes(active_protos, n_clusters=100)
                 decoded = decoder(cluster_centers)
                 save_visual_grid(decoded, filename=f"node{i}_clusters.png", title=f"Node {i} Cluster Centers")
             else:
-                print(f"🧩 Decoding all {proto_count} prototypes...")
-                decoded = decoder(prototypes)
+                print(f"🧩 Decoding {proto_count} active prototypes...")
+                decoded = decoder(active_protos)
                 save_visual_grid(decoded, filename=f"node{i}_prototypes.png", title=f"Node {i} Prototypes")
 
     print("\n🎨 Decoding blended SOM inputs from real images...")
@@ -86,21 +93,14 @@ def main():
 
     with torch.no_grad():
         z0 = model.shared_encoder(x_sample)
-        z_in = z0
 
         for i, node in enumerate(model.nodes):
             decoder = model.decoders[i]
-            z_node = node.encoder_fc(z_in)
-            dists = torch.cdist(z_node.unsqueeze(1), node.som.prototypes.unsqueeze(0))
-            weights = F.softmax(-dists.squeeze(1) / node.som.temperature, dim=-1)
-            blended = weights @ node.som.prototypes  # [B, latent_dim]
-            decoded = decoder(blended)               # [B, 3, 32, 32]
+            _ = node(z0)
+            decoded = decoder(node.last_blended)
 
             save_visual_grid(decoded, filename=f"node{i}_blended_recons.png", title=f"Node {i} Blended Reconstructions")
 
-            z_in = F.layer_norm(z0 + 0.5 * blended, [model.latent_dim])
-
-        # Optionally save the originals too for comparison
         save_visual_grid(x_sample, filename="original_inputs.png", title="Original Input Samples")
 
 if __name__ == "__main__":
