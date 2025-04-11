@@ -19,8 +19,8 @@ som_dimensions_default = [8, 10, 8, 5]
 latent_dim_default = 256
 # loss coefficients
 recon_loss_λ = 1
+proto_div_λ = 4
 node_div_λ = 4
-graph_div_λ = 4
 base_usage_λ = 1
 proto_usage_penalty_λ = base_usage_λ * num_nodes_default
 label_smoothing = 0.1
@@ -61,7 +61,7 @@ for epoch in range(1, epochs+1):
     epoch_start_time = time.time()
     model.train()
     total_loss = total_acc_topo = 0
-    total_graph_div = total_node_div = total_usage_penalty = total_recon_loss = 0
+    total_proto_div = total_node_div = total_usage_penalty = total_recon_loss = 0
     total_samples = 0
 
     for x, y in train_loader:
@@ -71,7 +71,7 @@ for epoch in range(1, epochs+1):
 
         # Core losses
         loss_cls = F.cross_entropy(logits, y, label_smoothing=label_smoothing)
-        graph_div = model.graph_diversity_loss()
+        proto_div = model.proto_diversity_loss()
         node_div = model.node_diversity_loss()
         usage_penalty = model.usage_penalty()
 
@@ -84,8 +84,8 @@ for epoch in range(1, epochs+1):
         # Total loss
         loss = (
             loss_cls +
+            proto_div_λ * proto_div +
             node_div_λ * node_div +
-            graph_div_λ * graph_div +
             proto_usage_penalty_λ * usage_penalty +
             recon_loss_λ * recon_loss
         )
@@ -100,7 +100,7 @@ for epoch in range(1, epochs+1):
             pred_topo = logits.argmax(dim=1)
             total_acc_topo += (pred_topo == y).sum().item()
             total_loss += loss.item()
-            total_graph_div += graph_div.item()
+            total_proto_div += proto_div.item()
             total_node_div += node_div.item()
             total_usage_penalty += usage_penalty.item()
             total_recon_loss += recon_loss.item()
@@ -112,8 +112,8 @@ for epoch in range(1, epochs+1):
     print(f"[TRAIN] Epoch {epoch:2d} | "
           f"Accuracy: {total_acc_topo / total_samples:.4f} | "
           f"Recon: {total_recon_loss:.4f} | "
+          f"Proto Similarity: {total_proto_div:.4f} | "
           f"Node Similarity: {total_node_div:.4f} | "
-          f"Graph Similarity: {total_graph_div:.4f} | "
           f"Usage Penalty: {total_usage_penalty:.4f}", end=" | ")
     for i, node in enumerate(model.nodes):
         print(f"Node{i}Tmp: {node.som.temperature.item():.4f}", end=" | ")

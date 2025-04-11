@@ -11,10 +11,10 @@ class Decoder(nn.Module):
             nn.ReLU()
         )
         self.deconv = nn.Sequential(
-            nn.Upsample(scale_factor=2, mode='nearest'),  # [B, 128, 16, 16]
+            nn.Upsample(scale_factor=2, mode='nearest'),
             nn.Conv2d(128, 64, kernel_size=3, padding=1),
             nn.ReLU(),
-            nn.Upsample(scale_factor=2, mode='nearest'),  # [B, 64, 32, 32]
+            nn.Upsample(scale_factor=2, mode='nearest'),
             nn.Conv2d(64, output_channels, kernel_size=3, padding=1),
             nn.Sigmoid()
         )
@@ -95,14 +95,14 @@ class TEA(nn.Module):
         self.attn_proj = nn.Linear(latent_dim, latent_dim * num_heads)
         self.classifier = nn.Linear(latent_dim * num_heads, 10)
 
-    def node_diversity_loss(self):
+    def proto_diversity_loss(self):
         return sum(
             (F.normalize(node.som.prototypes, dim=1) @ F.normalize(node.som.prototypes, dim=1).T)
             .fill_diagonal_(0).pow(2).mean()
             for node in self.nodes
         ) / len(self.nodes)
 
-    def graph_diversity_loss(self):
+    def node_diversity_loss(self):
         sims = []
         for i in range(len(self.nodes)):
             for j in range(i + 1, len(self.nodes)):
