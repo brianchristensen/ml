@@ -122,28 +122,57 @@ class TEA(nn.Module):
         self.classifier = nn.Linear(latent_dim * num_heads, 10)
 
     def proto_diversity_loss(self):
-        return sum(
-            (F.normalize(node.som.prototypes, dim=1) @ F.normalize(node.som.prototypes, dim=1).T)
-            .fill_diagonal_(0).pow(2).mean()
-            for node in self.nodes
-        ) / len(self.nodes)
+        losses = []
+        for node in self.nodes:
+            P = F.normalize(node.som.prototypes, dim=1)
+            S = P @ P.T
+            S.fill_diagonal_(0)
+
+            gate_probs = torch.sigmoid(node.som.gate_logits)
+            usage = gate_probs / (gate_probs.sum() + 1e-8)
+
+            # Pairwise usage weights
+            usage_weights = usage.unsqueeze(0) * usage.unsqueeze(1)
+
+            # Entropy of gate activations
+            gate_dist = gate_probs / (gate_probs.sum() + 1e-8)
+            gate_entropy = -(gate_dist * gate_dist.clamp(min=1e-8).log()).sum()
+
+            diversity_penalty = (S.pow(2) * usage_weights).sum() / usage_weights.sum()
+            losses.append(gate_entropy * diversity_penalty)  # <- Entropy scaling here
+
+        return sum(losses) / len(losses)
+
 
     def node_diversity_loss(self):
-        sims = []
-        for i in range(len(self.nodes)):
-            for j in range(i + 1, len(self.nodes)):
-                # Only compare active prototypes
-                pi = self.nodes[i].som.prototypes
-                pj = self.nodes[j].som.prototypes
-                gi = torch.sigmoid(self.nodes[i].som.gate_logits)
-                gj = torch.sigmoid(self.nodes[j].som.gate_logits)
+        node_reps = []
+        for node in self.nodes:
+            prototypes = node.som.prototypes
+            gate_probs = torch.sigmoid(node.som.gate_logits)
+            weights = gate_probs / (gate_probs.sum() + 1e-8)
+            weighted_mean = (weights.unsqueeze(1) * prototypes).sum(dim=0)
+            node_reps.append(F.normalize(weighted_mean, dim=0))
 
-                # Weight by gate usage
-                pi_weighted = F.normalize(pi * gi.unsqueeze(1), dim=1)
-                pj_weighted = F.normalize(pj * gj.unsqueeze(1), dim=1)
+        node_reps = torch.stack(node_reps, dim=0)
+        sim_matrix = node_reps @ node_reps.T
 
-                sims.append((pi_weighted @ pj_weighted.T).pow(2).mean())
-        return sum(sims) / len(sims)
+        off_diag_mask = ~torch.eye(sim_matrix.size(0), dtype=torch.bool, device=sim_matrix.device)
+        
+        # Don't square it — keep it smooth
+        diversity_loss = sim_matrix[off_diag_mask].mean()
+
+        return diversity_loss
+
+
+    def gate_entropy_loss(self):
+        loss = 0.0
+        for node in self.nodes:
+            #p = torch.sigmoid(node.som.gate_logits)
+            p = F.softmax(node.som.gate_logits, dim=0)
+            p = p / (p.sum() + 1e-8)  # normalize just in case
+            entropy = -(p * (p + 1e-8).log()).sum()
+            loss += entropy
+        return loss / len(self.nodes)
 
     def usage_penalty(self):
         loss = 0.0
