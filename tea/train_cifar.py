@@ -19,9 +19,9 @@ som_dimensions_default = [8, 10, 8, 5]
 latent_dim_default = 256
 # loss coefficients
 recon_loss_λ = 1
-node_div_λ = 2
-graph_div_λ = 2
-base_usage_λ = 0.7
+node_div_λ = 4
+graph_div_λ = 4
+base_usage_λ = 1
 proto_usage_penalty_λ = base_usage_λ * num_nodes_default
 label_smoothing = 0.1
 
