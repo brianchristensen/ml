@@ -38,7 +38,7 @@ train_loader = DataLoader(train_data, batch_size=128, shuffle=True)
 test_data = datasets.CIFAR10("data", train=False, download=True, transform=transform_test)
 test_loader = DataLoader(test_data, batch_size=128)
 
-# Intensive augments - better generality, harder to invert with decoder
+# Intensive augments - better generality of model, harder to invert prototypes with decoder
 # gpu_train_aug = T.Compose([
 #     T.RandomCrop(32, padding=4),
 #     T.RandomHorizontalFlip(),
@@ -47,6 +47,7 @@ test_loader = DataLoader(test_data, batch_size=128)
 #     T.ToDtype(torch.float32, scale=True)
 # ])
 
+# Simpler augments - less generality of model, easier to invert prototypes with decoder
 gpu_train_aug = T.Compose([
     T.RandomCrop(32, padding=4),
     T.RandomHorizontalFlip(),
