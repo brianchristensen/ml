@@ -14,8 +14,9 @@ torch.cuda.manual_seed_all(42)
 
 # === Hyperparameters ===
 epochs = 20
-num_nodes_default = 4
-latent_dim_default = 256
+num_nodes = 4
+latent_dim = 256
+max_grid_size = 256
 # loss coefficients
 recon_loss_λ = 1
 proto_div_λ = 4
@@ -24,7 +25,7 @@ usage_λ = 0.7
 label_smoothing = 0.1
 
 # === Model ===
-model = TEA(num_nodes=num_nodes_default, latent_dim=latent_dim_default).to(device)
+model = TEA(num_nodes=num_nodes, latent_dim=latent_dim).to(device)
 optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-4)
 
 # === Data ===

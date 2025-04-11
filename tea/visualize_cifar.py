@@ -14,7 +14,7 @@ warnings.simplefilter("ignore", FutureWarning)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # --- Config ---
-num_nodes_default = 4
+num_nodes = 4
 latent_dim = 256
 max_grid_size = 256
 cluster_threshold = 100
@@ -54,7 +54,7 @@ def cluster_prototypes(prototypes, n_clusters=100):
 # === Main ===
 def main():
     print("🧠 Loading TEA model...")
-    model = TEA(num_nodes=num_nodes_default, max_grid_size=max_grid_size, latent_dim=latent_dim)
+    model = TEA(num_nodes=num_nodes, max_grid_size=max_grid_size, latent_dim=latent_dim)
     model.load_state_dict(torch.load(model_path, map_location=device))
     model.to(device)
     model.eval()
