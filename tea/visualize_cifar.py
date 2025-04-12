@@ -14,7 +14,6 @@ warnings.simplefilter("ignore", FutureWarning)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # --- Config ---
-num_nodes = 4
 latent_dim = 256
 max_grid_size = 256
 cluster_threshold = 100
@@ -54,8 +53,18 @@ def cluster_prototypes(prototypes, n_clusters=100):
 # === Main ===
 def main():
     print("🧠 Loading TEA model...")
-    model = TEA(num_nodes=num_nodes, max_grid_size=max_grid_size, latent_dim=latent_dim)
-    model.load_state_dict(torch.load(model_path, map_location=device))
+
+    # === Step 1: Load checkpoint and infer number of saved nodes ===
+    state_dict = torch.load(model_path, map_location=device)
+    node_keys = [k for k in state_dict.keys() if k.startswith("nodes.")]
+    decoder_keys = [k for k in state_dict.keys() if k.startswith("decoders.")]
+    node_indices = set(int(k.split('.')[1]) for k in node_keys)
+    init_nodes = max(node_indices) + 1 if node_keys else 1
+    print(f"📦 Found {init_nodes} saved nodes")
+
+    # === Step 2: Create model with matching size ===
+    model = TEA(init_nodes=init_nodes, max_grid_size=max_grid_size, latent_dim=latent_dim)
+    model.load_state_dict(state_dict)
     model.to(device)
     model.eval()
 

@@ -13,8 +13,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # torch.cuda.manual_seed_all(42)
 
 # === Hyperparameters ===
-epochs = 20
-num_nodes = 4
+epochs = 100
 latent_dim = 256
 max_grid_size = 256
 # loss coefficients
@@ -26,7 +25,7 @@ usage_λ = 0.7
 label_smoothing = 0.1
 
 # === Model ===
-model = TEA(num_nodes=num_nodes, latent_dim=latent_dim).to(device)
+model = TEA(latent_dim=latent_dim, max_grid_size=max_grid_size).to(device)
 optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-4)
 
 # === Data ===
@@ -79,9 +78,9 @@ for epoch in range(1, epochs+1):
 
         recon_losses = [
             F.mse_loss(model.decoders[i](model.nodes[i].last_blended), x)
-            for i in range(model.num_nodes)
+            for i in range(model.node_count)
         ]
-        recon_loss = sum(recon_losses) / model.num_nodes
+        recon_loss = sum(recon_losses) / model.node_count
 
         # Total loss
         loss = (
@@ -123,6 +122,13 @@ for epoch in range(1, epochs+1):
     for i, node in enumerate(model.nodes):
         print(f"Node{i}Tmp: {node.som.temperature.item():.4f}", end=" | ")
     print(f"Duration: {epoch_duration:.2f}s")
+
+    # === Dynamic growth of model ===
+    if model.should_grow() and model.node_count < 8:
+        model.freeze_node(model.nodes[-1])
+        model.grow_node()
+        optimizer.add_param_group({'params': model.nodes[-1].parameters()})
+        optimizer.add_param_group({'params': model.decoders[-1].parameters()})
 
 torch.save(model.state_dict(), "models/model_tea.pth")
 print("✅ Saved to models/model_tea.pth")

@@ -30,16 +30,10 @@ class SoftSOM(nn.Module):
         super().__init__()
         self.num_cells = max_grid_size
         self.input_dim = input_dim
-
-        # Latent space prototypes
         self.prototypes = nn.Parameter(torch.randn(self.num_cells, input_dim))
-
-        # Learnable position embeddings for grid cells
         self.grid_pos = nn.Parameter(torch.randn(self.num_cells, input_dim))
-
-        # Learnable temp (for feature dist) and gating
         self.temp_raw = nn.Parameter(torch.tensor([init_temperature], dtype=torch.float32))
-        self.gate_logits = nn.Parameter(torch.zeros(self.num_cells))  # For soft gating
+        self.gate_logits = nn.Parameter(torch.zeros(self.num_cells))
 
     @property
     def temperature(self):
@@ -47,25 +41,14 @@ class SoftSOM(nn.Module):
 
     def forward(self, x):
         B = x.shape[0]
-
-        # Compute soft gate over grid cells (learns usage pattern)
-        gate = torch.sigmoid(self.gate_logits).unsqueeze(0)  # [1, N]
-        
-        # Blend similarity across both prototype AND positional space
-        d_proto = torch.cdist(x.unsqueeze(1), self.prototypes.unsqueeze(0))  # [B, N]
-        d_pos = torch.cdist(x.unsqueeze(1), self.grid_pos.unsqueeze(0))      # [B, N]
-
-        # Option 1: Weighted sum of both
-        d_total = d_proto + d_pos  # You could weight these differently
-
-        weights = F.softmax(-d_total / self.temperature, dim=-1) * gate  # [B, N]
-
-        # Normalize post-gating
+        gate = torch.sigmoid(self.gate_logits).unsqueeze(0)
+        d_proto = torch.cdist(x.unsqueeze(1), self.prototypes.unsqueeze(0))
+        d_pos = torch.cdist(x.unsqueeze(1), self.grid_pos.unsqueeze(0))
+        d_total = d_proto + d_pos
+        weights = F.softmax(-d_total / self.temperature, dim=-1) * gate
         weights = weights / (weights.sum(dim=-1, keepdim=True) + 1e-8)
-
-        blended = weights @ self.prototypes  # [B, D]
+        blended = weights @ self.prototypes
         return blended, weights
-
 
 # === Node ===
 class Node(nn.Module):
@@ -83,15 +66,17 @@ class Node(nn.Module):
         self.last_blended = topo_z
         return topo_z, weights
 
-
 # === TEA ===
 class TEA(nn.Module):
     def __init__(self, input_channels=3, latent_dim=256,
-                 num_nodes=4, max_grid_size=256, num_heads=4):
+                 init_nodes=1, max_grid_size=256, num_heads=4):
         super().__init__()
-        self.num_nodes = num_nodes
         self.latent_dim = latent_dim
+        self.max_grid_size = max_grid_size
         self.num_heads = num_heads
+        self.node_count = init_nodes
+        self.prev_proto_similarity = None
+        self.just_grew = False
 
         self.shared_encoder = nn.Sequential(
             nn.Conv2d(input_channels, 32, kernel_size=5, stride=2, padding=1),
@@ -106,21 +91,50 @@ class TEA(nn.Module):
             nn.Linear(256 * 8 * 8, latent_dim)
         )
 
-        self.decoders = nn.ModuleList([
-            Decoder(input_dim=latent_dim) for _ in range(num_nodes)
-        ])
-
-        self.nodes = nn.ModuleList([
-            Node(latent_dim, max_grid_size)
-            for _ in range(num_nodes)
-        ])
-
         self.class_embeddings = nn.Parameter(torch.randn(10, latent_dim))
-        self.node_embeddings = nn.Parameter(torch.randn(num_nodes, latent_dim))
+        self.node_embeddings = nn.Parameter(torch.randn(self.node_count, latent_dim))
         self.key_proj = nn.Linear(latent_dim, latent_dim)
         self.query_proj = nn.Linear(latent_dim, latent_dim)
         self.attn_proj = nn.Linear(latent_dim, latent_dim * num_heads)
         self.classifier = nn.Linear(latent_dim * num_heads, 10)
+
+        self.nodes = nn.ModuleList([Node(latent_dim, max_grid_size) for _ in range(self.node_count)])
+        self.decoders = nn.ModuleList([Decoder(input_dim=latent_dim) for _ in range(self.node_count)])
+
+    def should_grow(self):
+        current = self.proto_diversity_loss().item()
+
+        if self.just_grew:
+            self.prev_proto_similarity = current
+            self.just_grew = False
+            return False
+
+        if self.prev_proto_similarity is None:
+            self.prev_proto_similarity = current
+            return False
+
+        should_grow = current > self.prev_proto_similarity
+
+        self.prev_proto_similarity = current
+        return should_grow
+
+    def grow_node(self):
+        print(f"🌱 Growing TEA: Adding Node {self.node_count}")
+        self.node_count += 1
+        device = self.node_embeddings.device
+
+        self.nodes.append(Node(self.latent_dim, self.max_grid_size).to(device))
+        self.decoders.append(Decoder(self.latent_dim).to(device))
+
+        # Expand node embeddings
+        new_embedding = nn.Parameter(torch.randn(1, self.latent_dim).to(device))
+        self.node_embeddings = nn.Parameter(torch.cat([self.node_embeddings, new_embedding], dim=0))
+
+        self.just_grew = True 
+
+    def freeze_node(self, node):
+        for param in node.parameters():
+            param.requires_grad = False
 
     def proto_diversity_loss(self):
         losses = []
@@ -128,24 +142,19 @@ class TEA(nn.Module):
             P = F.normalize(node.som.prototypes, dim=1)
             S = P @ P.T
             S.fill_diagonal_(0)
-
             gate_probs = torch.sigmoid(node.som.gate_logits)
             usage = gate_probs / (gate_probs.sum() + 1e-8)
-
-            # Pairwise usage weights
             usage_weights = usage.unsqueeze(0) * usage.unsqueeze(1)
-
-            # Entropy of gate activations
             gate_dist = gate_probs / (gate_probs.sum() + 1e-8)
             gate_entropy = -(gate_dist * gate_dist.clamp(min=1e-8).log()).sum()
-
             diversity_penalty = (S.pow(2) * usage_weights).sum() / usage_weights.sum()
-            losses.append(gate_entropy * diversity_penalty)  # <- Entropy scaling here
-
+            losses.append(gate_entropy * diversity_penalty)
         return sum(losses) / len(losses)
 
-
     def node_diversity_loss(self):
+        if len(self.nodes) < 2:
+            return torch.tensor(0.0, device=self.node_embeddings.device)
+
         node_reps = []
         for node in self.nodes:
             prototypes = node.som.prototypes
@@ -153,24 +162,17 @@ class TEA(nn.Module):
             weights = gate_probs / (gate_probs.sum() + 1e-8)
             weighted_mean = (weights.unsqueeze(1) * prototypes).sum(dim=0)
             node_reps.append(F.normalize(weighted_mean, dim=0))
-
         node_reps = torch.stack(node_reps, dim=0)
         sim_matrix = node_reps @ node_reps.T
-
         off_diag_mask = ~torch.eye(sim_matrix.size(0), dtype=torch.bool, device=sim_matrix.device)
-        
-        # Don't square it — keep it smooth
         diversity_loss = sim_matrix[off_diag_mask].mean()
-
         return diversity_loss
-
 
     def gate_entropy_loss(self):
         loss = 0.0
         for node in self.nodes:
-            #p = torch.sigmoid(node.som.gate_logits)
             p = F.softmax(node.som.gate_logits, dim=0)
-            p = p / (p.sum() + 1e-8)  # normalize just in case
+            p = p / (p.sum() + 1e-8)
             entropy = -(p * (p + 1e-8).log()).sum()
             loss += entropy
         return loss / len(self.nodes)
@@ -181,35 +183,27 @@ class TEA(nn.Module):
             usage = torch.sigmoid(node.som.gate_logits)
             entropy = -(usage * torch.log(usage + 1e-8)).sum()
             ideal_usage = torch.full_like(usage, 1.0 / usage.size(0))
-
-            # Scale usage penalty by entropy
-            scale = entropy / math.log(usage.numel())  # normalized entropy
+            scale = entropy / math.log(usage.numel())
             loss += scale * F.mse_loss(usage, ideal_usage)
         return loss / len(self.nodes)
-    
+
     def forward(self, x, y=None):
         z0 = self.shared_encoder(x)
-
-        topo_z_list = []
-        for node in self.nodes:
-            topo_z, _ = node(z0)
-            topo_z_list.append(topo_z)
-
+        topo_z_list = [node(z0)[0] for node in self.nodes]
         topo_z_list = [tz.view(tz.size(0), -1) for tz in topo_z_list]
-        topo_stack = torch.stack(topo_z_list, dim=0)
-        topo_stack = topo_stack.permute(1, 0, 2)    
+        topo_stack = torch.stack(topo_z_list, dim=0).permute(1, 0, 2)
 
         if y is not None:
             query = self.query_proj(self.class_embeddings[y])
         else:
             query = self.query_proj(self.class_embeddings.mean(dim=0, keepdim=True)).expand(z0.size(0), -1)
 
-        proj = self.attn_proj(self.node_embeddings).view(self.num_nodes, self.num_heads, self.latent_dim)
+        proj = self.attn_proj(self.node_embeddings).view(self.node_count, self.num_heads, self.latent_dim)
         outputs = []
         for h in range(self.num_heads):
-            keys = proj[:, h]  # [num_nodes, latent_dim]
+            keys = proj[:, h]
             attn_logits = torch.einsum('bd,nd->bn', query, keys)
-            attn_weights = F.softmax(attn_logits, dim=-1)  # [B, num_nodes]
+            attn_weights = F.softmax(attn_logits, dim=-1)
             fused = torch.einsum('bn,bnd->bd', attn_weights, topo_stack)
             outputs.append(fused)
 
