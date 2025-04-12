@@ -13,7 +13,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # torch.cuda.manual_seed_all(42)
 
 # === Hyperparameters ===
-epochs = 100
+epochs = 60
 latent_dim = 256
 max_grid_size = 256
 # loss coefficients
@@ -38,20 +38,20 @@ test_data = datasets.CIFAR10("data", train=False, download=True, transform=trans
 test_loader = DataLoader(test_data, batch_size=128)
 
 # Intensive augments - better generality of model, harder to invert prototypes with decoder
-# gpu_train_aug = T.Compose([
-#     T.RandomCrop(32, padding=4),
-#     T.RandomHorizontalFlip(),
-#     T.ColorJitter(0.2, 0.2, 0.2, 0.1),
-#     T.RandomAffine(degrees=10, translate=(0.1, 0.1)),
-#     T.ToDtype(torch.float32, scale=True)
-# ])
-
-# Simpler augments - less generality of model, easier to invert prototypes with decoder
 gpu_train_aug = T.Compose([
     T.RandomCrop(32, padding=4),
     T.RandomHorizontalFlip(),
+    T.ColorJitter(0.2, 0.2, 0.2, 0.1),
+    T.RandomAffine(degrees=10, translate=(0.1, 0.1)),
     T.ToDtype(torch.float32, scale=True)
 ])
+
+# Simpler augments - less generality of model, easier to invert prototypes with decoder
+# gpu_train_aug = T.Compose([
+#     T.RandomCrop(32, padding=4),
+#     T.RandomHorizontalFlip(),
+#     T.ToDtype(torch.float32, scale=True)
+# ])
 
 # === Training ===
 print(f"🧠 Training TEA Model @ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")

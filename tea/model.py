@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import numpy as np
 import math
 
 # === Decoder ===
@@ -76,6 +77,7 @@ class TEA(nn.Module):
         self.num_heads = num_heads
         self.node_count = init_nodes
         self.prev_proto_similarity = None
+        self.initial_gate_entropy = np.log2(max_grid_size)
         self.just_grew = False
 
         self.shared_encoder = nn.Sequential(
@@ -102,21 +104,27 @@ class TEA(nn.Module):
         self.decoders = nn.ModuleList([Decoder(input_dim=latent_dim) for _ in range(self.node_count)])
 
     def should_grow(self):
-        current = self.proto_diversity_loss().item()
+        current_div = self.proto_diversity_loss().item()
+        current_ent = self.get_avg_gate_entropy()
 
+        # Initialize tracking
         if self.just_grew:
-            self.prev_proto_similarity = current
+            self.prev_proto_similarity = current_div
             self.just_grew = False
             return False
 
         if self.prev_proto_similarity is None:
-            self.prev_proto_similarity = current
+            self.prev_proto_similarity = current_div
             return False
 
-        should_grow = current > self.prev_proto_similarity
+        # Decision rules
+        diversity_rising = current_div > self.prev_proto_similarity
+        entropy_fallen = current_ent < self.initial_gate_entropy * 0.6
+        diversity_too_low = current_div < 0.001  # ~1e-3, empirical collapse zone
 
-        self.prev_proto_similarity = current
-        return should_grow
+        self.prev_proto_similarity = current_div
+
+        return diversity_rising or entropy_fallen or diversity_too_low
 
     def grow_node(self):
         print(f"🌱 Growing TEA: Adding Node {self.node_count}")
@@ -136,6 +144,15 @@ class TEA(nn.Module):
         for param in node.parameters():
             param.requires_grad = False
 
+    def get_avg_gate_entropy(self):
+        entropies = []
+        for node in self.nodes:
+            gate_probs = torch.sigmoid(node.som.gate_logits)
+            gate_probs = gate_probs / (gate_probs.sum() + 1e-8)
+            entropy = -(gate_probs * gate_probs.clamp(min=1e-8).log()).sum()
+            entropies.append(entropy.item())
+        return sum(entropies) / len(entropies)
+    
     def proto_diversity_loss(self):
         losses = []
         for node in self.nodes:
@@ -150,7 +167,7 @@ class TEA(nn.Module):
             diversity_penalty = (S.pow(2) * usage_weights).sum() / usage_weights.sum()
             losses.append(gate_entropy * diversity_penalty)
         return sum(losses) / len(losses)
-
+    
     def node_diversity_loss(self):
         if len(self.nodes) < 2:
             return torch.tensor(0.0, device=self.node_embeddings.device)
