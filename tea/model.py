@@ -27,21 +27,28 @@ class Decoder(nn.Module):
 
 # === SoftSOM ===
 class SoftSOM(nn.Module):
-    def __init__(self, input_dim, max_grid_size=256, init_temperature=0.5):
+    def __init__(self, input_dim, max_grid_size=256, init_temperature=0.95, temp_anneal_rate=0.98):
         super().__init__()
         self.num_cells = max_grid_size
         self.input_dim = input_dim
         self.prototypes = nn.Parameter(torch.randn(self.num_cells, input_dim))
         self.grid_pos = nn.Parameter(torch.randn(self.num_cells, input_dim))
-        self.temp_raw = nn.Parameter(torch.tensor([init_temperature], dtype=torch.float32))
+        self.temp_raw = nn.Parameter(torch.tensor([math.log(init_temperature / (1.0 - init_temperature))], dtype=torch.float32))
         self.gate_logits = nn.Parameter(torch.zeros(self.num_cells))
+        self.anneal_rate = temp_anneal_rate
 
     @property
     def temperature(self):
         return torch.sigmoid(self.temp_raw) * (1.0 - 1e-3) + 1e-3
 
+    def anneal_temp(self):
+        with torch.no_grad():
+            current_temp = self.temperature.item()
+            new_temp = current_temp * self.anneal_rate
+            new_raw = math.log((new_temp - 1e-3) / (1.0 - 1e-3 - new_temp))
+            self.temp_raw.fill_(new_raw)
+
     def forward(self, x):
-        B = x.shape[0]
         gate = torch.sigmoid(self.gate_logits).unsqueeze(0)
         d_proto = torch.cdist(x.unsqueeze(1), self.prototypes.unsqueeze(0))
         d_pos = torch.cdist(x.unsqueeze(1), self.grid_pos.unsqueeze(0))
@@ -59,6 +66,10 @@ class Node(nn.Module):
         self.som = SoftSOM(latent_dim, max_grid_size)
         self.last_input = None
         self.last_blended = None
+        with torch.no_grad():
+            gate_probs = torch.sigmoid(self.som.gate_logits)
+            norm_probs = gate_probs / (gate_probs.sum() + 1e-8)
+            self.initial_gate_entropy = -(norm_probs * norm_probs.clamp(min=1e-8).log()).sum().item()
 
     def forward(self, x):
         z = self.encoder_fc(x)
@@ -76,9 +87,10 @@ class TEA(nn.Module):
         self.max_grid_size = max_grid_size
         self.num_heads = num_heads
         self.node_count = init_nodes
-        self.prev_proto_similarity = None
-        self.initial_gate_entropy = np.log2(max_grid_size)
         self.just_grew = False
+        self.history_window = 10
+        self.div_history = []
+        self.var_history = []
 
         self.shared_encoder = nn.Sequential(
             nn.Conv2d(input_channels, 32, kernel_size=5, stride=2, padding=1),
@@ -104,95 +116,107 @@ class TEA(nn.Module):
         self.decoders = nn.ModuleList([Decoder(input_dim=latent_dim) for _ in range(self.node_count)])
 
     def should_grow(self):
+        node = self.nodes[-1]
         current_div = self.proto_diversity_loss().item()
-        current_ent = self.get_avg_gate_entropy()
+        gate_probs = torch.sigmoid(node.som.gate_logits)
+        norm_probs = gate_probs / (gate_probs.sum() + 1e-8)
+        entropy_now = -(norm_probs * norm_probs.clamp(min=1e-8).log()).sum().item()
+        entropy_start = node.initial_gate_entropy
+        entropy_drop = (entropy_start - entropy_now) / (entropy_start + 1e-8)
 
-        # Initialize tracking
+        current_var = node.last_blended.var(dim=0).mean().item() if node.last_blended is not None else 0.0
+        self.div_history.append(current_div)
+        self.var_history.append(current_var)
+
+        if len(self.div_history) > self.history_window:
+            self.div_history.pop(0)
+            self.var_history.pop(0)
+
+        if len(self.div_history) < self.history_window:
+            print("⏳ Growth check skipped: Not enough history yet.")
+            return False
+
         if self.just_grew:
-            self.prev_proto_similarity = current_div
+            print("🛑 Growth check skipped: Just grew last epoch.")
             self.just_grew = False
             return False
 
-        if self.prev_proto_similarity is None:
-            self.prev_proto_similarity = current_div
-            return False
+        div_delta = max(self.div_history) - min(self.div_history)
+        entropy_shrunk = entropy_drop > 0.05
+        variance_low = current_var < 0.05
+        diversity_stalled = div_delta < 1e-3
+        should = entropy_shrunk and (variance_low or diversity_stalled)
 
-        # Decision rules
-        diversity_rising = current_div > self.prev_proto_similarity
-        entropy_fallen = current_ent < self.initial_gate_entropy * 0.6
-        diversity_too_low = current_div < 0.001  # ~1e-3, empirical collapse zone
+        print(f"📊 Growth Check:")
+        print(f"    ➤ Entropy now: {entropy_now:.4f}, Drop: {entropy_drop:.2%}, Shrunk? {entropy_shrunk}")
+        print(f"    ➤ Diversity delta: {div_delta:.6f}, Stalled? {diversity_stalled}")
+        print(f"    ➤ Variance now: {current_var:.4f}, Low? {variance_low}")
+        print(f"    ➤ Growth Decision: {'✅ Grow' if should else '❌ No Growth'}")
 
-        self.prev_proto_similarity = current_div
-
-        return diversity_rising or entropy_fallen or diversity_too_low
+        return should
 
     def grow_node(self):
         print(f"🌱 Growing TEA: Adding Node {self.node_count}")
         self.node_count += 1
         device = self.node_embeddings.device
 
-        self.nodes.append(Node(self.latent_dim, self.max_grid_size).to(device))
+        new_node = Node(self.latent_dim, self.max_grid_size).to(device)
+        self.nodes.append(new_node)
         self.decoders.append(Decoder(self.latent_dim).to(device))
 
-        # Expand node embeddings
+        with torch.no_grad():
+            init_temp = 0.95
+            raw_val = math.log(init_temp / (1.0 - init_temp))
+            new_node.som.temp_raw.fill_(raw_val)
+
         new_embedding = nn.Parameter(torch.randn(1, self.latent_dim).to(device))
         self.node_embeddings = nn.Parameter(torch.cat([self.node_embeddings, new_embedding], dim=0))
 
-        self.just_grew = True 
+        self.just_grew = True
 
     def freeze_node(self, node):
         for param in node.parameters():
             param.requires_grad = False
 
-    def get_avg_gate_entropy(self):
-        entropies = []
-        for node in self.nodes:
-            gate_probs = torch.sigmoid(node.som.gate_logits)
-            gate_probs = gate_probs / (gate_probs.sum() + 1e-8)
-            entropy = -(gate_probs * gate_probs.clamp(min=1e-8).log()).sum()
-            entropies.append(entropy.item())
-        return sum(entropies) / len(entropies)
-    
-    def proto_diversity_loss(self):
-        losses = []
-        for node in self.nodes:
-            P = F.normalize(node.som.prototypes, dim=1)
-            S = P @ P.T
-            S.fill_diagonal_(0)
-            gate_probs = torch.sigmoid(node.som.gate_logits)
-            usage = gate_probs / (gate_probs.sum() + 1e-8)
-            usage_weights = usage.unsqueeze(0) * usage.unsqueeze(1)
-            gate_dist = gate_probs / (gate_probs.sum() + 1e-8)
-            gate_entropy = -(gate_dist * gate_dist.clamp(min=1e-8).log()).sum()
-            diversity_penalty = (S.pow(2) * usage_weights).sum() / usage_weights.sum()
-            losses.append(gate_entropy * diversity_penalty)
-        return sum(losses) / len(losses)
-    
-    def node_diversity_loss(self):
-        if len(self.nodes) < 2:
-            return torch.tensor(0.0, device=self.node_embeddings.device)
+    def anneal_temp_active_node(self):
+        self.nodes[-1].som.anneal_temp()
 
-        node_reps = []
-        for node in self.nodes:
-            prototypes = node.som.prototypes
-            gate_probs = torch.sigmoid(node.som.gate_logits)
-            weights = gate_probs / (gate_probs.sum() + 1e-8)
-            weighted_mean = (weights.unsqueeze(1) * prototypes).sum(dim=0)
-            node_reps.append(F.normalize(weighted_mean, dim=0))
-        node_reps = torch.stack(node_reps, dim=0)
-        sim_matrix = node_reps @ node_reps.T
-        off_diag_mask = ~torch.eye(sim_matrix.size(0), dtype=torch.bool, device=sim_matrix.device)
-        diversity_loss = sim_matrix[off_diag_mask].mean()
-        return diversity_loss
+    def proto_diversity_loss(self):
+        node = self.nodes[-1]
+        P = F.normalize(node.som.prototypes, dim=1)
+        S = P @ P.T
+        S.fill_diagonal_(0)
+        gate_probs = torch.sigmoid(node.som.gate_logits)
+        usage = gate_probs / (gate_probs.sum() + 1e-8)
+        usage_weights = usage.unsqueeze(0) * usage.unsqueeze(1)
+        gate_entropy = -(usage * usage.clamp(min=1e-8).log()).sum()
+        diversity_penalty = (S.pow(2) * usage_weights).sum() / (usage_weights.sum() + 1e-8)
+        return gate_entropy * diversity_penalty
+
+    def node_diversity_loss(self):
+        if self.node_count <= 1:
+            return torch.tensor(0.0, device=self.nodes[0].som.prototypes.device)
+
+        new_som = self.nodes[-1].som
+        frozen_soms = [node.som for node in self.nodes[:-1]]
+
+        loss = 0.0
+        for old_som in frozen_soms:
+            sim = F.cosine_similarity(
+                new_som.prototypes.unsqueeze(1),
+                old_som.prototypes.unsqueeze(0),
+                dim=-1
+            )
+            loss += sim.abs().mean()
+
+        return loss / len(frozen_soms)
 
     def gate_entropy_loss(self):
-        loss = 0.0
-        for node in self.nodes:
-            p = F.softmax(node.som.gate_logits, dim=0)
-            p = p / (p.sum() + 1e-8)
-            entropy = -(p * (p + 1e-8).log()).sum()
-            loss += entropy
-        return loss / len(self.nodes)
+        node = self.nodes[-1]
+        p = F.softmax(node.som.gate_logits, dim=0)
+        p = p / (p.sum() + 1e-8)
+        entropy = -(p * (p + 1e-8).log()).sum()
+        return entropy
 
     def usage_penalty(self):
         loss = 0.0

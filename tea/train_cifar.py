@@ -13,7 +13,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # torch.cuda.manual_seed_all(42)
 
 # === Hyperparameters ===
-epochs = 60
+epochs = 120
 latent_dim = 256
 max_grid_size = 256
 # loss coefficients
@@ -75,12 +75,7 @@ for epoch in range(1, epochs+1):
         node_div = model.node_diversity_loss()
         gate_entropy = model.gate_entropy_loss()
         usage_penalty = model.usage_penalty()
-
-        recon_losses = [
-            F.mse_loss(model.decoders[i](model.nodes[i].last_blended), x)
-            for i in range(model.node_count)
-        ]
-        recon_loss = sum(recon_losses) / model.node_count
+        recon_loss = F.mse_loss(model.decoders[-1](model.nodes[-1].last_blended), x)
 
         # Total loss
         loss = (
