@@ -124,6 +124,7 @@ for epoch in range(1, epochs+1):
     print(f"Duration: {epoch_duration:.2f}s")
 
     # === Dynamic growth of model ===
+    model.anneal_temp_active_node()
     if model.should_grow() and model.node_count < 8:
         model.freeze_node(model.nodes[-1])
         model.grow_node()
