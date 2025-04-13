@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import numpy as np
 import math
 
 # === Decoder ===
@@ -80,12 +79,10 @@ class Node(nn.Module):
 
 # === CLEAR ===
 class CLEAR(nn.Module):
-    def __init__(self, input_channels=3, latent_dim=256,
-                 init_nodes=1, max_grid_size=256, num_heads=4):
+    def __init__(self, input_channels=3, latent_dim=256, init_nodes=1, max_grid_size=256):
         super().__init__()
         self.latent_dim = latent_dim
         self.max_grid_size = max_grid_size
-        self.num_heads = num_heads
         self.node_count = init_nodes
         self.just_grew = False
         self.history_window = 10
@@ -105,16 +102,40 @@ class CLEAR(nn.Module):
             nn.Linear(256 * 8 * 8, latent_dim)
         )
 
-        self.class_embeddings = nn.Parameter(torch.randn(10, latent_dim))
-        self.node_embeddings = nn.Parameter(torch.randn(self.node_count, latent_dim))
-        self.key_proj = nn.Linear(latent_dim, latent_dim)
         self.query_proj = nn.Linear(latent_dim, latent_dim)
-        self.attn_proj = nn.Linear(latent_dim, latent_dim * num_heads)
-        self.classifier = nn.Linear(latent_dim * num_heads, 10)
+        self.node_embeddings = nn.Parameter(torch.randn(self.node_count, latent_dim))
+        self.attn_proj = nn.Linear(latent_dim, latent_dim)
+        self.classifier = nn.Linear(latent_dim, 10)
 
         self.nodes = nn.ModuleList([Node(latent_dim, max_grid_size) for _ in range(self.node_count)])
         self.decoders = nn.ModuleList([Decoder(input_dim=latent_dim) for _ in range(self.node_count)])
 
+    def forward(self, x, y=None):
+        z0 = self.shared_encoder(x)  # [B, D]
+        
+        # Get [B, D] proto blends from each node
+        topo_z_list = [node(z0)[0].view(z0.size(0), -1) for node in self.nodes]
+        topo_stack = torch.stack(topo_z_list, dim=0).permute(1, 0, 2)  # [B, N, D]
+
+        # Dynamic query from input
+        query = self.query_proj(z0)  # [B, D]
+
+        # Scaled attention using gate priors
+        keys = self.attn_proj(self.node_embeddings)  # [N, D]
+        gate_logits = torch.stack([torch.sigmoid(n.som.gate_logits).mean() for n in self.nodes])
+        key_scaling = gate_logits.unsqueeze(1)  # [N, 1]
+        scaled_keys = keys * key_scaling  # [N, D]
+
+        # Attention weights and fusion
+        attn_logits = torch.einsum("bd,nd->bn", query, scaled_keys)
+        attn_weights = F.softmax(attn_logits, dim=-1)
+        fused = torch.einsum("bn,bnd->bd", attn_weights, topo_stack)
+
+        # Final classifier
+        logits = self.classifier(fused)
+        return logits
+
+    # === Growth, Diversity, Entropy, Usage ===
     def should_grow(self):
         node = self.nodes[-1]
         current_div = self.proto_diversity_loss().item()
@@ -156,7 +177,7 @@ class CLEAR(nn.Module):
         return should
 
     def grow_node(self):
-        print(f"🌱 Growing TEA: Adding Node {self.node_count}")
+        print(f"🌱 Growing CLEAR: Adding Node {self.node_count}")
         self.node_count += 1
         device = self.node_embeddings.device
 
@@ -171,7 +192,6 @@ class CLEAR(nn.Module):
 
         new_embedding = nn.Parameter(torch.randn(1, self.latent_dim).to(device))
         self.node_embeddings = nn.Parameter(torch.cat([self.node_embeddings, new_embedding], dim=0))
-
         self.just_grew = True
 
     def freeze_node(self, node):
@@ -199,7 +219,6 @@ class CLEAR(nn.Module):
 
         new_som = self.nodes[-1].som
         frozen_soms = [node.som for node in self.nodes[:-1]]
-
         loss = 0.0
         for old_som in frozen_soms:
             sim = F.cosine_similarity(
@@ -208,7 +227,6 @@ class CLEAR(nn.Module):
                 dim=-1
             )
             loss += sim.abs().mean()
-
         return loss / len(frozen_soms)
 
     def gate_entropy_loss(self):
@@ -227,27 +245,3 @@ class CLEAR(nn.Module):
             scale = entropy / math.log(usage.numel())
             loss += scale * F.mse_loss(usage, ideal_usage)
         return loss / len(self.nodes)
-
-    def forward(self, x, y=None):
-        z0 = self.shared_encoder(x)
-        topo_z_list = [node(z0)[0] for node in self.nodes]
-        topo_z_list = [tz.view(tz.size(0), -1) for tz in topo_z_list]
-        topo_stack = torch.stack(topo_z_list, dim=0).permute(1, 0, 2)
-
-        if y is not None:
-            query = self.query_proj(self.class_embeddings[y])
-        else:
-            query = self.query_proj(self.class_embeddings.mean(dim=0, keepdim=True)).expand(z0.size(0), -1)
-
-        proj = self.attn_proj(self.node_embeddings).view(self.node_count, self.num_heads, self.latent_dim)
-        outputs = []
-        for h in range(self.num_heads):
-            keys = proj[:, h]
-            attn_logits = torch.einsum('bd,nd->bn', query, keys)
-            attn_weights = F.softmax(attn_logits, dim=-1)
-            fused = torch.einsum('bn,bnd->bd', attn_weights, topo_stack)
-            outputs.append(fused)
-
-        fused_all = torch.cat(outputs, dim=1)
-        logits = self.classifier(fused_all)
-        return logits

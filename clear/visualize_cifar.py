@@ -52,7 +52,7 @@ def cluster_prototypes(prototypes, n_clusters=100):
 
 # === Main ===
 def main():
-    print("🧠 Loading TEA model...")
+    print("🧠 Loading CLEAR model...")
 
     # === Step 1: Load checkpoint and infer number of saved nodes ===
     state_dict = torch.load(model_path, map_location=device)
@@ -63,7 +63,7 @@ def main():
     print(f"📦 Found {init_nodes} saved nodes")
 
     # === Step 2: Create model with matching size ===
-    model = TEA(init_nodes=init_nodes, max_grid_size=max_grid_size, latent_dim=latent_dim)
+    model = CLEAR(init_nodes=init_nodes, max_grid_size=max_grid_size, latent_dim=latent_dim)
     model.load_state_dict(state_dict)
     model.to(device)
     model.eval()

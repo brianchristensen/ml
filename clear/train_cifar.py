@@ -5,7 +5,7 @@ from torchvision import datasets, transforms
 from torchvision.transforms import v2 as T
 import time
 from datetime import datetime
-from model import TEA
+from model import CLEAR
 from dashboard import TrainingDashboard
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -25,7 +25,7 @@ usage_λ = 0.7
 label_smoothing = 0.1
 
 # === Model & Optimizer ===
-model = TEA(latent_dim=latent_dim, max_grid_size=max_grid_size).to(device)
+model = CLEAR(latent_dim=latent_dim, max_grid_size=max_grid_size).to(device)
 optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-4)
 
 # === Data ===
@@ -59,7 +59,7 @@ dashboard.start(start_time)
 dashboard.new_node(node_index=0, epoch=1, acc_at_start=0.0)  # Start with node 0
 
 # === Training ===
-print(f"🧠 Training TEA Model @ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+print(f"🧠 Training CLEAR Model @ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
 for epoch in range(1, epochs + 1):
     epoch_start_time = time.time()
