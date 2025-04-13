@@ -6,7 +6,7 @@ from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 from sklearn.cluster import KMeans
 import matplotlib.pyplot as plt
-from model import TEA
+from model import CLEAR
 import warnings
 
 warnings.simplefilter("ignore", FutureWarning)
@@ -17,7 +17,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 latent_dim = 256
 max_grid_size = 256
 cluster_threshold = 100
-model_path = "models/model_tea.pth"
+model_path = "models/model_clear.pth"
 explain_dir = "explain"
 os.makedirs(explain_dir, exist_ok=True)
 

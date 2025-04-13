@@ -163,8 +163,8 @@ for epoch in range(1, epochs + 1):
         dashboard.new_node(node_index=model.node_count - 1, epoch=epoch, acc_at_start=acc)
 
 # === Save Model
-torch.save(model.state_dict(), "models/model_tea.pth")
-print("\n✅ Saved to models/model_tea.pth")
+torch.save(model.state_dict(), "models/model_clear.pth")
+print("\n✅ Saved to models/model_clear.pth")
 
 # === Evaluation
 model.eval()

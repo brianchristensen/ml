@@ -78,8 +78,8 @@ class Node(nn.Module):
         self.last_blended = topo_z
         return topo_z, weights
 
-# === TEA ===
-class TEA(nn.Module):
+# === CLEAR ===
+class CLEAR(nn.Module):
     def __init__(self, input_channels=3, latent_dim=256,
                  init_nodes=1, max_grid_size=256, num_heads=4):
         super().__init__()
