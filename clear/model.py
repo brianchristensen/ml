@@ -122,12 +122,10 @@ class CLEAR(nn.Module):
 
         # Scaled attention using gate priors
         keys = self.attn_proj(self.node_embeddings)  # [N, D]
-        gate_logits = torch.stack([torch.sigmoid(n.som.gate_logits).mean() for n in self.nodes])
-        key_scaling = gate_logits.unsqueeze(1)  # [N, 1]
-        scaled_keys = keys * key_scaling  # [N, D]
+        gate_usage = torch.tensor([torch.sigmoid(n.som.gate_logits).mean().item() for n in self.nodes], device=keys.device)  # [N]
+        log_gate_prior = torch.log(gate_usage + 1e-6)  # [N]
 
-        # Attention weights and fusion
-        attn_logits = torch.einsum("bd,nd->bn", query, scaled_keys)
+        attn_logits = torch.einsum("bd,nd->bn", query, keys) + log_gate_prior  # [B, N]
         attn_weights = F.softmax(attn_logits, dim=-1)
         fused = torch.einsum("bn,bnd->bd", attn_weights, topo_stack)
 

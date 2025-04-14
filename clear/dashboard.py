@@ -114,7 +114,7 @@ class TrainingDashboard:
         self.console.rule("[bold green]🏁 Final Training Summary")
 
         final_table = Table(show_header=True)
-        final_table.add_column("Final Accuracy", justify="center")
+        final_table.add_column("Test Accuracy", justify="center")
         final_table.add_column("Total Duration", justify="center")
         final_table.add_column("Node Count", justify="center")
 
