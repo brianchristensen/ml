@@ -117,15 +117,24 @@ class CLEAR(nn.Module):
         topo_z_list = [node(z0)[0].view(z0.size(0), -1) for node in self.nodes]
         topo_stack = torch.stack(topo_z_list, dim=0).permute(1, 0, 2)  # [B, N, D]
 
-        # Dynamic query from input
-        query = self.query_proj(z0)  # [B, D]
+        # Compute entropy drops for each node
+        entropy_bias = []
+        for node in self.nodes:
+            gate_probs = torch.sigmoid(node.som.gate_logits)
+            norm_probs = gate_probs / (gate_probs.sum() + 1e-8)
+            entropy_now = -(norm_probs * norm_probs.clamp(min=1e-8).log()).sum().item()
+            drop = node.initial_gate_entropy - entropy_now
+            entropy_bias.append(drop)
+        
+        entropy_bias = torch.tensor(entropy_bias, device=query.device)  # [N]
+        attn_bias = entropy_bias.unsqueeze(0)  # [1, N] to broadcast with [B, N]
 
-        # Scaled attention using gate priors
+        # Attention logits
         keys = self.attn_proj(self.node_embeddings)  # [N, D]
-        gate_usage = torch.tensor([torch.sigmoid(n.som.gate_logits).mean().item() for n in self.nodes], device=keys.device)  # [N]
-        log_gate_prior = torch.log(gate_usage + 1e-6)  # [N]
-
-        attn_logits = torch.einsum("bd,nd->bn", query, keys) + log_gate_prior  # [B, N]
+        keys = F.normalize(keys, dim=1)
+        query = self.query_proj(z0)  # [B, D]
+        query = F.normalize(query, dim=1)
+        attn_logits = torch.einsum("bd,nd->bn", query, keys) + attn_bias  # [B, N]
         attn_weights = F.softmax(attn_logits, dim=-1)
         fused = torch.einsum("bn,bnd->bd", attn_weights, topo_stack)
 

@@ -13,7 +13,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # torch.cuda.manual_seed_all(42)
 
 # === Hyperparameters ===
-epochs = 60
+epochs = 250
 latent_dim = 256
 max_grid_size = 256
 # loss coefficients
