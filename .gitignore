@@ -4,3 +4,4 @@
 *.pth
 *.tar.gz
 *.csv
+.venv/
