@@ -13,16 +13,15 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # torch.cuda.manual_seed_all(42)
 
 # === Hyperparameters ===
-epochs = 250
+epochs = 50
 latent_dim = 256
 max_grid_size = 256
 # loss coefficients
-recon_loss_λ = 1
-proto_div_λ = 4
+recon_loss_λ = 4
+proto_div_λ = 16
 node_div_λ = 0.5
 gate_entropy_λ = 0.1
-usage_λ = 0.7
-label_smoothing = 0.1
+label_smoothing = 0.05
 
 # === Model & Optimizer ===
 model = CLEAR(latent_dim=latent_dim, max_grid_size=max_grid_size).to(device)
@@ -45,7 +44,7 @@ gpu_train_aug = T.Compose([
     T.ToDtype(torch.float32, scale=True)
 ])
 
-# Simpler augments - less generality of model, easier to invert prototypes with decoder
+#Simpler augments
 # gpu_train_aug = T.Compose([
 #     T.RandomCrop(32, padding=4),
 #     T.RandomHorizontalFlip(),
@@ -66,7 +65,7 @@ for epoch in range(1, epochs + 1):
     model.train()
 
     total_loss = total_acc_topo = 0
-    total_proto_div = total_node_div = total_gate_entropy = 0
+    current_proto_div = total_node_div = current_gate_entropy = 0
     total_usage_penalty = total_recon_loss = 0
     total_samples = 0
 
@@ -80,7 +79,6 @@ for epoch in range(1, epochs + 1):
         proto_div = model.proto_diversity_loss()
         node_div = model.node_diversity_loss()
         gate_entropy = model.gate_entropy_loss()
-        usage_penalty = model.usage_penalty()
         recon_loss = F.mse_loss(model.decoders[-1](model.nodes[-1].last_blended), x)
 
         loss = (
@@ -88,7 +86,6 @@ for epoch in range(1, epochs + 1):
             proto_div_λ * proto_div +
             node_div_λ * node_div +
             gate_entropy_λ * gate_entropy +
-            usage_λ * usage_penalty +
             recon_loss_λ * recon_loss
         )
 
@@ -100,67 +97,39 @@ for epoch in range(1, epochs + 1):
             pred_topo = logits.argmax(dim=1)
             total_acc_topo += (pred_topo == y).sum().item()
             total_loss += loss.item()
-            total_proto_div += proto_div.item()
+            current_proto_div = proto_div.item()
             total_node_div += node_div.item()
-            total_gate_entropy += gate_entropy.item()
-            total_usage_penalty += usage_penalty.item()
+            current_gate_entropy = gate_entropy.item()
             total_recon_loss += recon_loss.item()
             total_samples += y.size(0)
 
-    # === Compute Metrics
+    # === Log to Dashboard
     epoch_duration = time.time() - epoch_start_time
     acc = total_acc_topo / total_samples
     loss_avg = total_loss / len(train_loader)
-    recon = total_recon_loss
-    usage = total_usage_penalty
-    proto_div = total_proto_div
-    node_div = total_node_div
-
-    # === Growth Info
     node = model.nodes[-1]
-    current_div = proto_div
-    gate_probs = torch.sigmoid(node.som.gate_logits)
-    norm_probs = gate_probs / (gate_probs.sum() + 1e-8)
-    entropy_now = -(norm_probs * norm_probs.clamp(min=1e-8).log()).sum().item()
-    entropy_start = node.initial_gate_entropy
-    entropy_drop = (entropy_start - entropy_now) / (entropy_start + 1e-8)
-
-    current_var = node.last_blended.var(dim=0).mean().item() if node.last_blended is not None else 0.0
-    model.div_history.append(current_div)
-    model.var_history.append(current_var)
-    if len(model.div_history) > model.history_window:
-        model.div_history.pop(0)
-        model.var_history.pop(0)
-
-    div_delta = max(model.div_history) - min(model.div_history) if model.div_history else 0.0
-    entropy_shrunk = entropy_drop > 0.05
-    variance_low = current_var < 0.05
-    diversity_stalled = div_delta < 1e-3
-    should_grow = entropy_shrunk and (variance_low or diversity_stalled)
-
-    # === Log to Dashboard
+    attn_entropy = -(node.last_weights * (node.last_weights + 1e-8).log()).sum(dim=-1).mean()
     dashboard.log_epoch(epoch, acc=acc, loss=loss_avg)
     dashboard.update_node_metrics(
         node_idx=model.node_count - 1,
         acc=acc,
-        entropy=entropy_now,
-        entropy_init=entropy_start,
-        proto_div=proto_div,
-        recon=recon,
-        usage=usage,
-        variance=current_var,
-        temp=node.som.temperature.item()
+        proto_div=current_proto_div,
+        node_div=total_node_div,
+        recon=total_recon_loss,
+        temp=node.som.temperature.item(),
+        gate_entropy=current_gate_entropy
     )
     dashboard.print_dashboard()
 
     # === Growth Step
     model.anneal_temp_active_node()
-    if should_grow and model.node_count < 8:
+    if model.should_grow():
         model.freeze_node(model.nodes[-1])
         model.grow_node()
         optimizer.add_param_group({'params': model.nodes[-1].parameters()})
         optimizer.add_param_group({'params': model.decoders[-1].parameters()})
         dashboard.new_node(node_index=model.node_count - 1, epoch=epoch, acc_at_start=acc)
+    model.log_attn_weights()
 
 # === Save Model
 torch.save(model.state_dict(), "models/model_clear.pth")

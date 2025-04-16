@@ -1,7 +1,61 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import numpy as np
 import math
+
+# === Encoder ===
+class ResBlock(nn.Module):
+    def __init__(self, in_channels, out_channels, downsample=False):
+        super().__init__()
+        stride = 2 if downsample else 1
+        self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=stride, padding=1)
+        self.bn1 = nn.BatchNorm2d(out_channels)
+        self.relu = nn.ReLU(inplace=True)
+        self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1)
+        self.bn2 = nn.BatchNorm2d(out_channels)
+
+        self.skip = nn.Sequential()
+        if downsample or in_channels != out_channels:
+            self.skip = nn.Sequential(
+                nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=stride),
+                nn.BatchNorm2d(out_channels)
+            )
+
+    def forward(self, x):
+        identity = self.skip(x)
+        out = self.conv1(x)
+        out = self.bn1(out)
+        out = self.relu(out)
+
+        out = self.conv2(out)
+        out = self.bn2(out)
+        out += identity
+        out = self.relu(out)
+        return out
+
+
+class SharedEncoder(nn.Module):
+    def __init__(self, input_channels=3, latent_dim=256):
+        super().__init__()
+        self.encoder = nn.Sequential(
+            nn.Conv2d(input_channels, 64, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True),
+
+            ResBlock(64, 64),
+            ResBlock(64, 128, downsample=True),
+            ResBlock(128, 128),
+            ResBlock(128, 256, downsample=True),
+            ResBlock(256, 256),
+
+            nn.AdaptiveAvgPool2d((1, 1)),
+            nn.Flatten(),
+            nn.Linear(256, latent_dim)
+        )
+
+    def forward(self, x):
+        return self.encoder(x)
 
 # === Decoder ===
 class Decoder(nn.Module):
@@ -63,8 +117,10 @@ class Node(nn.Module):
         super().__init__()
         self.encoder_fc = nn.Linear(latent_dim, latent_dim)
         self.som = SoftSOM(latent_dim, max_grid_size)
-        self.last_input = None
         self.last_blended = None
+        self.last_weights = None
+        self.proto_div_history = []
+
         with torch.no_grad():
             gate_probs = torch.sigmoid(self.som.gate_logits)
             norm_probs = gate_probs / (gate_probs.sum() + 1e-8)
@@ -73,7 +129,7 @@ class Node(nn.Module):
     def forward(self, x):
         z = self.encoder_fc(x)
         topo_z, weights = self.som(z)
-        self.last_input = z
+        self.last_weights = weights.detach()
         self.last_blended = topo_z
         return topo_z, weights
 
@@ -85,26 +141,13 @@ class CLEAR(nn.Module):
         self.max_grid_size = max_grid_size
         self.node_count = init_nodes
         self.just_grew = False
-        self.history_window = 10
-        self.div_history = []
-        self.var_history = []
 
-        self.shared_encoder = nn.Sequential(
-            nn.Conv2d(input_channels, 32, kernel_size=5, stride=2, padding=1),
-            nn.ReLU(),
-            nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1),
-            nn.ReLU(),
-            nn.Conv2d(64, 128, kernel_size=3, stride=1, padding=1),
-            nn.ReLU(),
-            nn.Conv2d(128, 256, kernel_size=3, stride=1, padding=1),
-            nn.ReLU(),
-            nn.Flatten(),
-            nn.Linear(256 * 8 * 8, latent_dim)
-        )
+        self.shared_encoder = SharedEncoder(input_channels=input_channels, latent_dim=latent_dim)
 
         self.query_proj = nn.Linear(latent_dim, latent_dim)
         self.node_embeddings = nn.Parameter(torch.randn(self.node_count, latent_dim))
         self.attn_proj = nn.Linear(latent_dim, latent_dim)
+        self.attn_weights = None
         self.classifier = nn.Linear(latent_dim, 10)
 
         self.nodes = nn.ModuleList([Node(latent_dim, max_grid_size) for _ in range(self.node_count)])
@@ -122,21 +165,23 @@ class CLEAR(nn.Module):
         for node in self.nodes:
             gate_probs = torch.sigmoid(node.som.gate_logits)
             norm_probs = gate_probs / (gate_probs.sum() + 1e-8)
-            entropy_now = -(norm_probs * norm_probs.clamp(min=1e-8).log()).sum().item()
-            drop = node.initial_gate_entropy - entropy_now
+            
+            # Use entropy as differentiable tensor
+            entropy_now = -(norm_probs * (norm_probs + 1e-8).log()).sum()
+            # Normalize drop against initial, make sure it's a tensor
+            drop = (node.initial_gate_entropy - entropy_now) / (node.initial_gate_entropy + 1e-8)
             entropy_bias.append(drop)
-        
-        entropy_bias = torch.tensor(entropy_bias, device=query.device)  # [N]
-        attn_bias = entropy_bias.unsqueeze(0)  # [1, N] to broadcast with [B, N]
 
-        # Attention logits
+        entropy_bias = torch.stack(entropy_bias)
+        
         keys = self.attn_proj(self.node_embeddings)  # [N, D]
         keys = F.normalize(keys, dim=1)
         query = self.query_proj(z0)  # [B, D]
         query = F.normalize(query, dim=1)
-        attn_logits = torch.einsum("bd,nd->bn", query, keys) + attn_bias  # [B, N]
-        attn_weights = F.softmax(attn_logits, dim=-1)
-        fused = torch.einsum("bn,bnd->bd", attn_weights, topo_stack)
+
+        attn_logits = torch.einsum("bd,nd->bn", query, keys) + entropy_bias.unsqueeze(0)  # [B, N]
+        self.attn_weights = F.softmax(attn_logits, dim=-1)
+        fused = torch.einsum("bn,bnd->bd", self.attn_weights, topo_stack)
 
         # Final classifier
         logits = self.classifier(fused)
@@ -145,43 +190,27 @@ class CLEAR(nn.Module):
     # === Growth, Diversity, Entropy, Usage ===
     def should_grow(self):
         node = self.nodes[-1]
-        current_div = self.proto_diversity_loss().item()
-        gate_probs = torch.sigmoid(node.som.gate_logits)
-        norm_probs = gate_probs / (gate_probs.sum() + 1e-8)
-        entropy_now = -(norm_probs * norm_probs.clamp(min=1e-8).log()).sum().item()
-        entropy_start = node.initial_gate_entropy
-        entropy_drop = (entropy_start - entropy_now) / (entropy_start + 1e-8)
+        gate_entropy = self.gate_entropy_loss().item()
+        proto_div = self.proto_diversity_loss().item()
+        semantic_ratio = proto_div / (gate_entropy + 1e-8)
 
-        current_var = node.last_blended.var(dim=0).mean().item() if node.last_blended is not None else 0.0
-        self.div_history.append(current_div)
-        self.var_history.append(current_var)
+        node.proto_div_history.append(semantic_ratio)
+        if len(node.proto_div_history) > 5:
+            node.proto_div_history.pop(0)
 
-        if len(self.div_history) > self.history_window:
-            self.div_history.pop(0)
-            self.var_history.pop(0)
-
-        if len(self.div_history) < self.history_window:
-            print("⏳ Growth check skipped: Not enough history yet.")
+        if len(node.proto_div_history) < 2:
+            print("📊 Growth Check: Not enough history, skipping trend check.")
             return False
 
-        if self.just_grew:
-            print("🛑 Growth check skipped: Just grew last epoch.")
-            self.just_grew = False
-            return False
-
-        div_delta = max(self.div_history) - min(self.div_history)
-        entropy_shrunk = entropy_drop > 0.05
-        variance_low = current_var < 0.05
-        diversity_stalled = div_delta < 1e-3
-        should = entropy_shrunk and (variance_low or diversity_stalled)
+        recent_deltas = np.diff(node.proto_div_history)
+        trend = np.mean(recent_deltas[-2:])
+        trend_up = trend > 0
 
         print(f"📊 Growth Check:")
-        print(f"    ➤ Entropy now: {entropy_now:.4f}, Drop: {entropy_drop:.2%}, Shrunk? {entropy_shrunk}")
-        print(f"    ➤ Diversity delta: {div_delta:.6f}, Stalled? {diversity_stalled}")
-        print(f"    ➤ Variance now: {current_var:.4f}, Low? {variance_low}")
-        print(f"    ➤ Growth Decision: {'✅ Grow' if should else '❌ No Growth'}")
+        print(f"    ➤ Diversity: {proto_div:.6f}, Entropy: {gate_entropy:.4f}, Ratio: {semantic_ratio}")
+        print(f"    ➤ Trend: {trend}, Trending Up? {trend_up}")
 
-        return should
+        return trend_up
 
     def grow_node(self):
         print(f"🌱 Growing CLEAR: Adding Node {self.node_count}")
@@ -199,6 +228,7 @@ class CLEAR(nn.Module):
 
         new_embedding = nn.Parameter(torch.randn(1, self.latent_dim).to(device))
         self.node_embeddings = nn.Parameter(torch.cat([self.node_embeddings, new_embedding], dim=0))
+
         self.just_grew = True
 
     def freeze_node(self, node):
@@ -213,14 +243,10 @@ class CLEAR(nn.Module):
         P = F.normalize(node.som.prototypes, dim=1)
         S = P @ P.T
         S.fill_diagonal_(0)
-        gate_probs = torch.sigmoid(node.som.gate_logits)
-        usage = gate_probs / (gate_probs.sum() + 1e-8)
-        usage_weights = usage.unsqueeze(0) * usage.unsqueeze(1)
-        gate_entropy = -(usage * usage.clamp(min=1e-8).log()).sum()
-        diversity_penalty = (S.pow(2) * usage_weights).sum() / (usage_weights.sum() + 1e-8)
-        return gate_entropy * diversity_penalty
+        diversity = S.pow(2).mean()
+        return diversity
 
-    def node_diversity_loss(self):
+    def node_diversity_loss(self, tau=0.3):
         if self.node_count <= 1:
             return torch.tensor(0.0, device=self.nodes[0].som.prototypes.device)
 
@@ -229,11 +255,14 @@ class CLEAR(nn.Module):
         loss = 0.0
         for old_som in frozen_soms:
             sim = F.cosine_similarity(
-                new_som.prototypes.unsqueeze(1),
-                old_som.prototypes.unsqueeze(0),
-                dim=-1
-            )
-            loss += sim.abs().mean()
+                new_som.prototypes.unsqueeze(1),  # [P_new, 1, D]
+                old_som.prototypes.unsqueeze(0),  # [1, P_old, D]
+                dim=-1  # compare along feature dim
+            )  # → [P_new, P_old]
+            
+            penalty = F.relu(sim - tau).mean()
+            loss += penalty
+
         return loss / len(frozen_soms)
 
     def gate_entropy_loss(self):
@@ -243,12 +272,6 @@ class CLEAR(nn.Module):
         entropy = -(p * (p + 1e-8).log()).sum()
         return entropy
 
-    def usage_penalty(self):
-        loss = 0.0
-        for node in self.nodes:
-            usage = torch.sigmoid(node.som.gate_logits)
-            entropy = -(usage * torch.log(usage + 1e-8)).sum()
-            ideal_usage = torch.full_like(usage, 1.0 / usage.size(0))
-            scale = entropy / math.log(usage.numel())
-            loss += scale * F.mse_loss(usage, ideal_usage)
-        return loss / len(self.nodes)
+    def log_attn_weights(self):
+        mean_attn = self.attn_weights.mean(dim=0)  # [N]
+        print(f"📡 Mean Attention per Node: {[f'{w.item():.3f}' for w in mean_attn]}")

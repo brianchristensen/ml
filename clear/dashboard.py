@@ -20,8 +20,7 @@ class TrainingDashboard:
             "Start Epoch": epoch,
             "Start Acc": acc_at_start,
             "Current Acc": acc_at_start,
-            "Gate Entropy Init": None,
-            "Gate Entropy Now": None,
+            "Gate Entropy": None,
             "ProtoDiv": None,
             "Recon": None,
             "Usage": None,
@@ -29,22 +28,21 @@ class TrainingDashboard:
             "Temp": None
         })
 
-    def update_node_metrics(self, node_idx, acc, entropy, entropy_init, proto_div, recon, usage, variance, temp):
+    def update_node_metrics(self, node_idx, acc, gate_entropy, proto_div, recon, temp, node_div=None):
         node = self.node_snapshots[node_idx]
         node["Current Acc"] = acc
-        node["Gate Entropy Now"] = entropy
-        node["Gate Entropy Init"] = entropy_init if node["Gate Entropy Init"] is None else node["Gate Entropy Init"]
         node["ProtoDiv"] = proto_div
+        node["NodeDiv"] = node_div
         node["Recon"] = recon
-        node["Usage"] = usage
-        node["Variance"] = variance
         node["Temp"] = temp
-
+        node["Gate Entropy"] = gate_entropy
+            
     def log_epoch(self, epoch, acc, loss):
         self.global_history.append({
             "Epoch": epoch,
             "Accuracy": acc,
             "Loss": loss,
+            "Timestamp": time.time()
         })
 
     def print_dashboard(self):
@@ -53,12 +51,29 @@ class TrainingDashboard:
         latest = self.global_history[-1]
         prev = self.global_history[-2] if len(self.global_history) > 1 else latest
         acc_now = latest["Accuracy"]
-        acc_prev = prev["Accuracy"]
         loss_now = latest["Loss"]
 
+        window = 10  # Rolling window size
         total_epochs = len(self.global_history)
-        avg_acc_delta = (acc_now - self.global_history[0]["Accuracy"]) / max(1, total_epochs - 1)
-        avg_time = (time.time() - self.start_time) / total_epochs
+
+        # === Moving Avg Accuracy Delta ===
+        if total_epochs >= window:
+            acc_window = [entry["Accuracy"] for entry in self.global_history[-window:]]
+            acc_change = acc_window[-1] - acc_window[0]
+            avg_acc_delta = acc_change / (window - 1)
+        else:
+            acc_window = [entry["Accuracy"] for entry in self.global_history]
+            acc_change = acc_window[-1] - acc_window[0]
+            avg_acc_delta = acc_change / max(1, len(acc_window) - 1)
+
+        # === Moving Avg Time per Epoch ===
+        if total_epochs >= window:
+            recent_times = [self.global_history[i]["Timestamp"] for i in range(-window, 0)]
+            time_deltas = [recent_times[i+1] - recent_times[i] for i in range(window - 1)]
+            avg_time = sum(time_deltas) / len(time_deltas)
+        else:
+            avg_time = (time.time() - self.start_time) / total_epochs
+
 
         global_table = Table(title="🌍 Global Training Summary")
         global_table.add_column("Epoch")
@@ -80,7 +95,7 @@ class TrainingDashboard:
         # === Per Node Summary ===
         node_table = Table(title="🧩 Node Snapshots")
         for col in ["Node", "Start Epoch", "Start Acc", "Current Acc", "Δ Acc", "Temp",
-                    "Gate Entropy Δ", "ProtoDiv", "Recon", "Usage", "Variance"]:
+                    "Gate Entropy", "ProtoDiv", "NodeDiv", "Recon"]:
             node_table.add_column(col)
 
         for node in self.node_snapshots:
@@ -89,23 +104,17 @@ class TrainingDashboard:
             acc_delta = acc_now - acc_start
             acc_color = "green" if acc_delta > 0 else "red"
 
-            entropy_delta = None
-            if node["Gate Entropy Now"] is not None and node["Gate Entropy Init"] is not None:
-                entropy_delta = node["Gate Entropy Now"] - node["Gate Entropy Init"]
-            entropy_color = "green" if entropy_delta and entropy_delta < 0 else "red"
-
             node_table.add_row(
                 str(node["Node"]),
                 str(node["Start Epoch"]),
                 f"{acc_start:.2%}",
                 f"{acc_now:.2%}",
                 Text(f"{acc_delta:+.2%}", style=acc_color),
-                f"{node['Temp']:.3f}" if node['Temp'] else "-",
-                Text(f"{entropy_delta:+.2f}" if entropy_delta else "-", style=entropy_color if entropy_delta else ""),
-                f"{node['ProtoDiv']:.4f}" if node['ProtoDiv'] else "-",
+                f"{node['Temp']:.4f}" if node['Temp'] else "-",
+                f"{node['Gate Entropy']:.4f}" if node['Gate Entropy'] else "-",
+                f"{node['ProtoDiv']:.7f}" if node['ProtoDiv'] else "-",
+                f"{node.get('NodeDiv', '-'): .4f}" if node.get("NodeDiv") else "-",
                 f"{node['Recon']:.4f}" if node['Recon'] else "-",
-                f"{node['Usage']:.2f}" if node['Usage'] else "-",
-                f"{node['Variance']:.4f}" if node['Variance'] else "-"
             )
 
         self.console.print(node_table)
