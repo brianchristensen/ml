@@ -34,7 +34,6 @@ class ResBlock(nn.Module):
         out = self.relu(out)
         return out
 
-
 class SharedEncoder(nn.Module):
     def __init__(self, input_channels=3, latent_dim=256):
         super().__init__()
@@ -117,8 +116,6 @@ class Node(nn.Module):
         super().__init__()
         self.encoder_fc = nn.Linear(latent_dim, latent_dim)
         self.som = SoftSOM(latent_dim, max_grid_size)
-        self.last_blended = None
-        self.last_weights = None
         self.proto_div_history = []
 
         with torch.no_grad():
@@ -129,14 +126,14 @@ class Node(nn.Module):
     def forward(self, x):
         z = self.encoder_fc(x)
         topo_z, weights = self.som(z)
-        self.last_weights = weights.detach()
-        self.last_blended = topo_z
+        topo_z = topo_z.squeeze(1)
         return topo_z, weights
 
 # === CLEAR ===
 class CLEAR(nn.Module):
     def __init__(self, input_channels=3, latent_dim=256, init_nodes=1, max_grid_size=256):
         super().__init__()
+        self.input_channels = input_channels
         self.latent_dim = latent_dim
         self.max_grid_size = max_grid_size
         self.node_count = init_nodes
@@ -144,58 +141,48 @@ class CLEAR(nn.Module):
 
         self.shared_encoder = SharedEncoder(input_channels=input_channels, latent_dim=latent_dim)
 
+        self.alpha_param = nn.Parameter(torch.tensor(0.15))
+        self.memory_bank = nn.Parameter(torch.empty(0, self.latent_dim), requires_grad=False)  # initially empty
         self.query_proj = nn.Linear(latent_dim, latent_dim)
         self.node_embeddings = nn.Parameter(torch.randn(self.node_count, latent_dim))
-        self.attn_proj = nn.Linear(latent_dim, latent_dim)
         self.attn_weights = None
-        self.classifier = nn.Linear(latent_dim, 10)
 
         self.nodes = nn.ModuleList([Node(latent_dim, max_grid_size) for _ in range(self.node_count)])
         self.decoders = nn.ModuleList([Decoder(input_dim=latent_dim) for _ in range(self.node_count)])
 
+        #task specific for cifar/classification head
+        self.classifier = nn.Linear(latent_dim, 10)  
+
     def forward(self, x, y=None):
         z0 = self.shared_encoder(x)  # [B, D]
-        
-        # Get [B, D] proto blends from each node
-        topo_z_list = [node(z0)[0].view(z0.size(0), -1) for node in self.nodes]
-        topo_stack = torch.stack(topo_z_list, dim=0).permute(1, 0, 2)  # [B, N, D]
 
-        # Compute entropy drops for each node
-        entropy_bias = []
-        for node in self.nodes:
-            gate_probs = torch.sigmoid(node.som.gate_logits)
-            norm_probs = gate_probs / (gate_probs.sum() + 1e-8)
-            
-            # Use entropy as differentiable tensor
-            entropy_now = -(norm_probs * (norm_probs + 1e-8).log()).sum()
-            # Normalize drop against initial, make sure it's a tensor
-            drop = (node.initial_gate_entropy - entropy_now) / (node.initial_gate_entropy + 1e-8)
-            entropy_bias.append(drop)
+        if self.memory_bank is not None and self.memory_bank.size(0) > 0:
+            query = self.query_proj(z0)  # [B, D]
+            query = F.normalize(query, dim=-1)
+            memory_keys = F.normalize(self.memory_bank, dim=-1)  # [P, D]
 
-        entropy_bias = torch.stack(entropy_bias)
-        
-        keys = self.attn_proj(self.node_embeddings)  # [N, D]
-        keys = F.normalize(keys, dim=1)
-        query = self.query_proj(z0)  # [B, D]
-        query = F.normalize(query, dim=1)
+            attn_weights = torch.softmax(query @ memory_keys.T, dim=-1)  # [B, P]
+            memory_output = attn_weights @ self.memory_bank  # [B, D]
 
-        attn_logits = torch.einsum("bd,nd->bn", query, keys) + entropy_bias.unsqueeze(0)  # [B, N]
-        self.attn_weights = F.softmax(attn_logits, dim=-1)
-        fused = torch.einsum("bn,bnd->bd", self.attn_weights, topo_stack)
+            z_aug = z0 + self.alpha_param * memory_output
+        else:
+            z_aug = z0
 
-        # Final classifier
-        logits = self.classifier(fused)
-        return logits
+        topo_z, _ = self.nodes[-1](z_aug)
+        recon = self.decoders[-1](topo_z)
+        logits = self.classifier(topo_z)
+        return logits, recon
 
     # === Growth, Diversity, Entropy, Usage ===
     def should_grow(self):
         node = self.nodes[-1]
+        window_size = 8
         gate_entropy = self.gate_entropy_loss().item()
-        proto_div = self.proto_diversity_loss().item()
+        proto_div = self.proto_similarity_loss().item()
         semantic_ratio = proto_div / (gate_entropy + 1e-8)
 
         node.proto_div_history.append(semantic_ratio)
-        if len(node.proto_div_history) > 5:
+        if len(node.proto_div_history) > window_size:
             node.proto_div_history.pop(0)
 
         if len(node.proto_div_history) < 2:
@@ -203,7 +190,7 @@ class CLEAR(nn.Module):
             return False
 
         recent_deltas = np.diff(node.proto_div_history)
-        trend = np.mean(recent_deltas[-2:])
+        trend = np.mean(recent_deltas)
         trend_up = trend > 0
 
         print(f"📊 Growth Check:")
@@ -216,6 +203,14 @@ class CLEAR(nn.Module):
         print(f"🌱 Growing CLEAR: Adding Node {self.node_count}")
         self.node_count += 1
         device = self.node_embeddings.device
+
+        self.memory_bank = nn.Parameter(
+            torch.cat([
+                self.memory_bank,
+                self.nodes[-1].som.prototypes.detach().clone()
+            ], dim=0),
+            requires_grad=False
+        )
 
         new_node = Node(self.latent_dim, self.max_grid_size).to(device)
         self.nodes.append(new_node)
@@ -238,7 +233,7 @@ class CLEAR(nn.Module):
     def anneal_temp_active_node(self):
         self.nodes[-1].som.anneal_temp()
 
-    def proto_diversity_loss(self):
+    def proto_similarity_loss(self):
         node = self.nodes[-1]
         P = F.normalize(node.som.prototypes, dim=1)
         S = P @ P.T
@@ -246,24 +241,24 @@ class CLEAR(nn.Module):
         diversity = S.pow(2).mean()
         return diversity
 
-    def node_diversity_loss(self, tau=0.3):
-        if self.node_count <= 1:
+    def node_similarity_loss(self, sample_size=128):
+        if self.memory_bank is None or self.memory_bank.size(0) == 0:
             return torch.tensor(0.0, device=self.nodes[0].som.prototypes.device)
 
         new_som = self.nodes[-1].som
-        frozen_soms = [node.som for node in self.nodes[:-1]]
-        loss = 0.0
-        for old_som in frozen_soms:
-            sim = F.cosine_similarity(
-                new_som.prototypes.unsqueeze(1),  # [P_new, 1, D]
-                old_som.prototypes.unsqueeze(0),  # [1, P_old, D]
-                dim=-1  # compare along feature dim
-            )  # → [P_new, P_old]
-            
-            penalty = F.relu(sim - tau).mean()
-            loss += penalty
+        P_new = F.normalize(new_som.prototypes, dim=1)
+        P_mem = F.normalize(self.memory_bank, dim=1)
 
-        return loss / len(frozen_soms)
+        if sample_size < P_mem.size(0):
+            idx = torch.randperm(P_mem.size(0))[:sample_size]
+            P_mem = P_mem[idx]
+
+        sim = F.cosine_similarity(
+            P_new.unsqueeze(1),  # [P_new, 1, D]
+            P_mem.unsqueeze(0),  # [1, P_mem, D]
+            dim=-1
+        )
+        return sim.abs().mean()
 
     def gate_entropy_loss(self):
         node = self.nodes[-1]
@@ -272,6 +267,9 @@ class CLEAR(nn.Module):
         entropy = -(p * (p + 1e-8).log()).sum()
         return entropy
 
-    def log_attn_weights(self):
-        mean_attn = self.attn_weights.mean(dim=0)  # [N]
-        print(f"📡 Mean Attention per Node: {[f'{w.item():.3f}' for w in mean_attn]}")
+    def log_epoch_info(self):
+        print("")
+        # for i, node in enumerate(self.nodes):
+        #     gate_probs = torch.softmax(node.som.gate_logits, dim=0)
+        #     entropy = -(gate_probs * gate_probs.clamp(min=1e-8).log()).sum().item()
+        #     print(f"gate_entropy/node_{i}: {entropy}")

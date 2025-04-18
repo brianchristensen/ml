@@ -1,11 +1,12 @@
 import os
 import torch
-import numpy as np
+import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 from sklearn.cluster import KMeans
 import matplotlib.pyplot as plt
+import numpy as np
 from model import CLEAR
 import warnings
 
@@ -64,6 +65,11 @@ def main():
 
     # === Step 2: Create model with matching size ===
     model = CLEAR(init_nodes=init_nodes, max_grid_size=max_grid_size, latent_dim=latent_dim)
+
+    if "memory_bank" in state_dict:
+        memory_bank_data = state_dict["memory_bank"]
+        model.memory_bank = nn.Parameter(memory_bank_data.clone(), requires_grad=False)
+
     model.load_state_dict(state_dict)
     model.to(device)
     model.eval()
@@ -92,25 +98,6 @@ def main():
                 print(f"🧩 Decoding {proto_count} active prototypes...")
                 decoded = decoder(active_protos)
                 save_visual_grid(decoded, filename=f"node{i}_prototypes.png", title=f"Node {i} Prototypes")
-
-    print("\n🎨 Decoding blended SOM inputs from real images...")
-    transform = transforms.ToTensor()
-    test_set = datasets.CIFAR10("data", train=False, download=True, transform=transform)
-    test_loader = DataLoader(test_set, batch_size=8, shuffle=True)
-    x_sample, _ = next(iter(test_loader))
-    x_sample = x_sample.to(device)
-
-    with torch.no_grad():
-        z0 = model.shared_encoder(x_sample)
-
-        for i, node in enumerate(model.nodes):
-            decoder = model.decoders[i]
-            _ = node(z0)
-            decoded = decoder(node.last_blended)
-
-            save_visual_grid(decoded, filename=f"node{i}_blended_recons.png", title=f"Node {i} Blended Reconstructions")
-
-        save_visual_grid(x_sample, filename="original_inputs.png", title="Original Input Samples")
 
 if __name__ == "__main__":
     main()

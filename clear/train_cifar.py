@@ -13,14 +13,14 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # torch.cuda.manual_seed_all(42)
 
 # === Hyperparameters ===
-epochs = 50
+epochs = 60
 latent_dim = 256
 max_grid_size = 256
 # loss coefficients
-recon_loss_λ = 4
-proto_div_λ = 16
-node_div_λ = 0.5
-gate_entropy_λ = 0.1
+recon_loss_λ = 20
+proto_sim_λ = 4
+node_sim_λ = 0
+gate_entropy_λ = 0.05
 label_smoothing = 0.05
 
 # === Model & Optimizer ===
@@ -64,27 +64,27 @@ for epoch in range(1, epochs + 1):
     epoch_start_time = time.time()
     model.train()
 
-    total_loss = total_acc_topo = 0
-    current_proto_div = total_node_div = current_gate_entropy = 0
+    total_loss = total_acc = 0
+    current_proto_sim = current_node_sim = current_gate_entropy = 0
     total_usage_penalty = total_recon_loss = 0
     total_samples = 0
 
     for x, y in train_loader:
         x, y = x.to(device), y.to(device)
         x_aug = gpu_train_aug(x)
-        logits = model(x_aug)
+        logits, recon = model(x_aug)
 
         # Losses
         loss_cls = F.cross_entropy(logits, y, label_smoothing=label_smoothing)
-        proto_div = model.proto_diversity_loss()
-        node_div = model.node_diversity_loss()
+        proto_sim = model.proto_similarity_loss()
+        node_sim = model.node_similarity_loss()
         gate_entropy = model.gate_entropy_loss()
-        recon_loss = F.mse_loss(model.decoders[-1](model.nodes[-1].last_blended), x)
+        recon_loss = F.mse_loss(recon, x)
 
         loss = (
             loss_cls +
-            proto_div_λ * proto_div +
-            node_div_λ * node_div +
+            proto_sim_λ * proto_sim +
+            node_sim_λ * node_sim +
             gate_entropy_λ * gate_entropy +
             recon_loss_λ * recon_loss
         )
@@ -94,27 +94,26 @@ for epoch in range(1, epochs + 1):
         optimizer.step()
 
         with torch.no_grad():
-            pred_topo = logits.argmax(dim=1)
-            total_acc_topo += (pred_topo == y).sum().item()
+            pred = logits.argmax(dim=1)
+            total_acc += (pred == y).sum().item()
             total_loss += loss.item()
-            current_proto_div = proto_div.item()
-            total_node_div += node_div.item()
+            current_proto_sim = proto_sim.item()
+            current_node_sim = node_sim.item()
             current_gate_entropy = gate_entropy.item()
             total_recon_loss += recon_loss.item()
             total_samples += y.size(0)
 
     # === Log to Dashboard
     epoch_duration = time.time() - epoch_start_time
-    acc = total_acc_topo / total_samples
+    acc = total_acc / total_samples
     loss_avg = total_loss / len(train_loader)
     node = model.nodes[-1]
-    attn_entropy = -(node.last_weights * (node.last_weights + 1e-8).log()).sum(dim=-1).mean()
     dashboard.log_epoch(epoch, acc=acc, loss=loss_avg)
     dashboard.update_node_metrics(
         node_idx=model.node_count - 1,
         acc=acc,
-        proto_div=current_proto_div,
-        node_div=total_node_div,
+        proto_sim=current_proto_sim,
+        node_sim=current_node_sim,
         recon=total_recon_loss,
         temp=node.som.temperature.item(),
         gate_entropy=current_gate_entropy
@@ -129,7 +128,7 @@ for epoch in range(1, epochs + 1):
         optimizer.add_param_group({'params': model.nodes[-1].parameters()})
         optimizer.add_param_group({'params': model.decoders[-1].parameters()})
         dashboard.new_node(node_index=model.node_count - 1, epoch=epoch, acc_at_start=acc)
-    model.log_attn_weights()
+    model.log_epoch_info()
 
 # === Save Model
 torch.save(model.state_dict(), "models/model_clear.pth")
@@ -137,16 +136,16 @@ print("\n✅ Saved to models/model_clear.pth")
 
 # === Evaluation
 model.eval()
-total_topo_acc = 0
+total_acc = 0
 total_samples = 0
 
 with torch.no_grad():
     for x, y in test_loader:
         x, y = x.to(device), y.to(device)
-        logits = model(x)
-        pred_topo = logits.argmax(dim=1)
-        total_topo_acc += (pred_topo == y).sum().item()
+        logits, recon = model(x)
+        pred = logits.argmax(dim=1)
+        total_acc += (pred == y).sum().item()
         total_samples += y.size(0)
 
 total_duration = time.time() - start_time
-dashboard.final_summary(model, total_topo_acc / total_samples, total_duration)
+dashboard.final_summary(model, total_acc / total_samples, total_duration)

@@ -21,18 +21,19 @@ class TrainingDashboard:
             "Start Acc": acc_at_start,
             "Current Acc": acc_at_start,
             "Gate Entropy": None,
-            "ProtoDiv": None,
+            "ProtoSim": None,
+            "NodeSim": None,
             "Recon": None,
             "Usage": None,
             "Variance": None,
             "Temp": None
         })
 
-    def update_node_metrics(self, node_idx, acc, gate_entropy, proto_div, recon, temp, node_div=None):
+    def update_node_metrics(self, node_idx, acc, gate_entropy, proto_sim, node_sim, recon, temp):
         node = self.node_snapshots[node_idx]
         node["Current Acc"] = acc
-        node["ProtoDiv"] = proto_div
-        node["NodeDiv"] = node_div
+        node["ProtoSim"] = proto_sim
+        node["NodeSim"] = node_sim
         node["Recon"] = recon
         node["Temp"] = temp
         node["Gate Entropy"] = gate_entropy
@@ -95,7 +96,7 @@ class TrainingDashboard:
         # === Per Node Summary ===
         node_table = Table(title="🧩 Node Snapshots")
         for col in ["Node", "Start Epoch", "Start Acc", "Current Acc", "Δ Acc", "Temp",
-                    "Gate Entropy", "ProtoDiv", "NodeDiv", "Recon"]:
+                    "Gate Entropy", "Proto Similarity", "Node Similarity", "Recon"]:
             node_table.add_column(col)
 
         for node in self.node_snapshots:
@@ -112,8 +113,8 @@ class TrainingDashboard:
                 Text(f"{acc_delta:+.2%}", style=acc_color),
                 f"{node['Temp']:.4f}" if node['Temp'] else "-",
                 f"{node['Gate Entropy']:.4f}" if node['Gate Entropy'] else "-",
-                f"{node['ProtoDiv']:.7f}" if node['ProtoDiv'] else "-",
-                f"{node.get('NodeDiv', '-'): .4f}" if node.get("NodeDiv") else "-",
+                f"{node['ProtoSim']:.7f}" if node['ProtoSim'] else "-",
+                f"{node.get('NodeSim', '-'): .4f}" if node.get("NodeSim") else "-",
                 f"{node['Recon']:.4f}" if node['Recon'] else "-",
             )
 
