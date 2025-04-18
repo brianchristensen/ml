@@ -74,7 +74,7 @@ class Decoder(nn.Module):
         )
 
     def forward(self, z):
-        x = self.fc(z).view(z.size(0), 128, 8, 8)
+        x = self.fc(z).view(-1, 128, 8, 8)
         return self.deconv(x)
 
 # === SoftSOM ===
@@ -116,7 +116,7 @@ class Node(nn.Module):
         super().__init__()
         self.encoder_fc = nn.Linear(latent_dim, latent_dim)
         self.som = SoftSOM(latent_dim, max_grid_size)
-        self.proto_div_history = []
+        self.proto_sim_history = []
 
         with torch.no_grad():
             gate_probs = torch.sigmoid(self.som.gate_logits)
@@ -141,7 +141,7 @@ class CLEAR(nn.Module):
 
         self.shared_encoder = SharedEncoder(input_channels=input_channels, latent_dim=latent_dim)
 
-        self.alpha_param = nn.Parameter(torch.tensor(0.15))
+        self.alpha_param = nn.Parameter(torch.tensor(0.2))
         self.memory_bank = nn.Parameter(torch.empty(0, self.latent_dim), requires_grad=False)  # initially empty
         self.query_proj = nn.Linear(latent_dim, latent_dim)
         self.node_embeddings = nn.Parameter(torch.randn(self.node_count, latent_dim))
@@ -170,34 +170,25 @@ class CLEAR(nn.Module):
 
         topo_z, _ = self.nodes[-1](z_aug)
         recon = self.decoders[-1](topo_z)
+        proto_recon = self.decoders[-1](self.nodes[-1].som.prototypes)
         logits = self.classifier(topo_z)
-        return logits, recon
+        return logits, recon, proto_recon
 
-    # === Growth, Diversity, Entropy, Usage ===
+    # === Growth, Diversity, Entropy ===
     def should_grow(self):
-        node = self.nodes[-1]
-        window_size = 8
         gate_entropy = self.gate_entropy_loss().item()
-        proto_div = self.proto_similarity_loss().item()
-        semantic_ratio = proto_div / (gate_entropy + 1e-8)
+        proto_sim = self.proto_similarity_loss().item()
+        semantic_ratio = proto_sim / (gate_entropy + 1e-8)
 
-        node.proto_div_history.append(semantic_ratio)
-        if len(node.proto_div_history) > window_size:
-            node.proto_div_history.pop(0)
-
-        if len(node.proto_div_history) < 2:
-            print("📊 Growth Check: Not enough history, skipping trend check.")
-            return False
-
-        recent_deltas = np.diff(node.proto_div_history)
-        trend = np.mean(recent_deltas)
-        trend_up = trend > 0
+        saturation = proto_sim - semantic_ratio
+        # Are we encoding more similarity per unit entropy than we have in raw similarity?
+        semantic_reversal = semantic_ratio > proto_sim
 
         print(f"📊 Growth Check:")
-        print(f"    ➤ Diversity: {proto_div:.6f}, Entropy: {gate_entropy:.4f}, Ratio: {semantic_ratio}")
-        print(f"    ➤ Trend: {trend}, Trending Up? {trend_up}")
+        print(f"    ➤ Diversity: {proto_sim:.6f}, Entropy: {gate_entropy:.4f}, Ratio: {semantic_ratio:.6f}")
+        print(f"    ➤ Saturation: {saturation:.6f}, Reversal? {semantic_reversal}")
 
-        return trend_up
+        return semantic_reversal
 
     def grow_node(self):
         print(f"🌱 Growing CLEAR: Adding Node {self.node_count}")

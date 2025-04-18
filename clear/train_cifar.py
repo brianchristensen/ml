@@ -13,15 +13,16 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # torch.cuda.manual_seed_all(42)
 
 # === Hyperparameters ===
-epochs = 60
+epochs = 40
 latent_dim = 256
 max_grid_size = 256
 # loss coefficients
-recon_loss_λ = 20
+classifier_λ = 0.1
+recon_λ = 8
 proto_sim_λ = 4
-node_sim_λ = 0
-gate_entropy_λ = 0.05
-label_smoothing = 0.05
+node_sim_λ = 2
+gate_entropy_λ = 0.1
+label_smoothing = 0.1
 
 # === Model & Optimizer ===
 model = CLEAR(latent_dim=latent_dim, max_grid_size=max_grid_size).to(device)
@@ -72,7 +73,7 @@ for epoch in range(1, epochs + 1):
     for x, y in train_loader:
         x, y = x.to(device), y.to(device)
         x_aug = gpu_train_aug(x)
-        logits, recon = model(x_aug)
+        logits, recon, proto_recon = model(x_aug)
 
         # Losses
         loss_cls = F.cross_entropy(logits, y, label_smoothing=label_smoothing)
@@ -80,13 +81,15 @@ for epoch in range(1, epochs + 1):
         node_sim = model.node_similarity_loss()
         gate_entropy = model.gate_entropy_loss()
         recon_loss = F.mse_loss(recon, x)
+        proto_recon_loss = F.mse_loss(proto_recon, proto_recon.detach())
 
         loss = (
-            loss_cls +
+            classifier_λ * loss_cls +
             proto_sim_λ * proto_sim +
             node_sim_λ * node_sim +
             gate_entropy_λ * gate_entropy +
-            recon_loss_λ * recon_loss
+            recon_λ * recon_loss +
+            proto_recon_loss
         )
 
         optimizer.zero_grad()
@@ -142,7 +145,7 @@ total_samples = 0
 with torch.no_grad():
     for x, y in test_loader:
         x, y = x.to(device), y.to(device)
-        logits, recon = model(x)
+        logits, recon, proto_recon = model(x)
         pred = logits.argmax(dim=1)
         total_acc += (pred == y).sum().item()
         total_samples += y.size(0)
