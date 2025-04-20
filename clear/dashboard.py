@@ -21,7 +21,6 @@ class TrainingDashboard:
             "Start Acc": acc_at_start,
             "Current Acc": acc_at_start,
             "Gate Entropy": None,
-            "ProtoSim": None,
             "NodeSim": None,
             "Recon": None,
             "Usage": None,
@@ -29,10 +28,9 @@ class TrainingDashboard:
             "Temp": None
         })
 
-    def update_node_metrics(self, node_idx, acc, gate_entropy, proto_sim, node_sim, recon, temp):
+    def update_node_metrics(self, node_idx, acc, gate_entropy, node_sim, recon, temp):
         node = self.node_snapshots[node_idx]
         node["Current Acc"] = acc
-        node["ProtoSim"] = proto_sim
         node["NodeSim"] = node_sim
         node["Recon"] = recon
         node["Temp"] = temp
@@ -96,7 +94,7 @@ class TrainingDashboard:
         # === Per Node Summary ===
         node_table = Table(title="🧩 Node Snapshots")
         for col in ["Node", "Start Epoch", "Start Acc", "Current Acc", "Δ Acc", "Temp",
-                    "Gate Entropy", "Proto Similarity", "Node Similarity", "Recon"]:
+                    "Gate Entropy", "Node Similarity", "Recon"]:
             node_table.add_column(col)
 
         for node in self.node_snapshots:
@@ -113,7 +111,6 @@ class TrainingDashboard:
                 Text(f"{acc_delta:+.2%}", style=acc_color),
                 f"{node['Temp']:.4f}" if node['Temp'] else "-",
                 f"{node['Gate Entropy']:.4f}" if node['Gate Entropy'] else "-",
-                f"{node['ProtoSim']:.7f}" if node['ProtoSim'] else "-",
                 f"{node.get('NodeSim', '-'): .4f}" if node.get("NodeSim") else "-",
                 f"{node['Recon']:.4f}" if node['Recon'] else "-",
             )

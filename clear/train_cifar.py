@@ -14,13 +14,12 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # === Hyperparameters ===
 epochs = 40
-latent_dim = 256
-max_grid_size = 256
+latent_dim = 512
+max_grid_size = 512
 # loss coefficients
 classifier_λ = 0.1
-recon_λ = 8
-proto_sim_λ = 4
-node_sim_λ = 2
+recon_λ = 1
+node_sim_λ = 1
 gate_entropy_λ = 0.1
 label_smoothing = 0.1
 
@@ -73,23 +72,19 @@ for epoch in range(1, epochs + 1):
     for x, y in train_loader:
         x, y = x.to(device), y.to(device)
         x_aug = gpu_train_aug(x)
-        logits, recon, proto_recon = model(x_aug)
+        logits, recon = model(x_aug)
 
         # Losses
         loss_cls = F.cross_entropy(logits, y, label_smoothing=label_smoothing)
-        proto_sim = model.proto_similarity_loss()
         node_sim = model.node_similarity_loss()
         gate_entropy = model.gate_entropy_loss()
         recon_loss = F.mse_loss(recon, x)
-        proto_recon_loss = F.mse_loss(proto_recon, proto_recon.detach())
 
         loss = (
             classifier_λ * loss_cls +
-            proto_sim_λ * proto_sim +
             node_sim_λ * node_sim +
             gate_entropy_λ * gate_entropy +
-            recon_λ * recon_loss +
-            proto_recon_loss
+            recon_λ * recon_loss
         )
 
         optimizer.zero_grad()
@@ -100,7 +95,6 @@ for epoch in range(1, epochs + 1):
             pred = logits.argmax(dim=1)
             total_acc += (pred == y).sum().item()
             total_loss += loss.item()
-            current_proto_sim = proto_sim.item()
             current_node_sim = node_sim.item()
             current_gate_entropy = gate_entropy.item()
             total_recon_loss += recon_loss.item()
@@ -115,7 +109,6 @@ for epoch in range(1, epochs + 1):
     dashboard.update_node_metrics(
         node_idx=model.node_count - 1,
         acc=acc,
-        proto_sim=current_proto_sim,
         node_sim=current_node_sim,
         recon=total_recon_loss,
         temp=node.som.temperature.item(),
@@ -131,7 +124,7 @@ for epoch in range(1, epochs + 1):
         optimizer.add_param_group({'params': model.nodes[-1].parameters()})
         optimizer.add_param_group({'params': model.decoders[-1].parameters()})
         dashboard.new_node(node_index=model.node_count - 1, epoch=epoch, acc_at_start=acc)
-    model.log_epoch_info()
+    model.epoch_tasks()
 
 # === Save Model
 torch.save(model.state_dict(), "models/model_clear.pth")
@@ -145,7 +138,7 @@ total_samples = 0
 with torch.no_grad():
     for x, y in test_loader:
         x, y = x.to(device), y.to(device)
-        logits, recon, proto_recon = model(x)
+        logits, recon = model(x)
         pred = logits.argmax(dim=1)
         total_acc += (pred == y).sum().item()
         total_samples += y.size(0)

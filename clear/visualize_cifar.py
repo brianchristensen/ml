@@ -16,7 +16,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # --- Config ---
 latent_dim = 256
-max_grid_size = 256
+max_grid_size = 512
 cluster_threshold = 100
 model_path = "models/model_clear.pth"
 explain_dir = "explain"

@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import numpy as np
 import math
 
 # === Encoder ===
@@ -89,6 +88,10 @@ class SoftSOM(nn.Module):
         self.gate_logits = nn.Parameter(torch.zeros(self.num_cells))
         self.anneal_rate = temp_anneal_rate
 
+        # Laplacian adjacency initialized as Gaussian over grid_pos
+        self.lap_adj_sigma = 1.0  # can be tuned
+        self.lap_adjacency = None  # computed on-demand in forward pass
+
     @property
     def temperature(self):
         return torch.sigmoid(self.temp_raw) * (1.0 - 1e-3) + 1e-3
@@ -100,13 +103,38 @@ class SoftSOM(nn.Module):
             new_raw = math.log((new_temp - 1e-3) / (1.0 - 1e-3 - new_temp))
             self.temp_raw.fill_(new_raw)
 
+    def compute_laplacian_adjacency(self):
+        with torch.no_grad():
+            dist = torch.cdist(self.grid_pos, self.grid_pos)  # [K, K]
+            sim = torch.exp(-dist ** 2 / (2 * self.lap_adj_sigma ** 2))
+            sim.fill_diagonal_(0)
+            self.lap_adjacency = sim  # [K, K]
+
+    def laplacian_loss(self):
+        if self.lap_adjacency is None:
+            self.compute_laplacian_adjacency()
+        A = self.lap_adjacency
+        D = torch.diag(A.sum(1))
+        L = D - A  # Laplacian
+        return torch.trace(self.prototypes.T @ L @ self.prototypes)
+
+    def sinkhorn_weights(self, x, cost_matrix, reg=0.1):
+        # Sinkhorn-style approximation using exponentiated negative cost
+        weights = torch.exp(-cost_matrix / reg)
+        weights = weights / (weights.sum(dim=-1, keepdim=True) + 1e-8)
+        return weights
+
     def forward(self, x):
         gate = torch.sigmoid(self.gate_logits).unsqueeze(0)
-        d_proto = torch.cdist(x.unsqueeze(1), self.prototypes.unsqueeze(0))
-        d_pos = torch.cdist(x.unsqueeze(1), self.grid_pos.unsqueeze(0))
-        d_total = d_proto + d_pos
-        weights = F.softmax(-d_total / self.temperature, dim=-1) * gate
+
+        d_proto = torch.cdist(x, self.prototypes)  # [B, K]
+        d_pos = torch.cdist(x, self.grid_pos)      # [B, K]
+        d_total = d_proto + d_pos                  # [B, K]
+
+        weights = self.sinkhorn_weights(x, d_total, reg=self.temperature)
+        weights = weights * gate
         weights = weights / (weights.sum(dim=-1, keepdim=True) + 1e-8)
+
         blended = weights @ self.prototypes
         return blended, weights
 
@@ -137,14 +165,15 @@ class CLEAR(nn.Module):
         self.latent_dim = latent_dim
         self.max_grid_size = max_grid_size
         self.node_count = init_nodes
-        self.just_grew = False
-
+        self.gate_entropy_weight = 1.0
+        self.gate_entropy_decay = 0.98
+        
         self.shared_encoder = SharedEncoder(input_channels=input_channels, latent_dim=latent_dim)
 
-        self.alpha_param = nn.Parameter(torch.tensor(0.2))
-        self.memory_bank = nn.Parameter(torch.empty(0, self.latent_dim), requires_grad=False)  # initially empty
+        self.alpha_param = nn.Parameter(torch.tensor(0.6))
+        self.memory_bank = nn.Parameter(torch.empty(0, self.latent_dim), requires_grad=False)
+
         self.query_proj = nn.Linear(latent_dim, latent_dim)
-        self.node_embeddings = nn.Parameter(torch.randn(self.node_count, latent_dim))
         self.attn_weights = None
 
         self.nodes = nn.ModuleList([Node(latent_dim, max_grid_size) for _ in range(self.node_count)])
@@ -161,49 +190,44 @@ class CLEAR(nn.Module):
             query = F.normalize(query, dim=-1)
             memory_keys = F.normalize(self.memory_bank, dim=-1)  # [P, D]
 
-            attn_weights = torch.softmax(query @ memory_keys.T, dim=-1)  # [B, P]
-            memory_output = attn_weights @ self.memory_bank  # [B, D]
+            scores = query @ memory_keys.T  # [B, P]
+
+            gumbel_temp = 0.5
+            gumbel_weights = F.gumbel_softmax(scores, tau=gumbel_temp, hard=False, dim=-1)  # [B, P]
+            memory_output = gumbel_weights @ self.memory_bank
 
             z_aug = z0 + self.alpha_param * memory_output
         else:
             z_aug = z0
 
         topo_z, _ = self.nodes[-1](z_aug)
+
         recon = self.decoders[-1](topo_z)
-        proto_recon = self.decoders[-1](self.nodes[-1].som.prototypes)
         logits = self.classifier(topo_z)
-        return logits, recon, proto_recon
+        return logits, recon
 
     # === Growth, Diversity, Entropy ===
-    def should_grow(self):
+    def should_grow(self, tau=0.75):
         gate_entropy = self.gate_entropy_loss().item()
-        proto_sim = self.proto_similarity_loss().item()
-        semantic_ratio = proto_sim / (gate_entropy + 1e-8)
 
-        saturation = proto_sim - semantic_ratio
-        # Are we encoding more similarity per unit entropy than we have in raw similarity?
-        semantic_reversal = semantic_ratio > proto_sim
+        max_entropy = math.log(self.max_grid_size)
+        entropy_low_thresh = max_entropy * tau
+        entropy_low = abs(gate_entropy) < entropy_low_thresh
 
         print(f"📊 Growth Check:")
-        print(f"    ➤ Diversity: {proto_sim:.6f}, Entropy: {gate_entropy:.4f}, Ratio: {semantic_ratio:.6f}")
-        print(f"    ➤ Saturation: {saturation:.6f}, Reversal? {semantic_reversal}")
+        print(f"    ➤ Entropy Threshold: {entropy_low_thresh:.6f}, Entropy Low? {entropy_low}")
 
-        return semantic_reversal
+        return entropy_low
 
-    def grow_node(self):
+    def grow_node(self, repulsion_strength=0.1):
         print(f"🌱 Growing CLEAR: Adding Node {self.node_count}")
         self.node_count += 1
-        device = self.node_embeddings.device
+        device = self.nodes[-1].som.prototypes.device
 
-        self.memory_bank = nn.Parameter(
-            torch.cat([
-                self.memory_bank,
-                self.nodes[-1].som.prototypes.detach().clone()
-            ], dim=0),
-            requires_grad=False
-        )
+        self.blend_memory(self.nodes[-1].som.prototypes)
 
         new_node = Node(self.latent_dim, self.max_grid_size).to(device)
+
         self.nodes.append(new_node)
         self.decoders.append(Decoder(self.latent_dim).to(device))
 
@@ -212,55 +236,56 @@ class CLEAR(nn.Module):
             raw_val = math.log(init_temp / (1.0 - init_temp))
             new_node.som.temp_raw.fill_(raw_val)
 
-        new_embedding = nn.Parameter(torch.randn(1, self.latent_dim).to(device))
-        self.node_embeddings = nn.Parameter(torch.cat([self.node_embeddings, new_embedding], dim=0))
+        self.gate_entropy_weight = 1.0
 
-        self.just_grew = True
+    def blend_memory(self, new_prototypes, blend_ratio=0.5):
+        if self.memory_bank is None or self.memory_bank.size(0) == 0:
+            self.memory_bank = nn.Parameter(new_prototypes.clone(), requires_grad=False)
+            return
+
+        mem = self.memory_bank.data
+        new = new_prototypes.detach()
+
+        sim = F.cosine_similarity(new.unsqueeze(1), mem.unsqueeze(0), dim=-1)  # [K, M]
+        nearest_idx = sim.argmax(dim=1)  # For each new, find closest mem
+
+        for i in range(new.size(0)):
+            mem_idx = nearest_idx[i]
+            mem[mem_idx] = F.normalize(
+                (1 - blend_ratio) * mem[mem_idx] + blend_ratio * new[i],
+                dim=0
+            )
+
+        self.memory_bank.data = mem
 
     def freeze_node(self, node):
         for param in node.parameters():
             param.requires_grad = False
 
-    def anneal_temp_active_node(self):
-        self.nodes[-1].som.anneal_temp()
-
-    def proto_similarity_loss(self):
-        node = self.nodes[-1]
-        P = F.normalize(node.som.prototypes, dim=1)
-        S = P @ P.T
-        S.fill_diagonal_(0)
-        diversity = S.pow(2).mean()
-        return diversity
-
-    def node_similarity_loss(self, sample_size=128):
+    def node_similarity_loss(self, temperature=0.1):
         if self.memory_bank is None or self.memory_bank.size(0) == 0:
             return torch.tensor(0.0, device=self.nodes[0].som.prototypes.device)
 
-        new_som = self.nodes[-1].som
-        P_new = F.normalize(new_som.prototypes, dim=1)
-        P_mem = F.normalize(self.memory_bank, dim=1)
+        P_new = F.normalize(self.nodes[-1].som.prototypes, dim=1)  # [M, D]
+        P_mem = F.normalize(self.memory_bank, dim=1)               # [N, D]
 
-        if sample_size < P_mem.size(0):
-            idx = torch.randperm(P_mem.size(0))[:sample_size]
-            P_mem = P_mem[idx]
-
-        sim = F.cosine_similarity(
-            P_new.unsqueeze(1),  # [P_new, 1, D]
-            P_mem.unsqueeze(0),  # [1, P_mem, D]
-            dim=-1
-        )
-        return sim.abs().mean()
+        logits = P_new @ P_mem.T / temperature  # [M, N]
+        # Negative log of similarity to closest mem key
+        loss = -logits.logsumexp(dim=1).mean()
+        return loss
 
     def gate_entropy_loss(self):
         node = self.nodes[-1]
-        p = F.softmax(node.som.gate_logits, dim=0)
-        p = p / (p.sum() + 1e-8)
-        entropy = -(p * (p + 1e-8).log()).sum()
-        return entropy
+        p = F.softmax(node.som.gate_logits, dim=0) + 1e-8
+        entropy = -(p * p.log()).sum()
+        return -entropy * self.gate_entropy_weight
 
-    def log_epoch_info(self):
-        print("")
-        # for i, node in enumerate(self.nodes):
-        #     gate_probs = torch.softmax(node.som.gate_logits, dim=0)
-        #     entropy = -(gate_probs * gate_probs.clamp(min=1e-8).log()).sum().item()
-        #     print(f"gate_entropy/node_{i}: {entropy}")
+    def anneal_temp_active_node(self):
+        self.nodes[-1].som.anneal_temp()
+    
+    def anneal_gate_entropy(self):
+        self.gate_entropy_weight *= self.gate_entropy_decay
+        
+    def epoch_tasks(self):
+        self.anneal_gate_entropy()
+        self.anneal_temp_active_node()
