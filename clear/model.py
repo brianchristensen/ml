@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from entmax import entmax15
 import math
 
 # === Encoder ===
@@ -179,9 +180,9 @@ class CLEAR(nn.Module):
         
         self.shared_encoder = SharedEncoder(input_channels=input_channels, latent_dim=latent_dim)
 
-        self.alpha_param = nn.Parameter(torch.tensor(0.6))
         self.memory_bank = nn.Parameter(torch.empty(0, self.latent_dim), requires_grad=False)
-
+        self.memory_alpha_raw = nn.Parameter(torch.zeros(latent_dim))
+        
         self.query_proj = nn.Linear(latent_dim, latent_dim)
         self.attn_weights = None
 
@@ -191,6 +192,10 @@ class CLEAR(nn.Module):
         #task specific for cifar/classification head
         self.classifier = nn.Linear(latent_dim, 10)  
 
+    @property
+    def memory_alpha(self):
+        return torch.sigmoid(self.memory_alpha_raw)
+    
     def forward(self, x, y=None):
         z0 = self.shared_encoder(x)  # [B, D]
 
@@ -198,19 +203,15 @@ class CLEAR(nn.Module):
             query = self.query_proj(z0)  # [B, D]
             query = F.normalize(query, dim=-1)
             memory_keys = F.normalize(self.memory_bank, dim=-1)  # [P, D]
-
             scores = query @ memory_keys.T  # [B, P]
+            memory_weights = entmax15(scores, dim=-1)
+            memory_output = memory_weights @ self.memory_bank
 
-            gumbel_temp = 0.5
-            gumbel_weights = F.gumbel_softmax(scores, tau=gumbel_temp, hard=False, dim=-1)  # [B, P]
-            memory_output = gumbel_weights @ self.memory_bank
-
-            z_aug = z0 + self.alpha_param * memory_output
+            z_aug = z0 + self.memory_alpha * memory_output
         else:
             z_aug = z0
 
         topo_z, _ = self.nodes[-1](z_aug)
-
         recon = self.decoders[-1](topo_z)
         logits = self.classifier(topo_z)
         return logits, recon
@@ -237,10 +238,10 @@ class CLEAR(nn.Module):
         still_broad = usage_fraction > 0.85  # not magic, just a relative cap
 
         print(f"📊 Growth Check:")
-        print(f"    ➤ Effective Prototypes: {recent[-1]:.2f}")
+        print(f"    ➤ Effective Prototypes: {recent[-1]:.2f}/{self.max_grid_size}")
         print(f"    ➤ Avg Δ over {min_history} epochs: {avg_change:.4f}")
-        print(f"    ➤ Usage Fraction: {usage_fraction:.4f}")
-        print(f"    ➤ Compression Trend: {compressing}")
+        print(f"    ➤ Usage Fraction: {usage_fraction:.4f}, Still Broad?: {still_broad}")
+        print(f"    ➤ Compressing?: {compressing}")
 
         return compressing and avg_change < convergence_delta and not still_broad
 

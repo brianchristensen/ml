@@ -13,14 +13,14 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # torch.cuda.manual_seed_all(42)
 
 # === Hyperparameters ===
-epochs = 40
+epochs = 30
 latent_dim = 256
 max_grid_size = 256
 # loss coefficients
-classifier_λ = 0.1
+classifier_λ = .2
 recon_λ = 1
 node_sim_λ = 1
-label_smoothing = 0.1
+label_smoothing = 0.01
 
 # === Model & Optimizer ===
 model = CLEAR(latent_dim=latent_dim, max_grid_size=max_grid_size).to(device)
