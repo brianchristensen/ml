@@ -16,7 +16,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # --- Config ---
 latent_dim = 256
-max_grid_size = 512
+max_grid_size = 256
 cluster_threshold = 100
 model_path = "models/model_clear.pth"
 explain_dir = "explain"
@@ -79,14 +79,20 @@ def main():
         print(f"\n=== [Node {i}] ===")
         with torch.no_grad():
             prototypes = node.som.prototypes.detach()
-            usage = torch.sigmoid(node.som.gate_logits)
-            active_mask = usage > 0.01
+            gate_temp = node.som.get_gate_temperature()
+            gate_probs = F.softmax(node.som.gate_logits / gate_temp, dim=0)
+            active_mask = gate_probs > (1.0 / node.som.num_cells)
             active_protos = prototypes[active_mask]
-
+            
             proto_count = active_protos.size(0)
             if proto_count == 0:
                 print(f"⚠️  Node {i} has no active prototypes. Skipping visualization.")
                 continue
+            
+            eff_n = 1.0 / (gate_probs ** 2).sum().item()
+            gini = 1.0 - (gate_probs ** 2).sum().item()
+            print(f"📊 Node {i}: {proto_count} active prototypes, Effective = {eff_n:.2f}, Usage Gini = {gini:.4f}")
+
             decoder = model.decoders[i].eval()
 
             if proto_count > cluster_threshold:

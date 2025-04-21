@@ -14,13 +14,12 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # === Hyperparameters ===
 epochs = 40
-latent_dim = 512
-max_grid_size = 512
+latent_dim = 256
+max_grid_size = 256
 # loss coefficients
 classifier_λ = 0.1
 recon_λ = 1
 node_sim_λ = 1
-gate_entropy_λ = 0.1
 label_smoothing = 0.1
 
 # === Model & Optimizer ===
@@ -65,8 +64,8 @@ for epoch in range(1, epochs + 1):
     model.train()
 
     total_loss = total_acc = 0
-    current_proto_sim = current_node_sim = current_gate_entropy = 0
-    total_usage_penalty = total_recon_loss = 0
+    current_node_sim = 0
+    total_recon_loss = 0
     total_samples = 0
 
     for x, y in train_loader:
@@ -77,13 +76,13 @@ for epoch in range(1, epochs + 1):
         # Losses
         loss_cls = F.cross_entropy(logits, y, label_smoothing=label_smoothing)
         node_sim = model.node_similarity_loss()
-        gate_entropy = model.gate_entropy_loss()
+        neighborhood_loss = model.nodes[-1].som.neighborhood_loss()
         recon_loss = F.mse_loss(recon, x)
 
         loss = (
             classifier_λ * loss_cls +
             node_sim_λ * node_sim +
-            gate_entropy_λ * gate_entropy +
+            neighborhood_loss +
             recon_λ * recon_loss
         )
 
@@ -96,7 +95,6 @@ for epoch in range(1, epochs + 1):
             total_acc += (pred == y).sum().item()
             total_loss += loss.item()
             current_node_sim = node_sim.item()
-            current_gate_entropy = gate_entropy.item()
             total_recon_loss += recon_loss.item()
             total_samples += y.size(0)
 
@@ -111,8 +109,7 @@ for epoch in range(1, epochs + 1):
         acc=acc,
         node_sim=current_node_sim,
         recon=total_recon_loss,
-        temp=node.som.temperature.item(),
-        gate_entropy=current_gate_entropy
+        temp=node.som.temperature.item()
     )
     dashboard.print_dashboard()
 

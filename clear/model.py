@@ -85,7 +85,8 @@ class SoftSOM(nn.Module):
         self.prototypes = nn.Parameter(torch.randn(self.num_cells, input_dim))
         self.grid_pos = nn.Parameter(torch.randn(self.num_cells, input_dim))
         self.temp_raw = nn.Parameter(torch.tensor([math.log(init_temperature / (1.0 - init_temperature))], dtype=torch.float32))
-        self.gate_logits = nn.Parameter(torch.zeros(self.num_cells))
+        self.gate_temp_raw = nn.Parameter(torch.tensor([math.log(0.5 / (1 - 0.5))]))
+        self.gate_logits = nn.Parameter(torch.full((self.num_cells,), -3.0))
         self.anneal_rate = temp_anneal_rate
 
         # Laplacian adjacency initialized as Gaussian over grid_pos
@@ -95,13 +96,22 @@ class SoftSOM(nn.Module):
     @property
     def temperature(self):
         return torch.sigmoid(self.temp_raw) * (1.0 - 1e-3) + 1e-3
-
+    
     def anneal_temp(self):
         with torch.no_grad():
             current_temp = self.temperature.item()
             new_temp = current_temp * self.anneal_rate
             new_raw = math.log((new_temp - 1e-3) / (1.0 - 1e-3 - new_temp))
             self.temp_raw.fill_(new_raw)
+
+    def get_gate_temperature(self):
+        # Learnable, bounded gate temperature in (0.001, 1.0)
+        return torch.sigmoid(self.gate_temp_raw) * (1.0 - 1e-3) + 1e-3
+
+    def get_active_prototypes(self, threshold=0.01):
+        usage = torch.sigmoid(self.gate_logits)
+        active_mask = usage > threshold
+        return self.prototypes[active_mask], active_mask
 
     def compute_laplacian_adjacency(self):
         with torch.no_grad():
@@ -110,7 +120,7 @@ class SoftSOM(nn.Module):
             sim.fill_diagonal_(0)
             self.lap_adjacency = sim  # [K, K]
 
-    def laplacian_loss(self):
+    def neighborhood_loss(self):
         if self.lap_adjacency is None:
             self.compute_laplacian_adjacency()
         A = self.lap_adjacency
@@ -125,7 +135,8 @@ class SoftSOM(nn.Module):
         return weights
 
     def forward(self, x):
-        gate = torch.sigmoid(self.gate_logits).unsqueeze(0)
+        gate_temp = self.get_gate_temperature()
+        gate = F.softmax(self.gate_logits / gate_temp, dim=0).unsqueeze(0)
 
         d_proto = torch.cdist(x, self.prototypes)  # [B, K]
         d_pos = torch.cdist(x, self.grid_pos)      # [B, K]
@@ -144,7 +155,7 @@ class Node(nn.Module):
         super().__init__()
         self.encoder_fc = nn.Linear(latent_dim, latent_dim)
         self.som = SoftSOM(latent_dim, max_grid_size)
-        self.proto_sim_history = []
+        self.node_history = []
 
         with torch.no_grad():
             gate_probs = torch.sigmoid(self.som.gate_logits)
@@ -165,8 +176,6 @@ class CLEAR(nn.Module):
         self.latent_dim = latent_dim
         self.max_grid_size = max_grid_size
         self.node_count = init_nodes
-        self.gate_entropy_weight = 1.0
-        self.gate_entropy_decay = 0.98
         
         self.shared_encoder = SharedEncoder(input_channels=input_channels, latent_dim=latent_dim)
 
@@ -207,24 +216,40 @@ class CLEAR(nn.Module):
         return logits, recon
 
     # === Growth, Diversity, Entropy ===
-    def should_grow(self, tau=0.75):
-        gate_entropy = self.gate_entropy_loss().item()
+    def should_grow(self, min_history=4, convergence_delta=0.05):
+        node = self.nodes[-1]
 
-        max_entropy = math.log(self.max_grid_size)
-        entropy_low_thresh = max_entropy * tau
-        entropy_low = abs(gate_entropy) < entropy_low_thresh
+        if len(node.node_history) < min_history:
+            print(f"📊 Growth Check: Not enough history yet ({len(node.node_history)} entries).")
+            return False
+
+        recent = node.node_history[-min_history:]
+
+        # Compute % diffs for convergence check
+        diffs = [abs(recent[i+1] - recent[i]) / (recent[i] + 1e-8) for i in range(len(recent)-1)]
+        avg_change = sum(diffs) / len(diffs)
+
+        # Compression trend: is it consistently going down?
+        compressing = all(recent[i] > recent[i+1] for i in range(len(recent)-1))
+
+        # Usage guard: are we still using a large fraction of SOM?
+        usage_fraction = recent[-1] / node.som.num_cells
+        still_broad = usage_fraction > 0.85  # not magic, just a relative cap
 
         print(f"📊 Growth Check:")
-        print(f"    ➤ Entropy Threshold: {entropy_low_thresh:.6f}, Entropy Low? {entropy_low}")
+        print(f"    ➤ Effective Prototypes: {recent[-1]:.2f}")
+        print(f"    ➤ Avg Δ over {min_history} epochs: {avg_change:.4f}")
+        print(f"    ➤ Usage Fraction: {usage_fraction:.4f}")
+        print(f"    ➤ Compression Trend: {compressing}")
 
-        return entropy_low
+        return compressing and avg_change < convergence_delta and not still_broad
 
-    def grow_node(self, repulsion_strength=0.1):
+    def grow_node(self):
         print(f"🌱 Growing CLEAR: Adding Node {self.node_count}")
         self.node_count += 1
         device = self.nodes[-1].som.prototypes.device
 
-        self.blend_memory(self.nodes[-1].som.prototypes)
+        self.blend_memory(self.nodes[-1].som.prototypes, self.nodes[-1].som.gate_logits)
 
         new_node = Node(self.latent_dim, self.max_grid_size).to(device)
 
@@ -236,9 +261,18 @@ class CLEAR(nn.Module):
             raw_val = math.log(init_temp / (1.0 - init_temp))
             new_node.som.temp_raw.fill_(raw_val)
 
-        self.gate_entropy_weight = 1.0
+    def blend_memory(self, new_prototypes, gate_logits=None, blend_ratio=0.5):
+        """
+        Blends only active prototypes into the memory bank.
+        """
+        if gate_logits is not None:
+            usage = torch.sigmoid(gate_logits)
+            active_mask = usage > 0.01
+            new_prototypes = new_prototypes[active_mask]
+            if new_prototypes.size(0) == 0:
+                print("⚠️ No active prototypes to add to memory.")
+                return
 
-    def blend_memory(self, new_prototypes, blend_ratio=0.5):
         if self.memory_bank is None or self.memory_bank.size(0) == 0:
             self.memory_bank = nn.Parameter(new_prototypes.clone(), requires_grad=False)
             return
@@ -274,18 +308,21 @@ class CLEAR(nn.Module):
         loss = -logits.logsumexp(dim=1).mean()
         return loss
 
-    def gate_entropy_loss(self):
-        node = self.nodes[-1]
-        p = F.softmax(node.som.gate_logits, dim=0) + 1e-8
-        entropy = -(p * p.log()).sum()
-        return -entropy * self.gate_entropy_weight
-
     def anneal_temp_active_node(self):
         self.nodes[-1].som.anneal_temp()
-    
-    def anneal_gate_entropy(self):
-        self.gate_entropy_weight *= self.gate_entropy_decay
-        
+
+    def log_effective_prototypes(self, log_verbose=False):
+        node = self.nodes[-1]
+        with torch.no_grad():
+            gate_temp = node.som.get_gate_temperature()
+            gate = F.softmax(node.som.gate_logits / gate_temp, dim=0)
+            eff_n = 1.0 / (gate ** 2).sum().item()
+            node.node_history.append(eff_n)
+
+            if log_verbose:
+                active_count = (torch.sigmoid(node.som.gate_logits) > 0.01).sum().item()
+                print(f"🔍 Effective Prototypes: {eff_n:.2f} | Active: {active_count}/{node.som.num_cells}")
+
     def epoch_tasks(self):
-        self.anneal_gate_entropy()
+        self.log_effective_prototypes()
         self.anneal_temp_active_node()
