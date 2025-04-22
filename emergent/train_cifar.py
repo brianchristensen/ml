@@ -1,69 +1,83 @@
 import torch
 import torchvision
-import torchvision.transforms as transforms
+from torchvision import datasets, transforms
+from torchvision.transforms import v2 as T
 import torch.nn as nn
 import torch.optim as optim
+import time
+from datetime import datetime
 from model import ALS
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# hyperparams
-epochs = 30
-num_generators=16
-steps=4
+# === Hyperparameters
+epochs = 20
+max_steps = 10
+latent_dim = 256
 input_dim = 3 * 32 * 32
-latent_dim=256
+label_smoothing = 0.01
 
-# CIFAR-10 as flattened inputs
-transform = transforms.Compose([
-    transforms.ToTensor(),
-    transforms.Normalize((0.5,), (0.5,))
+# === Data transforms
+train_augment = T.Compose([
+    T.ToImage(),
+    T.RandomCrop(32, padding=4),
+    T.RandomHorizontalFlip(),
+    T.ColorJitter(0.2, 0.2, 0.2, 0.1),
+    T.RandomAffine(degrees=10, translate=(0.1, 0.1)),
+    T.ToDtype(torch.float32, scale=True)
+])
+test_transform = T.Compose([
+    T.ToImage(),
+    T.ToDtype(torch.float32, scale=True)
 ])
 
-trainset = torchvision.datasets.CIFAR10(root='./data', train=True, download=True, transform=transform)
-trainloader = torch.utils.data.DataLoader(trainset, batch_size=128, shuffle=True)
+# === Datasets
+trainset = datasets.CIFAR10(root='./data', train=True, download=True, transform=T.ToImage())
+testset = datasets.CIFAR10(root='./data', train=False, download=True, transform=test_transform)
 
-testset = torchvision.datasets.CIFAR10(root='./data', train=False, download=True, transform=transform)
+trainloader = torch.utils.data.DataLoader(trainset, batch_size=128, shuffle=True)
 testloader = torch.utils.data.DataLoader(testset, batch_size=128, shuffle=False)
 
-# Model setup
-model = ALS(input_dim=input_dim, latent_dim=latent_dim, num_generators=num_generators, steps=steps).to(device)
-criterion = nn.CrossEntropyLoss()
+# === Model
+model = ALS(input_dim=input_dim, latent_dim=latent_dim, max_steps=max_steps).to(device)
+criterion = nn.CrossEntropyLoss(label_smoothing=label_smoothing)
 optimizer = optim.Adam(model.parameters(), lr=1e-3)
 
-# Training loop
+# === Training
+start_time = time.time()
+print(f"🧠 Training Model @ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 for epoch in range(1, epochs + 1):
+    epoch_start_time = time.time()
     model.train()
     running_loss = 0.0
     correct, total = 0, 0
 
-    for images, labels in trainloader:
-        images = images.view(images.size(0), -1).to(device)
-        labels = labels.to(device)
+    for x, y in trainloader:
+        x, y = x.to(device), y.to(device)
+        x = train_augment(x)
 
         optimizer.zero_grad()
-        outputs = model(images)
-        loss = criterion(outputs, labels)
+        out, _ = model(x, return_trace=True)  # ← enable trace logging
+        loss = criterion(out, y)
         loss.backward()
         optimizer.step()
 
         running_loss += loss.item()
-        _, predicted = outputs.max(1)
-        total += labels.size(0)
-        correct += predicted.eq(labels).sum().item()
+        _, predicted = out.max(1)
+        total += y.size(0)
+        correct += predicted.eq(y).sum().item()
 
-    print(f"📚 Epoch {epoch}: Loss={running_loss/len(trainloader):.4f}, Train Acc={100.0 * correct / total:.2f}%")
+    print(f"📚 Epoch {epoch}: Loss={running_loss/len(trainloader):.4f}, Train Acc={100.0 * correct / total:.2f}%, Duration: {time.time() - epoch_start_time:.2f}s")
 
-# Evaluation
+# === Eval
 model.eval()
 correct, total = 0, 0
 with torch.no_grad():
-    for images, labels in testloader:
-        images = images.view(images.size(0), -1).to(device)
-        labels = labels.to(device)
-        outputs = model(images)
-        _, predicted = outputs.max(1)
-        total += labels.size(0)
-        correct += predicted.eq(labels).sum().item()
+    for x, y in testloader:
+        x, y = x.to(device), y.to(device)
+        out = model(x)
+        _, predicted = out.max(1)
+        correct += predicted.eq(y).sum().item()
+        total += y.size(0)
 
-print(f"\n✅ Test Accuracy: {100.0 * correct / total:.2f}%")
+print(f"\n✅ Test Accuracy: {100.0 * correct / total:.2f}%, Total Duration: {int(time.time() - start_time)//60}m {int(time.time() - start_time)%60}s")
