@@ -16,7 +16,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # --- Config ---
 latent_dim = 256
-max_grid_size = 256
+max_prototypes = 128
 cluster_threshold = 100
 model_path = "models/model_clear.pth"
 explain_dir = "explain"
@@ -64,7 +64,7 @@ def main():
     print(f"📦 Found {init_nodes} saved nodes")
 
     # === Step 2: Create model with matching size ===
-    model = CLEAR(init_nodes=init_nodes, max_grid_size=max_grid_size, latent_dim=latent_dim)
+    model = CLEAR(init_nodes=init_nodes, max_prototypes=max_prototypes, latent_dim=latent_dim)
 
     if "memory_bank" in state_dict:
         memory_bank_data = state_dict["memory_bank"]
@@ -74,24 +74,20 @@ def main():
     model.to(device)
     model.eval()
 
-    print("🔍 Decoding SOM prototypes...")
+    print("🔍 Decoding prototypes...")
     for i, node in enumerate(model.nodes):
         print(f"\n=== [Node {i}] ===")
         with torch.no_grad():
-            prototypes = node.som.prototypes.detach()
-            gate_temp = node.som.get_gate_temperature()
-            gate_probs = F.softmax(node.som.gate_logits / gate_temp, dim=0)
-            active_mask = gate_probs > (1.0 / node.som.num_cells)
+            prototypes = node.prog.prototypes.detach()
+            gate_temp = node.prog.get_gate_temperature()
+            gate_probs = F.softmax(node.prog.gate_logits / gate_temp, dim=0)
+            active_mask = gate_probs > (1.0 / node.prog.max_prototypes)
             active_protos = prototypes[active_mask]
             
             proto_count = active_protos.size(0)
             if proto_count == 0:
                 print(f"⚠️  Node {i} has no active prototypes. Skipping visualization.")
                 continue
-            
-            eff_n = 1.0 / (gate_probs ** 2).sum().item()
-            gini = 1.0 - (gate_probs ** 2).sum().item()
-            print(f"📊 Node {i}: {proto_count} active prototypes, Effective = {eff_n:.2f}, Usage Gini = {gini:.4f}")
 
             decoder = model.decoders[i].eval()
 

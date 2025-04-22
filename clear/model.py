@@ -1,7 +1,10 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from entmax import entmax15
+import numpy as np
 import math
+from sklearn.cluster import KMeans
 
 # === Encoder ===
 class ResBlock(nn.Module):
@@ -13,7 +16,6 @@ class ResBlock(nn.Module):
         self.relu = nn.ReLU(inplace=True)
         self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1)
         self.bn2 = nn.BatchNorm2d(out_channels)
-
         self.skip = nn.Sequential()
         if downsample or in_channels != out_channels:
             self.skip = nn.Sequential(
@@ -26,27 +28,23 @@ class ResBlock(nn.Module):
         out = self.conv1(x)
         out = self.bn1(out)
         out = self.relu(out)
-
         out = self.conv2(out)
         out = self.bn2(out)
         out += identity
-        out = self.relu(out)
-        return out
+        return self.relu(out)
 
 class SharedEncoder(nn.Module):
     def __init__(self, input_channels=3, latent_dim=256):
         super().__init__()
         self.encoder = nn.Sequential(
-            nn.Conv2d(input_channels, 64, kernel_size=3, stride=1, padding=1),
+            nn.Conv2d(input_channels, 64, kernel_size=3, padding=1),
             nn.BatchNorm2d(64),
             nn.ReLU(inplace=True),
-
             ResBlock(64, 64),
             ResBlock(64, 128, downsample=True),
             ResBlock(128, 128),
             ResBlock(128, 256, downsample=True),
             ResBlock(256, 256),
-
             nn.AdaptiveAvgPool2d((1, 1)),
             nn.Flatten(),
             nn.Linear(256, latent_dim)
@@ -57,10 +55,10 @@ class SharedEncoder(nn.Module):
 
 # === Decoder ===
 class Decoder(nn.Module):
-    def __init__(self, input_dim=256, output_channels=3):
+    def __init__(self, latent_dim=256, output_channels=3):
         super().__init__()
         self.fc = nn.Sequential(
-            nn.Linear(input_dim, 128 * 8 * 8),
+            nn.Linear(latent_dim, 128 * 8 * 8),
             nn.ReLU()
         )
         self.deconv = nn.Sequential(
@@ -76,253 +74,178 @@ class Decoder(nn.Module):
         x = self.fc(z).view(-1, 128, 8, 8)
         return self.deconv(x)
 
-# === SoftSOM ===
-class SoftSOM(nn.Module):
-    def __init__(self, input_dim, max_grid_size=256, init_temperature=0.95, temp_anneal_rate=0.98):
+# === ProtoGraph ===
+class ProtoGraph(nn.Module):
+    def __init__(self, latent_dim, max_prototypes=256):
         super().__init__()
-        self.num_cells = max_grid_size
-        self.input_dim = input_dim
-        self.prototypes = nn.Parameter(torch.randn(self.num_cells, input_dim))
-        self.grid_pos = nn.Parameter(torch.randn(self.num_cells, input_dim))
-        self.temp_raw = nn.Parameter(torch.tensor([math.log(init_temperature / (1.0 - init_temperature))], dtype=torch.float32))
-        self.gate_temp_raw = nn.Parameter(torch.tensor([math.log(0.5 / (1 - 0.5))]))
-        self.gate_logits = nn.Parameter(torch.full((self.num_cells,), -3.0))
-        self.anneal_rate = temp_anneal_rate
+        self.max_prototypes = max_prototypes
+        self.latent_dim = latent_dim
+        self.graph_history = []
 
-        # Laplacian adjacency initialized as Gaussian over grid_pos
-        self.lap_adj_sigma = 1.0  # can be tuned
-        self.lap_adjacency = None  # computed on-demand in forward pass
+        self.prototypes = nn.Parameter(torch.randn(max_prototypes, latent_dim))
+        self.adj_logits = nn.Parameter(torch.randn(max_prototypes, max_prototypes) * 0.01)
 
-    @property
-    def temperature(self):
-        return torch.sigmoid(self.temp_raw) * (1.0 - 1e-3) + 1e-3
-    
-    def anneal_temp(self):
-        with torch.no_grad():
-            current_temp = self.temperature.item()
-            new_temp = current_temp * self.anneal_rate
-            new_raw = math.log((new_temp - 1e-3) / (1.0 - 1e-3 - new_temp))
-            self.temp_raw.fill_(new_raw)
+        self.gate_logits = nn.Parameter(torch.zeros(max_prototypes))
+
+        # Learnable temperature for entmax15 over gates
+        self.gate_temp_raw = nn.Parameter(torch.tensor([-2.0]))
 
     def get_gate_temperature(self):
-        # Learnable, bounded gate temperature in (0.001, 1.0)
         return torch.sigmoid(self.gate_temp_raw) * (1.0 - 1e-3) + 1e-3
 
     def get_active_prototypes(self, threshold=0.01):
         usage = torch.sigmoid(self.gate_logits)
-        active_mask = usage > threshold
-        return self.prototypes[active_mask], active_mask
+        return self.prototypes[usage > threshold], usage > threshold
 
-    def compute_laplacian_adjacency(self):
+    def get_effective_prototypes(self, verbose=False):
         with torch.no_grad():
-            dist = torch.cdist(self.grid_pos, self.grid_pos)  # [K, K]
-            sim = torch.exp(-dist ** 2 / (2 * self.lap_adj_sigma ** 2))
-            sim.fill_diagonal_(0)
-            self.lap_adjacency = sim  # [K, K]
+            gate_temp = self.get_gate_temperature()
+            gate = F.softmax(self.gate_logits / gate_temp, dim=0)
+            eff_n = 1.0 / (gate ** 2).sum().item()
 
-    def neighborhood_loss(self):
-        if self.lap_adjacency is None:
-            self.compute_laplacian_adjacency()
-        A = self.lap_adjacency
-        D = torch.diag(A.sum(1))
-        L = D - A  # Laplacian
-        return torch.trace(self.prototypes.T @ L @ self.prototypes)
+            self.graph_history.append(eff_n)
+            if len(self.graph_history) > 5:
+                self.graph_history.pop(0)
 
-    def sinkhorn_weights(self, x, cost_matrix, reg=0.1):
-        # Sinkhorn-style approximation using exponentiated negative cost
-        weights = torch.exp(-cost_matrix / reg)
-        weights = weights / (weights.sum(dim=-1, keepdim=True) + 1e-8)
-        return weights
+            if verbose:
+                active_count = (torch.sigmoid(self.gate_logits) > 0.01).sum().item()
+                print(f"🔍 Effective Prototypes: {eff_n:.2f} | Active: {active_count}/{self.max_prototypes}")
+
+            return eff_n
 
     def forward(self, x):
         gate_temp = self.get_gate_temperature()
-        gate = F.softmax(self.gate_logits / gate_temp, dim=0).unsqueeze(0)
+        gate = F.softmax(self.gate_logits / gate_temp, dim=0).unsqueeze(0)  # [1, P]
+        
+        # Prototype distances and attention
+        dists = torch.cdist(x, self.prototypes)  # [B, P]
+        weights = entmax15(-dists, dim=-1)       # [B, P]
+        self.last_routing_weights = weights.detach()
 
-        d_proto = torch.cdist(x, self.prototypes)  # [B, K]
-        d_pos = torch.cdist(x, self.grid_pos)      # [B, K]
-        d_total = d_proto + d_pos                  # [B, K]
+        # Graph propagation via learned adjacency
+        routed = weights @ entmax15(self.adj_logits, dim=-1)  # [B, P]
 
-        weights = self.sinkhorn_weights(x, d_total, reg=self.temperature)
-        weights = weights * gate
-        weights = weights / (weights.sum(dim=-1, keepdim=True) + 1e-8)
+        # Apply gating
+        gated = routed * gate  # [B, P]
+        gated = gated / (gated.sum(dim=-1, keepdim=True) + 1e-8)
 
-        blended = weights @ self.prototypes
-        return blended, weights
+        # Blend into prototype space
+        blended = gated @ self.prototypes  # [B, D]
+        return blended, gated
 
 # === Node ===
 class Node(nn.Module):
-    def __init__(self, latent_dim, max_grid_size=256):
+    def __init__(self, latent_dim, max_prototypes=256):
         super().__init__()
         self.encoder_fc = nn.Linear(latent_dim, latent_dim)
-        self.som = SoftSOM(latent_dim, max_grid_size)
-        self.node_history = []
-
-        with torch.no_grad():
-            gate_probs = torch.sigmoid(self.som.gate_logits)
-            norm_probs = gate_probs / (gate_probs.sum() + 1e-8)
-            self.initial_gate_entropy = -(norm_probs * norm_probs.clamp(min=1e-8).log()).sum().item()
+        self.prog = ProtoGraph(latent_dim, max_prototypes)
 
     def forward(self, x):
         z = self.encoder_fc(x)
-        topo_z, weights = self.som(z)
-        topo_z = topo_z.squeeze(1)
-        return topo_z, weights
+        z_structured, weights = self.prog(z)
+        return z_structured, weights
 
 # === CLEAR ===
 class CLEAR(nn.Module):
-    def __init__(self, input_channels=3, latent_dim=256, init_nodes=1, max_grid_size=256):
+    def __init__(self, input_channels=3, latent_dim=256, init_nodes=1, max_prototypes=256):
         super().__init__()
-        self.input_channels = input_channels
         self.latent_dim = latent_dim
-        self.max_grid_size = max_grid_size
+        self.max_prototypes = max_prototypes
         self.node_count = init_nodes
-        
-        self.shared_encoder = SharedEncoder(input_channels=input_channels, latent_dim=latent_dim)
 
-        self.alpha_param = nn.Parameter(torch.tensor(0.6))
-        self.memory_bank = nn.Parameter(torch.empty(0, self.latent_dim), requires_grad=False)
-
+        self.shared_encoder = SharedEncoder(input_channels, latent_dim)
         self.query_proj = nn.Linear(latent_dim, latent_dim)
-        self.attn_weights = None
+        self.memory_alpha_raw = nn.Parameter(torch.zeros(latent_dim))
 
-        self.nodes = nn.ModuleList([Node(latent_dim, max_grid_size) for _ in range(self.node_count)])
-        self.decoders = nn.ModuleList([Decoder(input_dim=latent_dim) for _ in range(self.node_count)])
+        self.memory_nodes = []  # per-node compressed memory via KMeans
+        self.nodes = nn.ModuleList([Node(latent_dim, max_prototypes) for _ in range(init_nodes)])
+        self.decoders = nn.ModuleList([Decoder(latent_dim) for _ in range(init_nodes)])
+        self.classifier = nn.Linear(latent_dim, 10)
 
-        #task specific for cifar/classification head
-        self.classifier = nn.Linear(latent_dim, 10)  
+    @property
+    def memory_alpha(self):
+        return torch.sigmoid(self.memory_alpha_raw)
 
     def forward(self, x, y=None):
-        z0 = self.shared_encoder(x)  # [B, D]
+        z0 = self.shared_encoder(x)
 
-        if self.memory_bank is not None and self.memory_bank.size(0) > 0:
-            query = self.query_proj(z0)  # [B, D]
-            query = F.normalize(query, dim=-1)
-            memory_keys = F.normalize(self.memory_bank, dim=-1)  # [P, D]
+        if self.memory_nodes:
+            mem_keys = torch.cat(self.memory_nodes, dim=0)  # [M, D]
+            mem_keys = F.normalize(mem_keys, dim=-1)
+            query = F.normalize(self.query_proj(z0), dim=-1)
 
-            scores = query @ memory_keys.T  # [B, P]
+            sim = query @ mem_keys.T  # [B, M]
+            k = min(16, sim.shape[1])
+            topk = sim.topk(k=k, dim=-1)
+            sparse_weights = torch.zeros_like(sim)
+            sparse_weights.scatter_(1, topk.indices, topk.values)
+            weights = entmax15(sparse_weights, dim=-1)
 
-            gumbel_temp = 0.5
-            gumbel_weights = F.gumbel_softmax(scores, tau=gumbel_temp, hard=False, dim=-1)  # [B, P]
-            memory_output = gumbel_weights @ self.memory_bank
-
-            z_aug = z0 + self.alpha_param * memory_output
+            z_aug = z0 + self.memory_alpha * (weights @ mem_keys)
         else:
             z_aug = z0
 
-        topo_z, _ = self.nodes[-1](z_aug)
-
-        recon = self.decoders[-1](topo_z)
-        logits = self.classifier(topo_z)
+        z_structured, _ = self.nodes[-1](z_aug)
+        recon = self.decoders[-1](z_structured)
+        logits = self.classifier(z_structured)
         return logits, recon
 
-    # === Growth, Diversity, Entropy ===
-    def should_grow(self, min_history=4, convergence_delta=0.05):
+    def add_node_to_memory(self, prototypes, gate_logits, k=16):
+        usage = torch.sigmoid(gate_logits)
+        active = prototypes[usage > 0.01]
+        if active.size(0) < k:
+            print("⚠️ Not enough active prototypes for KMeans.")
+            return
+        with torch.no_grad():
+            km = KMeans(n_clusters=k, random_state=42, n_init='auto')
+            centroids = km.fit(active.cpu().numpy()).cluster_centers_
+            centroids = torch.tensor(centroids, dtype=prototypes.dtype, device=prototypes.device)
+            centroids = F.normalize(centroids, dim=-1)
+        self.memory_nodes.append(centroids)
+
+    def should_grow(self, flat_threshold=1.5, usage_threshold=0.90):
         node = self.nodes[-1]
+        prog = node.prog
 
-        if len(node.node_history) < min_history:
-            print(f"📊 Growth Check: Not enough history yet ({len(node.node_history)} entries).")
-            return False
+        if not prog.graph_history or len(prog.graph_history) < 3:
+            return False  # not enough history
 
-        recent = node.node_history[-min_history:]
+        # Check for plateau
+        delta_eff = max(prog.graph_history) - min(prog.graph_history)
+        plateau = delta_eff < flat_threshold
 
-        # Compute % diffs for convergence check
-        diffs = [abs(recent[i+1] - recent[i]) / (recent[i] + 1e-8) for i in range(len(recent)-1)]
-        avg_change = sum(diffs) / len(diffs)
+        # Check if usage is near max
+        usage = torch.sigmoid(prog.gate_logits)
+        active = (usage > 0.01).sum().item()
+        usage_ratio = active / self.max_prototypes
 
-        # Compression trend: is it consistently going down?
-        compressing = all(recent[i] > recent[i+1] for i in range(len(recent)-1))
+        print("🔍 Node Growth Check (Static Prototype Count)")
+        print(f"    ➤ Δeff: {delta_eff:.4f}")
+        print(f"    ➤ Active Prototypes: {active}/{self.max_prototypes} ({usage_ratio * 100:.2f}%)")
+        print(f"    ➤ Plateau: {plateau}")
 
-        # Usage guard: are we still using a large fraction of SOM?
-        usage_fraction = recent[-1] / node.som.num_cells
-        still_broad = usage_fraction > 0.85  # not magic, just a relative cap
+        if plateau and usage_ratio > usage_threshold:
+            print("🌲 Graph saturated and stable → Growing a new node.")
+            return True
 
-        print(f"📊 Growth Check:")
-        print(f"    ➤ Effective Prototypes: {recent[-1]:.2f}")
-        print(f"    ➤ Avg Δ over {min_history} epochs: {avg_change:.4f}")
-        print(f"    ➤ Usage Fraction: {usage_fraction:.4f}")
-        print(f"    ➤ Compression Trend: {compressing}")
-
-        return compressing and avg_change < convergence_delta and not still_broad
+        return False
 
     def grow_node(self):
         print(f"🌱 Growing CLEAR: Adding Node {self.node_count}")
         self.node_count += 1
-        device = self.nodes[-1].som.prototypes.device
-
-        self.blend_memory(self.nodes[-1].som.prototypes, self.nodes[-1].som.gate_logits)
-
-        new_node = Node(self.latent_dim, self.max_grid_size).to(device)
-
+        device = self.nodes[-1].prog.prototypes.device
+        self.add_node_to_memory(self.nodes[-1].prog.prototypes, self.nodes[-1].prog.gate_logits)
+        new_node = Node(self.latent_dim, self.max_prototypes).to(device)
         self.nodes.append(new_node)
         self.decoders.append(Decoder(self.latent_dim).to(device))
-
-        with torch.no_grad():
-            init_temp = 0.95
-            raw_val = math.log(init_temp / (1.0 - init_temp))
-            new_node.som.temp_raw.fill_(raw_val)
-
-    def blend_memory(self, new_prototypes, gate_logits=None, blend_ratio=0.5):
-        """
-        Blends only active prototypes into the memory bank.
-        """
-        if gate_logits is not None:
-            usage = torch.sigmoid(gate_logits)
-            active_mask = usage > 0.01
-            new_prototypes = new_prototypes[active_mask]
-            if new_prototypes.size(0) == 0:
-                print("⚠️ No active prototypes to add to memory.")
-                return
-
-        if self.memory_bank is None or self.memory_bank.size(0) == 0:
-            self.memory_bank = nn.Parameter(new_prototypes.clone(), requires_grad=False)
-            return
-
-        mem = self.memory_bank.data
-        new = new_prototypes.detach()
-
-        sim = F.cosine_similarity(new.unsqueeze(1), mem.unsqueeze(0), dim=-1)  # [K, M]
-        nearest_idx = sim.argmax(dim=1)  # For each new, find closest mem
-
-        for i in range(new.size(0)):
-            mem_idx = nearest_idx[i]
-            mem[mem_idx] = F.normalize(
-                (1 - blend_ratio) * mem[mem_idx] + blend_ratio * new[i],
-                dim=0
-            )
-
-        self.memory_bank.data = mem
 
     def freeze_node(self, node):
         for param in node.parameters():
             param.requires_grad = False
+        node.eval()
 
-    def node_similarity_loss(self, temperature=0.1):
-        if self.memory_bank is None or self.memory_bank.size(0) == 0:
-            return torch.tensor(0.0, device=self.nodes[0].som.prototypes.device)
-
-        P_new = F.normalize(self.nodes[-1].som.prototypes, dim=1)  # [M, D]
-        P_mem = F.normalize(self.memory_bank, dim=1)               # [N, D]
-
-        logits = P_new @ P_mem.T / temperature  # [M, N]
-        # Negative log of similarity to closest mem key
-        loss = -logits.logsumexp(dim=1).mean()
-        return loss
-
-    def anneal_temp_active_node(self):
-        self.nodes[-1].som.anneal_temp()
-
-    def log_effective_prototypes(self, log_verbose=False):
-        node = self.nodes[-1]
-        with torch.no_grad():
-            gate_temp = node.som.get_gate_temperature()
-            gate = F.softmax(node.som.gate_logits / gate_temp, dim=0)
-            eff_n = 1.0 / (gate ** 2).sum().item()
-            node.node_history.append(eff_n)
-
-            if log_verbose:
-                active_count = (torch.sigmoid(node.som.gate_logits) > 0.01).sum().item()
-                print(f"🔍 Effective Prototypes: {eff_n:.2f} | Active: {active_count}/{node.som.num_cells}")
+    def adjacency_l1_loss(self, node_idx=-1):
+        return self.nodes[node_idx].prog.adj_logits.abs().mean()
 
     def epoch_tasks(self):
-        self.log_effective_prototypes()
-        self.anneal_temp_active_node()
+        self.nodes[-1].prog.get_effective_prototypes(verbose=True)

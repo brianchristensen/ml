@@ -13,17 +13,18 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # torch.cuda.manual_seed_all(42)
 
 # === Hyperparameters ===
-epochs = 40
+epochs = 50
 latent_dim = 256
-max_grid_size = 256
+max_prototypes = 128
 # loss coefficients
-classifier_λ = 0.1
-recon_λ = 1
-node_sim_λ = 1
-label_smoothing = 0.1
+classifier_λ = 1
+recon_λ = .8
+adj_l1_λ = 0.1
+
+label_smoothing = 0.01
 
 # === Model & Optimizer ===
-model = CLEAR(latent_dim=latent_dim, max_grid_size=max_grid_size).to(device)
+model = CLEAR(latent_dim=latent_dim, max_prototypes=max_prototypes).to(device)
 optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-4)
 
 # === Data ===
@@ -63,10 +64,8 @@ for epoch in range(1, epochs + 1):
     epoch_start_time = time.time()
     model.train()
 
-    total_loss = total_acc = 0
-    current_node_sim = 0
-    total_recon_loss = 0
-    total_samples = 0
+    total_loss = total_acc = total_samples = 0
+    total_recon_loss = total_adj_loss = 0
 
     for x, y in train_loader:
         x, y = x.to(device), y.to(device)
@@ -75,15 +74,15 @@ for epoch in range(1, epochs + 1):
 
         # Losses
         loss_cls = F.cross_entropy(logits, y, label_smoothing=label_smoothing)
-        node_sim = model.node_similarity_loss()
-        neighborhood_loss = model.nodes[-1].som.neighborhood_loss()
         recon_loss = F.mse_loss(recon, x)
+
+        # Regularizer
+        adj_l1 = model.adjacency_l1_loss()
 
         loss = (
             classifier_λ * loss_cls +
-            node_sim_λ * node_sim +
-            neighborhood_loss +
-            recon_λ * recon_loss
+            recon_λ * recon_loss +
+            adj_l1_λ * adj_l1
         )
 
         optimizer.zero_grad()
@@ -94,8 +93,8 @@ for epoch in range(1, epochs + 1):
             pred = logits.argmax(dim=1)
             total_acc += (pred == y).sum().item()
             total_loss += loss.item()
-            current_node_sim = node_sim.item()
             total_recon_loss += recon_loss.item()
+            total_adj_loss += adj_l1.item()
             total_samples += y.size(0)
 
     # === Log to Dashboard
@@ -107,14 +106,12 @@ for epoch in range(1, epochs + 1):
     dashboard.update_node_metrics(
         node_idx=model.node_count - 1,
         acc=acc,
-        node_sim=current_node_sim,
         recon=total_recon_loss,
-        temp=node.som.temperature.item()
+        adj=total_adj_loss
     )
     dashboard.print_dashboard()
 
     # === Growth Step
-    model.anneal_temp_active_node()
     if model.should_grow():
         model.freeze_node(model.nodes[-1])
         model.grow_node()
