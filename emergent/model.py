@@ -2,70 +2,79 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-# === MODEL ===
+# Adaptive Latent System (ALS)
 class ALS(nn.Module):
-    def __init__(self, input_dim, latent_dim=256, max_steps=8, num_classes=10):
+    def __init__(self, input_dim, latent_dim=256, num_generators=8, steps=4, num_classes=10):
         super().__init__()
         self.latent_dim = latent_dim
-        self.max_steps = max_steps
+        self.steps = steps
+        self.num_generators = num_generators
+        self.norm = nn.LayerNorm(latent_dim)
 
-        # Core components
+        # Input projection
         self.encoder = nn.Sequential(
             nn.Linear(input_dim, latent_dim),
+            nn.GELU(),
+            nn.Dropout(0.5),
+            nn.Linear(latent_dim, latent_dim),
             nn.ReLU()
         )
 
-        self.decoder = nn.Linear(latent_dim, num_classes)
+        # Latent generators
+        self.generators = nn.Parameter(torch.randn(num_generators, latent_dim))
 
-        # Rewrite modules
-        self.rewrite_gate = nn.Sequential(
-            nn.Linear(latent_dim, latent_dim),
-            nn.Sigmoid()
-        )
-        self.rewrite_net = nn.Sequential(
+        # Step embedding (temporal signal)
+        self.step_embed = nn.Embedding(steps, latent_dim)
+
+        # Binary operator (latent rewrite)
+        self.op_net = nn.Sequential(
             nn.Linear(2 * latent_dim, latent_dim),
             nn.ReLU(),
             nn.Linear(latent_dim, latent_dim)
         )
 
-        # Per-step generators and time embeddings
-        self.step_generators = nn.Parameter(torch.randn(max_steps, latent_dim))
-        self.time_embed = nn.Embedding(max_steps, latent_dim)
+        # Feedback (top-down modulation)
+        self.feedback_net = nn.Sequential(
+            nn.Linear(2 * latent_dim, latent_dim),
+            nn.GELU(),
+            nn.Linear(latent_dim, latent_dim)
+        )
 
-        # Final normalization after each step
-        self.norm = nn.LayerNorm(latent_dim)
+        # Class prototypes (e.g., for cosine or distance-based decoding)
+        self.class_prototypes = nn.Parameter(torch.randn(num_classes, latent_dim))
 
-        # Halting head: learns [batch_size, max_steps] halting weights
-        self.halting_head = nn.Linear(latent_dim, max_steps)
-
-    def binary_op(self, prev, gen):
-        gate = self.rewrite_gate(prev)
-        delta = self.rewrite_net(torch.cat([prev, gen], dim=-1))
-        return prev + gate * delta
+    def binary_op(self, x, y):
+        return self.op_net(torch.cat([x, y], dim=-1))
 
     def forward(self, x):
-        batch_size = x.size(0)
-        z = self.encoder(x)  # [B, D]
+        z_orig = self.encoder(x)
+        z = z_orig
+        z_states = []
 
-        # Track all step outputs
-        step_outputs = []
+        # Forward pass: latent rewrites over time
+        for i in range(self.steps):
+            step_emb = self.step_embed(torch.tensor(i, device=x.device)).unsqueeze(0).expand_as(z)
 
-        for step in range(self.max_steps):
-            g = self.step_generators[step].unsqueeze(0).expand(batch_size, -1)
-            t = self.time_embed(torch.tensor(step, device=x.device)).unsqueeze(0).expand(batch_size, -1)
-            z = self.binary_op(z, g + t)
+            # 🌀 Random generator sampling
+            g_indices = torch.randint(0, self.num_generators, (x.size(0),), device=x.device)
+            g = self.generators[g_indices]
+
+            # 🔁 Residual + rewrite + time awareness
+            rewrite = self.binary_op(z, g + step_emb + z_orig)
+            z = z + rewrite  # <-- step-wise residual connection
             z = self.norm(z)
-            step_outputs.append(z.unsqueeze(1))  # [B, 1, D]
+            z_states.append(z)
 
-        # Stack all step outputs → [B, T, D]
-        z_all = torch.cat(step_outputs, dim=1)
+        # Backward pass: top-down refinement through time
+        context = z_states[-1]
+        for i in reversed(range(self.steps - 1)):
+            feedback = self.feedback_net(torch.cat([z_states[i], context], dim=-1))
+            z_states[i] = z_states[i] + feedback
+            context = z_states[i]  # updated context flows backward
 
-        # Halting distribution over max_steps → [B, T]
-        halting_scores = torch.sigmoid(self.halting_head(z_all[:, -1]))  # [B, T]
-        halting_weights = halting_scores / (halting_scores.sum(dim=-1, keepdim=True) + 1e-8)
-        halting_weights = halting_weights.unsqueeze(-1)
+        # Final representation is the most refined early step
+        refined_z = z_states[0]
 
-        # Weighted sum across max_steps → [B, D]
-        z_final = torch.sum(z_all * halting_weights, dim=1)
-
-        return self.decoder(z_final)
+        # Output via negative distance to prototypes
+        logits = -torch.cdist(refined_z, self.class_prototypes)
+        return logits

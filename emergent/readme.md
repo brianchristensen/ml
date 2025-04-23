@@ -1,22 +1,38 @@
-### 🔧 Architecture Philosophy (V1 Manifesto)
+### 🔧 Architecture Manifesto
 
-1. Algebraic Core.
-The model is a computation engine based on structured rewrites in latent space, not a feedforward stack.
+Rewrites are the primitive operation of intelligence.
 
-2. Emergent Complexity.
-No baked-in hierarchies. No ResNets.
-Any hierarchy or abstraction must emerge through training or latent self-organization.
+It’s not weights.
+It’s not tokens.
+It’s not even layers.
 
-3. Interpretability First.
-Every module, every rewrite, should be traceable and explorable.
-Not post-hoc explanations — native interpretability.
+It’s the ability to rewrite internal structure in response to experience.
 
-4. Minimality.
-Each component must justify its existence — in function, clarity, and necessity.
-If it can be learned instead of hardcoded, we learn it.
+🧬 It’s Rewrites All the Way Down
 
-5. Task-Agnostic Design.
-Nothing should be tied to CIFAR-10, classification, or images.
-The architecture is general-purpose symbolic computation.
-The dataset is just the substrate.
+DNA: mutates, recombines, gets rewritten.
 
+Immune system: rewrites itself constantly to detect new pathogens.
+
+Neuroplasticity: synapses restructure, entire circuits reconfigure.
+
+Culture, language, reasoning: abstract rewrites over symbolic space.
+
+Planning and imagination: predictive rewrites of mental trajectories.
+
+Every level of the stack is a rewriting machine, operating under local rules and global pressure.
+
+And most importantly:
+
+The structures that survive rewrites long enough become higher-level abstractions.
+(i.e., emergent hierarchy is not designed — it's stabilized.)
+
+We are building a rewriting substrate.
+
+Something that can:
+
+Rewrite its own computation graph (via operators + routing)
+
+Stabilize emergent patterns (via learning + task feedback)
+
+Climb the hierarchy — from perception to inference to reasoning
