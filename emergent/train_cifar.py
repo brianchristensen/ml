@@ -6,18 +6,18 @@ import torch.optim as optim
 import time
 from datetime import datetime
 import numpy as np
-from model import ALS
+from model import Rewriter
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # hyperparams
 epochs = 20
 num_generators = 24
-steps = 4
+steps = 8
 latent_dim = 512
 input_dim = 3 * 32 * 32
 
-label_smoothing = 0.5
+label_smoothing = 0.2
 
 # CIFAR-10 as flattened inputs
 transform = transforms.Compose([
@@ -32,7 +32,7 @@ testset = torchvision.datasets.CIFAR10(root='./data', train=False, download=True
 testloader = torch.utils.data.DataLoader(testset, batch_size=128, shuffle=False)
 
 # Model setup
-model = ALS(input_dim=input_dim, latent_dim=latent_dim, num_generators=num_generators, steps=steps).to(device)
+model = Rewriter(input_dim=input_dim, latent_dim=latent_dim, num_generators=num_generators, steps=steps).to(device)
 optimizer = optim.Adam(model.parameters(), lr=1e-3)
 
 start_time = time.time()
