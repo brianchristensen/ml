@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-class Rewriter(nn.Module):
+class Rewrite(nn.Module):
     def __init__(self, input_dim, latent_dim=256, num_generators=8, steps=4, num_classes=10):
         super().__init__()
         self.latent_dim = latent_dim
@@ -10,7 +10,6 @@ class Rewriter(nn.Module):
         self.num_generators = num_generators
         self.norm = nn.LayerNorm(latent_dim)
 
-        # Input projection
         self.encoder = nn.Sequential(
             nn.Linear(input_dim, latent_dim),
             nn.GELU(),
@@ -19,74 +18,70 @@ class Rewriter(nn.Module):
             nn.ReLU()
         )
 
-        # Latent generators
         self.generators = nn.Parameter(torch.randn(num_generators, latent_dim))
 
-        # Step embedding (temporal signal)
-        self.step_embed = nn.Embedding(steps, latent_dim)
-
-        # Binary operator (latent rewrite)
         self.op_net = nn.Sequential(
             nn.Linear(2 * latent_dim, latent_dim),
             nn.ReLU(),
             nn.Linear(latent_dim, latent_dim)
         )
 
-        # Feedback (top-down modulation)
-        self.feedback_net = nn.Sequential(
-            nn.Linear(2 * latent_dim, latent_dim),
-            nn.GELU(),
-            nn.Linear(latent_dim, latent_dim)
-        )
-
-        # Feedback to generators (modulates generator embedding)
-        self.feedback_to_gen = nn.Sequential(
-            nn.Linear(2 * latent_dim, latent_dim),
-            nn.GELU(),
-            nn.Linear(latent_dim, latent_dim)
-        )
-
-        # Class prototypes (e.g., for cosine or distance-based decoding)
         self.class_prototypes = nn.Parameter(torch.randn(num_classes, latent_dim))
+
+        # === Diagnostics ===
+        self.register_buffer('generator_counts', torch.zeros(num_generators))
+        self.latent_norms = []
+        self.rewrite_deltas = []
 
     def binary_op(self, x, y):
         return self.op_net(torch.cat([x, y], dim=-1))
 
-    def forward(self, x):
+    def forward(self, x, collect_diagnostics=False):
         z_orig = self.encoder(x)
         z = z_orig
-        z_states = []
-        g_indices_list = []
+        latent_steps = [z]
 
-        # 🔁 Forward pass: latent rewrites over time
         for i in range(self.steps):
-            step_emb = self.step_embed(torch.tensor(i, device=x.device)).unsqueeze(0).expand_as(z)
-
-            # 🌀 Random generator sampling
             g_indices = torch.randint(0, self.num_generators, (x.size(0),), device=x.device)
             g = self.generators[g_indices]
-            g_indices_list.append(g_indices)
-
-            # 🔁 Residual + rewrite + time awareness
-            rewrite = self.binary_op(z, g + step_emb + z_orig)
+            rewrite = self.binary_op(z, g + z_orig)
             z = z + rewrite
             z = self.norm(z)
-            z_states.append(z)
+            latent_steps.append(z)
 
-        # 🔁 Backward pass: feedback refinement + generator update
-        context = z_states[-1]
-        for i in reversed(range(self.steps - 1)):
-            # 💡 Top-down feedback into latent space
-            feedback = self.feedback_net(torch.cat([z_states[i], context], dim=-1))
-            z_states[i] = z_states[i] + feedback
-            context = z_states[i]
+            if collect_diagnostics:
+                with torch.no_grad():
+                    self.generator_counts += torch.bincount(g_indices, minlength=self.num_generators).float().to(self.generator_counts.device)
 
-            # 🧬 Feedback into generator representation
-            g_indices = g_indices_list[i]
-            g_feedback = self.feedback_to_gen(torch.cat([z_states[i], context], dim=-1))
-            self.generators.data[g_indices] += 0.01 * g_feedback
+        if collect_diagnostics:
+            with torch.no_grad():
+                self.latent_norms.append([z_.norm(dim=-1).mean().item() for z_ in latent_steps])
+                deltas = [
+                    (latent_steps[i] - latent_steps[i - 1]).norm(dim=-1).mean().item()
+                    for i in range(1, len(latent_steps))
+                ]
+                self.rewrite_deltas.append(deltas)
 
-        # Final refined state
-        refined_z = z_states[0]
-        logits = -torch.cdist(refined_z, self.class_prototypes)
+        logits = -torch.cdist(z, self.class_prototypes)
         return logits
+
+    def report_diagnostics(self):
+        print("\n🔍 Generator Usage:")
+        usage = self.generator_counts / self.generator_counts.sum()
+        for i, p in enumerate(usage):
+            print(f"  G[{i:02d}]: {p.item():.3%}")
+
+        if self.latent_norms:
+            avg_norms = torch.tensor(self.latent_norms).mean(dim=0)
+            print("\n📈 Avg Latent Norms per Step:")
+            print("  ", ["{:.2f}".format(v) for v in avg_norms])
+
+        if self.rewrite_deltas:
+            avg_deltas = torch.tensor(self.rewrite_deltas).mean(dim=0)
+            print("\n🔁 Avg Rewrite Deltas per Step:")
+            print("  ", ["{:.2f}".format(v) for v in avg_deltas])
+
+    def reset_diagnostics(self):
+        self.generator_counts.zero_()
+        self.latent_norms.clear()
+        self.rewrite_deltas.clear()
