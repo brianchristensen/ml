@@ -49,9 +49,8 @@ def train():
     dataset = SymbolicRoutingDataset(n_samples=2000)
     loader = DataLoader(dataset, batch_size=32, shuffle=True)
 
-    for epoch in range(epochs + 1):
+    for epoch in range(epochs):
         total_loss = 0
-        model.reset_epoch()
         for x, label in loader:
             y_target = torch.stack([dataset.generate_label(x[i], label[i]) for i in range(len(x))])
 
@@ -70,6 +69,8 @@ def train():
                 f"nov: {diag['novelty']:.3f} | conf: {diag['conflict']:.3f} | "
                 f"used: {diag['usage']} | last op: {diag['last_choice']} | "
                 f"rewrites: {diag['rewrites']} | usage: {diag['usage_hist']}")
+
+        model.reset_epoch()
 
     model.dump_routing_summary("logs/routing_summary.csv")
 

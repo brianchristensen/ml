@@ -4,11 +4,12 @@ import torch.nn.functional as F
 import csv
 
 class Temper(nn.Module):
-    def __init__(self, input_dim, hidden_dim, id, memory_size=100):
+    def __init__(self, input_dim, hidden_dim, id, memory_size=100, max_ops=6):
         super().__init__()
         self.id = id
         self.input_dim = input_dim
         self.hidden_dim = hidden_dim
+        self.max_ops = max_ops
 
         self.input_proj = nn.Linear(self.input_dim, self.hidden_dim)
         self.operator_bank = nn.ModuleList([
@@ -41,41 +42,40 @@ class Temper(nn.Module):
         )
 
     def forward(self, x, context=None):
+        x_proj = self.input_proj(x)
+
         if self.memory:
             mem = torch.stack(self.memory)
-            x_exp = x.unsqueeze(1).expand(-1, mem.shape[0], -1)
-            mem_exp = mem.unsqueeze(0).expand(x.shape[0], -1, -1)
-            novelty = torch.mean(torch.norm(x_exp - mem_exp, dim=-1)).item()
+            x_exp = x_proj.unsqueeze(1).expand(-1, mem.shape[0], -1)
+            mem_exp = mem.unsqueeze(0).expand(x_proj.shape[0], -1, -1)
+            dists = torch.norm(x_exp - mem_exp, dim=-1)
+            novelty_std = dists.std().item()
         else:
-            novelty = 1.0
-        self.last_novelty = min(1.5, novelty)
+            novelty_std = 1.0
+        self.last_novelty = min(1.5, novelty_std)
 
         weights = F.softmax(self.routing_logits, dim=0)
         self.last_conflict = float(torch.std(weights).item())
 
-        # Get top 2 ops (compositional step!)
         top2 = torch.topk(weights, k=2)
         idx_a, idx_b = top2.indices[0].item(), top2.indices[1].item()
         op_a, op_b = self.operator_bank[idx_a], self.operator_bank[idx_b]
 
-        # 🔧 Input projection added here!
-        x_proj = self.input_proj(x)  # [batch, hidden_dim]
-
         x1 = op_a(x_proj)
         out = op_b(x1)
 
-        # Log routing stats
         self.usage_hist[idx_a] += 1
         self.usage_hist[idx_b] += 1
-        self.last_choice = idx_b  # store second op as "final" choice
+        self.last_choice = idx_b
         self.usage_count += 1
 
-        for i in range(x.shape[0]):
-            self.memory.append(x[i].detach())
+        for i in range(x_proj.shape[0]):
+            self.memory.append(x_proj[i].detach())
             if len(self.memory) > self.max_memory:
                 self.memory.pop(0)
 
         self.maybe_rewrite_operator()
+        self.maybe_expand_operator()
         return out
 
     def update_plasticity(self, reward):
@@ -98,9 +98,39 @@ class Temper(nn.Module):
             return True
         return False
 
+    def maybe_expand_operator(self):
+        if len(self.operator_bank) >= self.max_ops:
+            return
+        if self.usage_count < 200:
+            return
+        conf_thresh = 0.7 - 0.3 * min(1.0, self.usage_count / 500.0)
+        low_confidence = torch.max(F.softmax(self.routing_logits, dim=0)).item() < conf_thresh
+        if self.last_novelty > 0.9 and self.last_conflict > 0.2 and low_confidence:
+            self.operator_bank.append(self.make_operator())
+            new_logits = torch.cat([self.routing_logits.data, torch.tensor([0.0], device=self.routing_logits.device)])
+            self.routing_logits = nn.Parameter(new_logits)
+            self.usage_hist.append(0)
+            print(f"[Temper {self.id}] Expanded to {len(self.operator_bank)} operators.")
+
+    def maybe_prune_operators(self, min_usage=5, min_logit=-2.0):
+        if len(self.operator_bank) <= 3:
+            return
+        to_keep = [i for i, (u, l) in enumerate(zip(self.usage_hist, self.routing_logits)) if u > min_usage or l.item() > min_logit]
+        if len(to_keep) == len(self.operator_bank):
+            return
+        self.operator_bank = nn.ModuleList([self.operator_bank[i] for i in to_keep])
+        self.routing_logits = nn.Parameter(torch.stack([self.routing_logits[i] for i in to_keep]))
+        self.usage_hist = [self.usage_hist[i] for i in to_keep]
+        print(f"[Temper {self.id}] Pruned to {len(self.operator_bank)} operators.")
+
+    def logit_decay(self, factor=0.98):
+        with torch.no_grad():
+            self.routing_logits.data *= factor
+
     def reset_epoch_counters(self):
         self.rewrites_this_epoch = 0
         self.usage_hist = [0 for _ in range(len(self.operator_bank))]
+        self.logit_decay()
 
     def diagnostics(self):
         return {
@@ -128,22 +158,19 @@ class TemperNet(nn.Module):
     def update_tempers_with_local_rewards(self, y_pred, y_target):
         loss_fn = nn.MSELoss(reduction='none')
         full_loss = loss_fn(y_pred, y_target).mean()
-
         for i, temper in enumerate(self.tempers):
-            # Remove one Temper's contribution and recompute
             alt_outputs = self.last_outputs.copy()
             alt_outputs[i] = torch.zeros_like(alt_outputs[i])
             alt_input = torch.cat(alt_outputs, dim=-1)
             alt_pred = self.readout(alt_input).detach()
-
             delta = (alt_pred - y_target).pow(2).mean() - full_loss
-            reward = 5.0 * delta.item()  # amplify local signal
+            reward = 5.0 * delta.item()
             temper.update_plasticity(reward)
 
     def dump_routing_summary(self, path="routing_summary.csv"):
         with open(path, "w", newline="") as f:
             writer = csv.writer(f)
-            writer.writerow(["temper", "op0", "op1", "op2"])
+            writer.writerow(["temper"] + [f"op{i}" for i in range(max(len(t.routing_logits) for t in self.tempers))])
             for i, temper in enumerate(self.tempers):
                 weights = F.softmax(temper.routing_logits, dim=0).detach().cpu().numpy()
                 writer.writerow([i] + [f"{w:.4f}" for w in weights])
@@ -151,6 +178,7 @@ class TemperNet(nn.Module):
     def reset_epoch(self):
         for temper in self.tempers:
             temper.reset_epoch_counters()
+            temper.maybe_prune_operators()
 
     def get_diagnostics(self):
         return [t.diagnostics() for t in self.tempers]
