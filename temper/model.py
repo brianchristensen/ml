@@ -12,27 +12,20 @@ class Temper(nn.Module):
         self.max_ops = max_ops
 
         self.input_proj = nn.Linear(self.input_dim, self.hidden_dim)
-        self.operator_bank = nn.ModuleList([
-            self.make_operator(),
-            self.make_operator(),
-            self.make_operator()
-        ])
+        self.operator_bank = nn.ModuleList([self.make_operator() for _ in range(3)])
         self.routing_logits = nn.Parameter(torch.randn(len(self.operator_bank)))
 
         self.memory = []
         self.memory_size = memory_size
-
         self.plasticity = 1.0
         self.usage_count = 0
         self.success_count = 0
         self.rewrites_this_epoch = 0
-
-        # Diagnostics
+        self.usage_hist = [0] * len(self.operator_bank)
+        self.max_memory = 50
         self.last_novelty = 0.0
         self.last_conflict = 0.0
         self.last_choice = -1
-        self.usage_hist = [0, 0, 0]
-        self.max_memory = 50
 
     def make_operator(self):
         return nn.Sequential(
@@ -74,9 +67,22 @@ class Temper(nn.Module):
             if len(self.memory) > self.max_memory:
                 self.memory.pop(0)
 
-        self.maybe_rewrite_operator()
-        self.maybe_expand_operator()
         return out
+
+    def control_logic(self, gates):
+        if self.usage_count >= 50 and self.rewrites_this_epoch < 2 and gates[0] > 0.5:
+            worst_op_idx = torch.argmin(self.routing_logits).item()
+            self.operator_bank[worst_op_idx] = self.make_operator()
+            with torch.no_grad():
+                self.routing_logits[worst_op_idx] = 0.0
+            self.rewrites_this_epoch += 1
+
+        if self.usage_count >= 200 and gates[1] > 0.5 and len(self.operator_bank) < self.max_ops:
+            self.operator_bank.append(self.make_operator())
+            new_logits = torch.cat([self.routing_logits.data, torch.tensor([0.0], device=self.routing_logits.device)])
+            self.routing_logits = nn.Parameter(new_logits)
+            self.usage_hist.append(0)
+            print(f"[Temper {self.id}] Expanded to {len(self.operator_bank)} operators.")
 
     def update_plasticity(self, reward):
         self.success_count += int(reward > 0.5)
@@ -85,32 +91,6 @@ class Temper(nn.Module):
         else:
             self.plasticity *= 1.01
         self.plasticity = min(max(self.plasticity, 0.01), 1.0)
-
-    def maybe_rewrite_operator(self):
-        if self.usage_count < 50 or self.rewrites_this_epoch >= 2:
-            return False
-        if self.plasticity > 0.8 and self.last_novelty > 0.6 and self.success_count < 3:
-            worst_op_idx = torch.argmin(self.routing_logits).item()
-            self.operator_bank[worst_op_idx] = self.make_operator()
-            with torch.no_grad():
-                self.routing_logits[worst_op_idx] = 0.0
-            self.rewrites_this_epoch += 1
-            return True
-        return False
-
-    def maybe_expand_operator(self):
-        if len(self.operator_bank) >= self.max_ops:
-            return
-        if self.usage_count < 200:
-            return
-        conf_thresh = 0.7 - 0.3 * min(1.0, self.usage_count / 500.0)
-        low_confidence = torch.max(F.softmax(self.routing_logits, dim=0)).item() < conf_thresh
-        if self.last_novelty > 0.9 and self.last_conflict > 0.2 and low_confidence:
-            self.operator_bank.append(self.make_operator())
-            new_logits = torch.cat([self.routing_logits.data, torch.tensor([0.0], device=self.routing_logits.device)])
-            self.routing_logits = nn.Parameter(new_logits)
-            self.usage_hist.append(0)
-            print(f"[Temper {self.id}] Expanded to {len(self.operator_bank)} operators.")
 
     def maybe_prune_operators(self, min_usage=5, min_logit=-2.0):
         if len(self.operator_bank) <= 3:
@@ -150,8 +130,31 @@ class TemperNet(nn.Module):
         self.tempers = nn.ModuleList([Temper(input_dim, hidden_dim, id=i) for i in range(num_tempers)])
         self.readout = nn.Linear(hidden_dim * num_tempers, output_dim)
 
+        self.embed_table = nn.Embedding(num_tempers, hidden_dim)
+        self.policy = nn.Sequential(
+            nn.Linear(3 + hidden_dim, 8),
+            nn.ReLU(),
+            nn.Linear(8, 2),
+            nn.Sigmoid()
+        )
+
     def forward(self, x, context=None):
-        self.last_outputs = [temper(x, context) for temper in self.tempers]
+        self.last_outputs = []
+        for i, temper in enumerate(self.tempers):
+            out = temper(x, context)
+            self.last_outputs.append(out)
+
+            # Shared meta-control logic with learned temper identity
+            input_stats = torch.tensor([
+                temper.last_novelty,
+                temper.last_conflict,
+                temper.plasticity
+            ], dtype=torch.float32, device=x.device)
+            temper_embed = self.embed_table(torch.tensor(i, device=x.device))
+            control_input = torch.cat([input_stats, temper_embed], dim=0)
+            gates = self.policy(control_input)
+            temper.control_logic(gates)
+
         cat = torch.cat(self.last_outputs, dim=-1)
         return self.readout(cat)
 

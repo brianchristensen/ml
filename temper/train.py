@@ -36,7 +36,7 @@ class SymbolicRoutingDataset(Dataset):
 
 # --------- Training Loop ---------
 def train():
-    epochs = 20
+    epochs = 50
     input_dim = 3
     hidden_dim = 8
     output_dim = 1  # regression target
