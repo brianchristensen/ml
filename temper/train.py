@@ -36,7 +36,7 @@ class SymbolicRoutingDataset(Dataset):
 
 # --------- Training Loop ---------
 def train():
-    epochs = 50
+    epochs = 100
     input_dim = 3
     hidden_dim = 8
     output_dim = 1  # regression target
@@ -63,13 +63,8 @@ def train():
             model.update_tempers_with_local_rewards(y_pred, y_target)
             total_loss += loss.item()
 
-        print(f"Epoch {epoch+1}, Loss: {total_loss:.4f}")
-        for diag in model.get_diagnostics():
-            print(f" Temper {diag['id']} | plast: {diag['plasticity']:.3f} | "
-                f"nov: {diag['novelty']:.3f} | conf: {diag['conflict']:.3f} | "
-                f"used: {diag['usage']} | last op: {diag['last_choice']} | "
-                f"rewrites: {diag['rewrites']} | usage: {diag['usage_hist']}")
-
+        model.print_epoch_summary(epoch, total_loss)
+        model.print_routing_diagnostics()
         model.reset_epoch()
 
     model.dump_routing_summary("logs/routing_summary.csv")
