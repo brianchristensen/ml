@@ -36,3 +36,5 @@ Rewrite its own computation graph (via operators + routing)
 Stabilize emergent patterns (via learning + task feedback)
 
 Climb the hierarchy — from perception to inference to reasoning
+
+Temper (n.): A localized, adaptive unit of computation that modifies its own functional behavior in response to external context or internal pressure. Unlike fixed functions, tempers exhibit plasticity — not just computing, but rewriting the terms of computation.
