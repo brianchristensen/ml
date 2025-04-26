@@ -342,14 +342,13 @@ class TemperNet(nn.Module):
             'path_lengths': []
         }
 
-    def forward(self, x, return_hidden=False):
+    def forward(self, x, return_hidden=False, max_path_hops=8):
         self.path_stats = {
             'start_counts': defaultdict(int),
             'hops': defaultdict(lambda: defaultdict(int)),
             'path_lengths': []
         }
 
-        used_tempers = set()
         path = []
         prev_id = None
         current_output = x
@@ -359,13 +358,13 @@ class TemperNet(nn.Module):
         matched_path = self.query_gem_for_path(input_summary)
 
         if matched_path is not None:
-            for choice in matched_path:
-                if choice in used_tempers:
-                    break
+            for idx, choice in enumerate(matched_path):
+                if idx >= max_path_hops:
+                    break  # Enforce max hops even during GEM replay
+
                 temper = self.tempers[choice]
                 current_output = temper(current_output)
                 path.append((choice, current_output))
-                used_tempers.add(choice)
 
                 if prev_id is not None:
                     self.path_stats['hops'][prev_id][choice] += 1
@@ -399,15 +398,16 @@ class TemperNet(nn.Module):
             policy_input = torch.cat([input_summary, temper_embed, temper_input], dim=-1)
             choice = self.policy.sample(policy_input)
 
-            # Note: choice is now a tensor, not integer
             if len(path) == 0 and choice == len(self.tempers):
                 continue  # Force at least one temper
-            elif choice == len(self.tempers) or choice.item() in used_tempers:
+            elif choice == len(self.tempers):
                 break
 
-            choice_idx = choice.item()  # Needed to actually index
+            if len(path) >= max_path_hops:
+                break  # Cap path length for safety
 
-            used_tempers.add(choice_idx)
+            choice_idx = choice.item()
+
             temper = self.tempers[choice_idx]
             current_output = temper(current_output)
             path.append((choice_idx, current_output))
