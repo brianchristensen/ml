@@ -142,26 +142,22 @@ class Temper(nn.Module):
 
         self.input_proj = nn.Linear(input_dim, hidden_dim)
         self.operator_bank = nn.ModuleList([self.make_operator() for _ in range(3)])
-        self.operator_embeddings = nn.ParameterList([
-            nn.Parameter(torch.randn(hidden_dim)) for _ in range(3)
-        ])
-        self.operator_freshness = torch.zeros(len(self.operator_bank), device=self.input_proj.weight.device)
-        self.routing_logits = nn.Parameter(torch.randn(len(self.operator_bank), device=self.input_proj.weight.device))
+        self.routing_logits = nn.Parameter(torch.randn(len(self.operator_bank)))
 
         self.memory = []
         self.memory_size = memory_size
+        self.max_memory = 50
         self.plasticity = torch.tensor(1.0)
         self.success_count = 0
         self.usage_count = 0
         self.rewrites_this_epoch = 0
         self.usage_hist = torch.zeros(len(self.operator_bank), device=self.input_proj.weight.device)
-        self.max_memory = 50
+        self.operator_freshness = torch.zeros(len(self.operator_bank), device=self.input_proj.weight.device)
         self.last_novelty = torch.tensor(0.0)
         self.last_conflict = torch.tensor(0.0)
         self.last_choice = -1
-        self.moving_avg_value = torch.tensor(0.0)
-        self.baseline_decay = 0.95
         self.moving_avg_reward = torch.tensor(0.0)
+        self.baseline_decay = 0.95
         self.is_fresh = False
         self.fresh_counter = 0
 
@@ -174,19 +170,12 @@ class Temper(nn.Module):
         )
 
     def make_operator(self):
-        op = nn.ModuleDict({
-            'pre_relu': nn.ReLU(),
-            'linear': nn.Linear(self.hidden_dim, self.hidden_dim),
-            'post_relu': nn.ReLU(),
-            'film_gen': nn.Sequential(
-                nn.Linear(self.hidden_dim, self.hidden_dim * 2),
-                nn.ReLU(),
-                nn.Linear(self.hidden_dim * 2, self.hidden_dim * 2)
-            )
-        })
-        nn.init.zeros_(op['film_gen'][-1].weight)
-        nn.init.zeros_(op['film_gen'][-1].bias)
-        return op
+        return nn.Sequential(
+            nn.Linear(self.hidden_dim, self.hidden_dim),
+            nn.ReLU(),
+            nn.Linear(self.hidden_dim, self.hidden_dim),
+            nn.ReLU()
+        )
 
     def to(self, *args, **kwargs):
         super().to(*args, **kwargs)
@@ -194,11 +183,17 @@ class Temper(nn.Module):
         if device is not None:
             self.routing_logits.data = self.routing_logits.data.to(device)
             self.usage_hist = self.usage_hist.to(device)
+            self.operator_freshness = self.operator_freshness.to(device)
             self.memory = [m.to(device) for m in self.memory]
         return self
 
     def forward(self, x):
         device = x.device
+
+        if self.usage_hist.device != device:
+            self.usage_hist = self.usage_hist.to(device)
+        if self.operator_freshness.device != device:
+            self.operator_freshness = self.operator_freshness.to(device)
 
         if x.shape[-1] == self.input_dim:
             x_proj = self.input_proj(x)
@@ -218,23 +213,15 @@ class Temper(nn.Module):
         self.last_novelty = torch.clamp(novelty_score, max=1.5)
 
         weights = F.softmax(self.routing_logits, dim=0)
-        weights = weights.to(x_proj.device)
+        weights = weights.to(device)
         self.last_conflict = torch.std(weights)
 
         out = torch.zeros_like(x_proj)
 
         for i, (op, w) in enumerate(zip(self.operator_bank, weights)):
-            z = self.operator_embeddings[i]
-            film_params = op['film_gen'](z)
-            gamma, beta = film_params.chunk(2, dim=-1)
-
-            h = op['pre_relu'](x_proj)
-            h = gamma.unsqueeze(0) * h + beta.unsqueeze(0)
-            h = op['linear'](h)
-            h = op['post_relu'](h)
-
+            h = op(x_proj)
             out = out + w * h
-            self.usage_hist[i] = self.usage_hist[i] + w.detach()
+            self.usage_hist[i] += w.detach()
 
             if self.operator_freshness[i] > 0:
                 self.operator_freshness[i] -= 1
@@ -264,7 +251,6 @@ class Temper(nn.Module):
         if expand_prob > 0.5 and len(self.operator_bank) < self.max_ops and self.rewrites_this_epoch < 2:
             new_op = self.make_operator().to(self.input_proj.weight.device)
             self.operator_bank.append(new_op)
-            self.operator_embeddings.append(nn.Parameter(torch.randn(self.hidden_dim, device=self.input_proj.weight.device)))
             self.operator_freshness = torch.cat([
                 self.operator_freshness,
                 torch.tensor([5.0], device=self.operator_freshness.device)
@@ -290,9 +276,9 @@ class Temper(nn.Module):
         ]
         if len(to_keep) < len(self.operator_bank):
             self.operator_bank = nn.ModuleList([self.operator_bank[i] for i in to_keep])
-            self.operator_embeddings = nn.ParameterList([self.operator_embeddings[i] for i in to_keep])
             self.routing_logits = nn.Parameter(torch.stack([self.routing_logits[i] for i in to_keep]))
             self.usage_hist = self.usage_hist[to_keep]
+            self.operator_freshness = self.operator_freshness[to_keep]
             print(f"[Temper {self.id}] Pruned to {len(self.operator_bank)} operators.")
 
     def logit_decay(self, factor=0.98):
@@ -301,8 +287,7 @@ class Temper(nn.Module):
 
     def observe_reward(self, reward: float):
         reward = torch.tensor(reward, device=self.moving_avg_reward.device)
-        self.last_reward = reward
-        self.moving_avg_reward = 0.95 * self.moving_avg_reward + 0.05 * reward
+        self.moving_avg_reward = self.baseline_decay * self.moving_avg_reward + (1 - self.baseline_decay) * reward
 
     def reset_epoch_counters(self):
         self.rewrites_this_epoch = 0
