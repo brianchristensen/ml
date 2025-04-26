@@ -285,9 +285,29 @@ class Temper(nn.Module):
         with torch.no_grad():
             self.routing_logits.data *= factor
 
+    def compute_intrinsic_reward(self):
+        # Novelty is good
+        novelty_reward = self.last_novelty.clamp(max=1.5) / 1.5  # Normalize to [0, 1]
+        
+        # Conflict is good up to a point (high routing diversity)
+        conflict_reward = self.last_conflict.clamp(max=0.5) / 0.5  # Normalize to [0, 1]
+
+        # Freshness boost: recent operators get slight bonus
+        freshness_score = (self.operator_freshness > 0).float().mean()  # Fraction of fresh ops
+        freshness_reward = freshness_score  # Already in [0, 1]
+
+        # Weighted sum (equal weight for now)
+        intrinsic = 0.33 * novelty_reward + 0.33 * conflict_reward + 0.34 * freshness_reward
+        return intrinsic
+
     def observe_reward(self, reward: float):
         reward = torch.tensor(reward, device=self.moving_avg_reward.device)
-        self.moving_avg_reward = self.baseline_decay * self.moving_avg_reward + (1 - self.baseline_decay) * reward
+        intrinsic = self.compute_intrinsic_reward()
+
+        # Blend external reward with intrinsic
+        blended_reward = 0.8 * reward + 0.2 * intrinsic
+
+        self.moving_avg_reward = self.baseline_decay * self.moving_avg_reward + (1 - self.baseline_decay) * blended_reward
 
     def reset_epoch_counters(self):
         self.rewrites_this_epoch = 0
@@ -303,7 +323,8 @@ class Temper(nn.Module):
             'usage': self.usage_count,
             'last_choice': self.last_choice,
             'rewrites': self.rewrites_this_epoch,
-            'usage_hist': [f"{u.item():.0f}" for u in self.usage_hist]
+            'usage_hist': [f"{u.item():.0f}" for u in self.usage_hist],
+            'intrinsic': float(self.compute_intrinsic_reward())
         }
     
 class TemperNet(nn.Module):
@@ -485,8 +506,9 @@ class TemperNet(nn.Module):
             print(
                 f" Temper {diag['id']} | plast: {diag['plasticity']:.3f} | "
                 f"nov: {diag['novelty']:.3f} | conf: {diag['conflict']:.3f} | "
-                f"used: {diag['usage']} | last op: {diag['last_choice']} | "
-                f"rewrites: {diag['rewrites']} | usage: {diag['usage_hist']}"
+                f"intr: {diag['intrinsic']:.3f} | "
+                f"rewrites: {diag['rewrites']} | usage: {diag['usage_hist']} | "
+                f"used: {diag['usage']} | last op: {diag['last_choice']}"
             )
 
         print("\n--- Routing Summary ---")
