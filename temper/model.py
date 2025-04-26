@@ -16,13 +16,11 @@ class TemperController(nn.Module):
         )
 
     def forward(self, novelty, conflict, plasticity, moving_avg_reward, usage_count):
-        stats = torch.stack([
-            novelty,
-            conflict,
-            plasticity,
-            moving_avg_reward,
-            usage_count / 1000.0
-        ], dim=0).to(self.policy_net[0].weight.device)
+        device = self.policy_net[0].weight.device
+        stats = torch.tensor(
+            [novelty, conflict, plasticity, moving_avg_reward, usage_count / 1000.0],
+            dtype=torch.float32
+        ).to(device)
         return self.policy_net(stats)
 
 # --- RoutingPolicy ---
@@ -65,25 +63,73 @@ class RoutingPolicy(nn.Module):
 
 # --- GlobalEpisodicMemory ---
 class GlobalEpisodicMemory:
-    def __init__(self, hidden_dim, max_size=1000):
+    def __init__(self, hidden_dim, max_size=300):
         self.max_size = max_size
         self.hidden_dim = hidden_dim
-        self.entries = []
+        self.embeddings = None
+        self.rewards = None
+        self.paths = []
+        self.path_to_index = {}
 
     def add(self, x_proj, reward, path):
-        if len(self.entries) >= self.max_size:
-            self.entries.pop(0)
-        self.entries.append((x_proj.detach(), reward, path))
+        x_proj = x_proj.detach()
+
+        if not hasattr(self, 'path_to_index'):
+            self.path_to_index = {}
+
+        path_key = tuple(path)  # Paths are now hashable tuples for dict lookup
+
+        # Check if path already exists
+        if path_key in self.path_to_index:
+            idx = self.path_to_index[path_key]
+            if reward > self.rewards[idx]:
+                self.embeddings[idx] = x_proj
+                self.rewards[idx] = reward
+            return
+
+        # Otherwise: new path
+        if self.embeddings is None:
+            self.embeddings = x_proj.unsqueeze(0)
+            self.rewards = torch.tensor([reward], device=x_proj.device)
+            self.paths = [path]
+            self.path_to_index[path_key] = 0
+        else:
+            if self.embeddings.shape[0] >= self.max_size:
+                # Find worst reward and replace
+                min_idx = torch.argmin(self.rewards)
+                old_path = tuple(self.paths[min_idx])
+
+                self.embeddings[min_idx] = x_proj
+                self.rewards[min_idx] = reward
+                self.paths[min_idx] = path
+
+                # Update mapping
+                del self.path_to_index[old_path]
+                self.path_to_index[path_key] = min_idx
+            else:
+                self.embeddings = torch.cat([self.embeddings, x_proj.unsqueeze(0)], dim=0)
+                self.rewards = torch.cat([self.rewards, torch.tensor([reward], device=x_proj.device)], dim=0)
+                self.paths.append(path)
+                self.path_to_index[path_key] = len(self.paths) - 1
 
     def query(self, x_proj, top_k=5):
-        if not self.entries:
+        if self.embeddings is None or self.embeddings.shape[0] == 0:
             return []
-        with torch.no_grad():
-            query = x_proj
-            all_embeds = torch.stack([e[0] for e in self.entries])
-            sims = F.cosine_similarity(query.unsqueeze(0), all_embeds, dim=1)
-            topk_indices = sims.topk(min(top_k, sims.size(0)), largest=True).indices
-            return [self.entries[i] for i in topk_indices]
+
+        x_proj = x_proj.detach()
+        if x_proj.dim() == 1:
+            x_proj = x_proj.unsqueeze(0)  # (1, D)
+
+        if x_proj.device != self.embeddings.device:
+            x_proj = x_proj.to(self.embeddings.device)
+
+        x_proj = F.normalize(x_proj, dim=-1)
+        mem = F.normalize(self.embeddings, dim=-1)
+
+        sims = torch.matmul(x_proj, mem.T).squeeze(0)  # (N,)
+        topk = torch.topk(sims, min(top_k, sims.shape[0]), largest=True)
+
+        return [(self.embeddings[i], self.rewards[i].item(), self.paths[i]) for i in topk.indices]
 
 # --- Temper ---
 class Temper(nn.Module):
@@ -99,8 +145,8 @@ class Temper(nn.Module):
         self.operator_embeddings = nn.ParameterList([
             nn.Parameter(torch.randn(hidden_dim)) for _ in range(3)
         ])
-        self.operator_freshness = [0] * len(self.operator_bank)
-        self.routing_logits = nn.Parameter(torch.randn(len(self.operator_bank)))
+        self.operator_freshness = torch.zeros(len(self.operator_bank), device=self.input_proj.weight.device)
+        self.routing_logits = nn.Parameter(torch.randn(len(self.operator_bank), device=self.input_proj.weight.device))
 
         self.memory = []
         self.memory_size = memory_size
@@ -108,11 +154,11 @@ class Temper(nn.Module):
         self.success_count = 0
         self.usage_count = 0
         self.rewrites_this_epoch = 0
-        self.usage_hist = [0] * len(self.operator_bank)
+        self.usage_hist = torch.zeros(len(self.operator_bank), device=self.input_proj.weight.device)
         self.max_memory = 50
         self.last_novelty = torch.tensor(0.0)
         self.last_conflict = torch.tensor(0.0)
-        self.last_choice = torch.tensor(-1)
+        self.last_choice = -1
         self.moving_avg_value = torch.tensor(0.0)
         self.baseline_decay = 0.95
         self.moving_avg_reward = torch.tensor(0.0)
@@ -120,6 +166,7 @@ class Temper(nn.Module):
         self.fresh_counter = 0
 
         self.controller = TemperController(hidden_dim)
+
         self.value_net = nn.Sequential(
             nn.Linear(hidden_dim, 32),
             nn.ReLU(),
@@ -127,13 +174,32 @@ class Temper(nn.Module):
         )
 
     def make_operator(self):
-        return nn.Sequential(
-            nn.ReLU(),
-            nn.Linear(self.hidden_dim, self.hidden_dim),
-            nn.ReLU()
-        )
+        op = nn.ModuleDict({
+            'pre_relu': nn.ReLU(),
+            'linear': nn.Linear(self.hidden_dim, self.hidden_dim),
+            'post_relu': nn.ReLU(),
+            'film_gen': nn.Sequential(
+                nn.Linear(self.hidden_dim, self.hidden_dim * 2),
+                nn.ReLU(),
+                nn.Linear(self.hidden_dim * 2, self.hidden_dim * 2)
+            )
+        })
+        nn.init.zeros_(op['film_gen'][-1].weight)
+        nn.init.zeros_(op['film_gen'][-1].bias)
+        return op
+
+    def to(self, *args, **kwargs):
+        super().to(*args, **kwargs)
+        device = kwargs.get('device', args[0] if args else None)
+        if device is not None:
+            self.routing_logits.data = self.routing_logits.data.to(device)
+            self.usage_hist = self.usage_hist.to(device)
+            self.memory = [m.to(device) for m in self.memory]
+        return self
 
     def forward(self, x):
+        device = x.device
+
         if x.shape[-1] == self.input_dim:
             x_proj = self.input_proj(x)
         elif x.shape[-1] == self.hidden_dim:
@@ -143,28 +209,37 @@ class Temper(nn.Module):
 
         if self.memory:
             sample_size = min(10, len(self.memory))
-            sampled_mem = torch.stack(self.memory[-sample_size:])
+            sampled_mem = torch.stack(self.memory[-sample_size:]).to(device)
             avg_dist = torch.norm(x_proj.unsqueeze(1) - sampled_mem.unsqueeze(0), dim=-1).mean()
             novelty_score = avg_dist
         else:
-            novelty_score = torch.tensor(1.0, device=x.device)
+            novelty_score = torch.tensor(1.0, device=device)
 
         self.last_novelty = torch.clamp(novelty_score, max=1.5)
 
         weights = F.softmax(self.routing_logits, dim=0)
+        weights = weights.to(x_proj.device)
         self.last_conflict = torch.std(weights)
 
         out = torch.zeros_like(x_proj)
+
         for i, (op, w) in enumerate(zip(self.operator_bank, weights)):
-            result = op(x_proj)
-            out = out + w * result
-            self.usage_hist[i] += w.detach()  # keep tensor
+            z = self.operator_embeddings[i]
+            film_params = op['film_gen'](z)
+            gamma, beta = film_params.chunk(2, dim=-1)
+
+            h = op['pre_relu'](x_proj)
+            h = gamma.unsqueeze(0) * h + beta.unsqueeze(0)
+            h = op['linear'](h)
+            h = op['post_relu'](h)
+
+            out = out + w * h
+            self.usage_hist[i] = self.usage_hist[i] + w.detach()
 
             if self.operator_freshness[i] > 0:
                 self.operator_freshness[i] -= 1
 
-        self.last_choice = torch.argmax(weights)
-
+        self.last_choice = torch.argmax(weights).item()
         self.usage_count += 1
 
         for i in range(x_proj.shape[0]):
@@ -175,9 +250,9 @@ class Temper(nn.Module):
         control_signal = self.controller(
             self.last_novelty,
             self.last_conflict,
-            self.plasticity.to(x.device),
-            self.moving_avg_reward.to(x.device),
-            torch.tensor(float(self.usage_count), device=x.device)
+            self.plasticity,
+            self.moving_avg_reward,
+            torch.tensor(self.usage_count / 1000.0, device=device)
         )
         self.control_logic(control_signal)
 
@@ -190,10 +265,13 @@ class Temper(nn.Module):
             new_op = self.make_operator().to(self.input_proj.weight.device)
             self.operator_bank.append(new_op)
             self.operator_embeddings.append(nn.Parameter(torch.randn(self.hidden_dim, device=self.input_proj.weight.device)))
-            self.operator_freshness.append(5)
+            self.operator_freshness = torch.cat([
+                self.operator_freshness,
+                torch.tensor([5.0], device=self.operator_freshness.device)
+            ], dim=0)
             new_logits = torch.cat([self.routing_logits.data, torch.tensor([0.0], device=self.routing_logits.device)])
             self.routing_logits = nn.Parameter(new_logits)
-            self.usage_hist.append(0)
+            self.usage_hist = torch.cat([self.usage_hist, torch.tensor([0.0], device=self.usage_hist.device)])
             print(f"[Temper {self.id}] Expanded to {len(self.operator_bank)} operators.")
             self.rewrites_this_epoch += 1
 
@@ -201,43 +279,46 @@ class Temper(nn.Module):
             self.maybe_prune_operators()
             self.rewrites_this_epoch += 1
 
-    def maybe_prune_operators(self, min_usage=5, min_logit=-2.0, decay_thresh=0.001):
+    def maybe_prune_operators(self, min_usage=5.0, min_logit=-2.0, decay_thresh=0.001):
         if len(self.operator_bank) <= 3:
             return
         with torch.no_grad():
             self.routing_logits.data -= 0.01
-        to_keep = [i for i, (u, l) in enumerate(zip(self.usage_hist, self.routing_logits))
-                   if u > min_usage or l > (min_logit + decay_thresh)]
+        to_keep = [
+            i for i, (u, l) in enumerate(zip(self.usage_hist, self.routing_logits))
+            if u > min_usage or l > (min_logit + decay_thresh)
+        ]
         if len(to_keep) < len(self.operator_bank):
             self.operator_bank = nn.ModuleList([self.operator_bank[i] for i in to_keep])
             self.operator_embeddings = nn.ParameterList([self.operator_embeddings[i] for i in to_keep])
             self.routing_logits = nn.Parameter(torch.stack([self.routing_logits[i] for i in to_keep]))
-            self.usage_hist = [self.usage_hist[i] for i in to_keep]
+            self.usage_hist = self.usage_hist[to_keep]
             print(f"[Temper {self.id}] Pruned to {len(self.operator_bank)} operators.")
-
-    def observe_reward(self, reward: float):
-        self.last_reward = reward
-        self.moving_avg_reward = 0.95 * self.moving_avg_reward + 0.05 * reward
-
-    def reset_epoch_counters(self):
-        self.rewrites_this_epoch = 0
-        self.usage_hist = [0 for _ in range(len(self.operator_bank))]
-        self.logit_decay()
 
     def logit_decay(self, factor=0.98):
         with torch.no_grad():
             self.routing_logits.data *= factor
 
+    def observe_reward(self, reward: float):
+        reward = torch.tensor(reward, device=self.moving_avg_reward.device)
+        self.last_reward = reward
+        self.moving_avg_reward = 0.95 * self.moving_avg_reward + 0.05 * reward
+
+    def reset_epoch_counters(self):
+        self.rewrites_this_epoch = 0
+        self.usage_hist.zero_()
+        self.logit_decay()
+
     def diagnostics(self):
         return {
             'id': self.id,
-            'plasticity': self.plasticity.item(),
-            'novelty': self.last_novelty.item(),
-            'conflict': self.last_conflict.item(),
+            'plasticity': float(self.plasticity),
+            'novelty': float(self.last_novelty),
+            'conflict': float(self.last_conflict),
             'usage': self.usage_count,
-            'last_choice': self.last_choice.item(),
+            'last_choice': self.last_choice,
             'rewrites': self.rewrites_this_epoch,
-            'usage_hist': [int(round(u.item())) for u in self.usage_hist]
+            'usage_hist': [f"{u.item():.0f}" for u in self.usage_hist]
         }
     
 class TemperNet(nn.Module):
@@ -246,7 +327,7 @@ class TemperNet(nn.Module):
         self.tempers = nn.ModuleList([Temper(input_dim, hidden_dim, id=i) for i in range(num_tempers)])
         self.readout = nn.Linear(hidden_dim, output_dim)
         self.policy = RoutingPolicy(input_dim + hidden_dim + 3, hidden_dim, num_tempers)
-        self.gem = GlobalEpisodicMemory(hidden_dim, max_size=200)
+        self.gem = GlobalEpisodicMemory(hidden_dim, max_size=300)
         self.last_path_was_gem = False
 
         self.path_stats = {
@@ -380,25 +461,32 @@ class TemperNet(nn.Module):
         return reinforce_loss
 
     def query_gem_for_path(self, query_embed, similarity_thresh=0.9):
-        if not self.gem:
+        if self.gem.embeddings is None or self.gem.embeddings.shape[0] == 0:
             return None
 
-        best_score = -float('inf')
-        best_path = None
+        query_embed = query_embed.detach().unsqueeze(0)
+        if query_embed.device != self.gem.embeddings.device:
+            query_embed = query_embed.to(self.gem.embeddings.device)
 
-        for stored_embed, reward, path in self.gem.entries:
-            stored_embed = stored_embed.to(query_embed.device)
-            sim = F.cosine_similarity(query_embed, stored_embed, dim=0).item()
-            if sim > similarity_thresh and reward > best_score:
-                best_score = reward
-                best_path = path
+        query_embed = F.normalize(query_embed, dim=-1)
+        mem = F.normalize(self.gem.embeddings, dim=-1)
 
-        return best_path
+        sims = torch.matmul(query_embed, mem.T).squeeze(0)  # (N,)
 
-    def reset_batch(self):
+        # 🔥 1-line: add small reward bonus (scaled) to sims
+        sims = sims + 0.0001 * self.gem.rewards.to(sims.device)
+
+        best_idx = torch.argmax(sims)
+
+        if sims[best_idx] >= similarity_thresh:
+            return self.gem.paths[best_idx.item()]
+        else:
+            return None
+
+    def batch_tasks(self):
         self.policy.clear_log_probs()
 
-    def reset_epoch(self):
+    def epoch_tasks(self):
         for temper in self.tempers:
             temper.reset_epoch_counters()
             temper.maybe_prune_operators()
@@ -463,11 +551,21 @@ class TemperNet(nn.Module):
     
     def print_gem_summary(self, top_k=5):
         print("\n--- GEM (Global Episodic Memory) Summary ---")
-        print(f"Total Entries: {len(self.gem.entries)}")
+        if self.gem.rewards is None or self.gem.rewards.numel() == 0:
+            print("GEM is empty.")
+            print("---\n")
+            return
+
+        print(f"Total Entries: {self.gem.rewards.shape[0]}")
         print(f"Top {top_k} Samples by Reward:")
 
-        top_entries = sorted(self.gem.entries, key=lambda x: x[1], reverse=True)[:top_k]
-        for i, (x_proj, reward, path) in enumerate(top_entries):
+        rewards = self.gem.rewards.detach().cpu()
+        paths = self.gem.paths
+        top_indices = torch.topk(rewards, k=min(top_k, rewards.shape[0]), largest=True).indices
+
+        for i, idx in enumerate(top_indices):
+            reward = rewards[idx].item()
+            path = paths[idx]
             print(f" #{i+1}: Reward={reward:.3f} | Path={path}")
         print("---\n")
 

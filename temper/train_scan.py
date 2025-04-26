@@ -148,11 +148,11 @@ class TemperSeq2Seq(nn.Module):
     def print_gem_summary(self):
         self.temper_net.print_gem_summary()
 
-    def reset_batch(self):
-        self.temper_net.reset_batch()
+    def batch_tasks(self):
+        self.temper_net.batch_tasks()
 
-    def reset_epoch(self):
-        self.temper_net.reset_epoch()
+    def epoch_tasks(self):
+        self.temper_net.epoch_tasks()
 
     def dump_routing_summary(self, path):
         self.temper_net.dump_routing_summary(path)
@@ -166,9 +166,9 @@ def train():
     input_dim = len(dataset.command_vocab)
     output_dim = len(dataset.action_vocab)
 
-    epochs = 50
-    hidden_dim = 256
-    num_tempers = 12
+    epochs = 10
+    hidden_dim = 64
+    num_tempers = 8
 
     model = TemperSeq2Seq(input_dim, hidden_dim, output_dim, num_tempers).to(device)
     optimizer = optim.Adam(model.parameters(), lr=1e-3)
@@ -204,7 +204,8 @@ def train():
 
             total_task_loss += task_loss.item()
             total_policy_loss += policy_loss.item()
-            model.reset_batch()
+
+            model.batch_tasks()
 
             # Save predictions and targets for teacher-forced accuracy AFTER
             all_preds.append(y_pred.argmax(dim=-1).detach().cpu())
@@ -283,7 +284,7 @@ def train():
         model.print_epoch_summary(epoch, total_task_loss, total_policy_loss, epoch_duration)
         model.print_routing_diagnostics()
         model.print_gem_summary()
-        model.reset_epoch()
+        model.epoch_tasks()
 
     model.dump_routing_summary("logs/scan_routing_summary.csv")
 
