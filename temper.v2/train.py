@@ -21,10 +21,8 @@ def train_tempernet_v2(
         # Random input (normally this would be sensory input or data)
         inputs = torch.randn(batch_size, input_dim, device=device)
 
-        # Forward pass
-        predicted_next_latent, prediction_error = model(inputs)
+        _, prediction_error = model(inputs)
 
-        # Loss: Mean of prediction error over batch
         loss = prediction_error.mean()
 
         # Backward + optimize
@@ -36,14 +34,14 @@ def train_tempernet_v2(
         epoch_duration = end_time - start_time
 
         # Logging
-        print(f"Epoch {epoch}: Loss = {loss.item():.6f} | Duration: {epoch_duration:.2f}s")
+        print(f"\nEpoch {epoch}: Loss = {loss.item():.6f} | Duration: {epoch_duration:.2f}s")
 
         # Optionally print routing summary (if you want per-epoch routing stats)
         model.print_epoch_summary(epoch, loss.item())
 
 epochs = 20
 hidden_dim = 8 
-num_tempers = 12
+num_tempers = 4
 max_path_hops = 4
 input_dim = 128
 
