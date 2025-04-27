@@ -41,8 +41,8 @@ def train_tempernet_v2(
 
 epochs = 20
 hidden_dim = 8 
-num_tempers = 4
-max_path_hops = 4
+num_tempers = 8
+max_path_hops = 12
 input_dim = 128
 
 model = TemperGraph(input_dim=input_dim, hidden_dim=hidden_dim, num_tempers=num_tempers, max_path_hops=max_path_hops)
