@@ -64,8 +64,9 @@ class ScanDataset(Dataset):
 
 # --------- Seq2Seq Wrapper ---------
 class TemperSeq2Seq(nn.Module):
-    def __init__(self, input_dim, hidden_dim, output_dim, num_tempers):
+    def __init__(self, input_dim, hidden_dim, output_dim, num_tempers, max_path_hops):
         super().__init__()
+        self.max_path_hops = max_path_hops
         self.embedding = nn.Embedding(input_dim, hidden_dim)
         self.decoder_embedding = nn.Embedding(output_dim, hidden_dim)
         self.temper_net = TemperNet(hidden_dim, hidden_dim, output_dim, num_tempers=num_tempers)
@@ -75,7 +76,7 @@ class TemperSeq2Seq(nn.Module):
     def forward(self, x, y_in, sampling_ratio=0.0):
         x_embed = self.embedding(x.long())
         x_rep = x_embed.mean(dim=1)
-        z = self.temper_net(x_rep, return_hidden=True)
+        z = self.temper_net(x_rep, return_hidden=True, max_path_hops=self.max_path_hops)
 
         batch_size, seq_len = y_in.size()
         device = x.device
@@ -167,10 +168,11 @@ def train():
     output_dim = len(dataset.action_vocab)
 
     epochs = 10
-    hidden_dim = 64
-    num_tempers = 8
+    hidden_dim = 8
+    num_tempers = 4
+    max_path_hops= 2*num_tempers
 
-    model = TemperSeq2Seq(input_dim, hidden_dim, output_dim, num_tempers).to(device)
+    model = TemperSeq2Seq(input_dim, hidden_dim, output_dim, num_tempers, max_path_hops).to(device)
     optimizer = optim.Adam(model.parameters(), lr=1e-3)
     criterion = nn.CrossEntropyLoss(ignore_index=dataset.action_vocab["<PAD>"])
 
