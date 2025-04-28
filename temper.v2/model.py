@@ -264,8 +264,11 @@ class Temper(nn.Module):
             if (u > usage_threshold) or (f > freshness_threshold)
         ]
 
-        if not keep_indices:
-            keep_indices = [torch.argmax(self.operator_usage).item()]
+        # 🛡 Protection: if pruning would leave <2 ops, keep the top-used ones
+        if len(keep_indices) < 2:
+            # Sort by usage descending and take top 2
+            sorted_indices = torch.argsort(self.operator_usage, descending=True)
+            keep_indices = sorted_indices[:2].tolist()
 
         self.operator_bank = nn.ModuleList([self.operator_bank[i] for i in keep_indices])
         self.operator_logits = nn.Parameter(self.operator_logits[keep_indices])
