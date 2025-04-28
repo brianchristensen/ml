@@ -1,0 +1,2 @@
+Hi there, I'm working on a novel machine learning architecture with you, and I need your help coming up with high impact directions to improve the model, refactoring the model, and philosophizing about high level architectural decisions that move us in the direction of true novelty.  Make sure that any code you implement for me is GPU native.  Can i share the relevant model, train file, and a readme with a manifesto, so that you can scan them and understand the model?
+
