@@ -49,10 +49,21 @@ class IntrinsicGrowthController(nn.Module):
     def __init__(self, hidden_dim):
         super().__init__()
         self.hidden_dim = hidden_dim
-        self.net = nn.Sequential(
-            nn.Linear(7, hidden_dim),
+        self.shared = nn.Sequential(
+            nn.Linear(15, hidden_dim),
+            nn.ReLU()
+        )
+        self.grow_head = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim // 2),
             nn.ReLU(),
-            nn.Linear(hidden_dim, 2)
+            nn.Linear(hidden_dim // 2, 1),
+            nn.Sigmoid()
+        )
+        self.prune_head = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.ReLU(),
+            nn.Linear(hidden_dim // 2, 1),
+            nn.Sigmoid()
         )
         self.register_buffer('input_mean', torch.zeros(hidden_dim))
         self.register_buffer('reward_moving_avg', torch.tensor(0.0))
@@ -65,7 +76,6 @@ class IntrinsicGrowthController(nn.Module):
         self.reward_moving_avg = self.reward_moving_avg.to(device)
         operator_usage = operator_usage.to(device)
 
-        noise = torch.randn_like(x) * 0.01
         out_noisy = out + torch.randn_like(out) * 0.01
         plasticity = ((out_noisy - out) ** 2).mean(dim=-1)
 
@@ -74,6 +84,11 @@ class IntrinsicGrowthController(nn.Module):
 
         usage_probs = operator_usage.float() / (operator_usage.sum() + 1e-6)
         usage_entropy = -(usage_probs * usage_probs.clamp(min=1e-6).log()).sum()
+
+        mean_usage = operator_usage.mean()
+        max_usage = operator_usage.max()
+        usage_std = operator_usage.std()
+        used_fraction = (operator_usage > 0).float().mean()
 
         sparsity = out.abs().mean(dim=-1)
 
@@ -93,19 +108,37 @@ class IntrinsicGrowthController(nn.Module):
             usage_entropy,
             sparsity.mean(),
             reward_delta.mean(),
-            reward_var
+            reward_var,
+            mean_usage,
+            max_usage,
+            usage_std,
+            used_fraction
         ], dim=0)
 
         return signals
 
-    def forward(self, x, out, operator_usage, global_signal=None):
+    def forward(self, x, out, operator_usage, intrinsic_stats=None, global_signal=None):
         signals = self.compute_intrinsic_signals(x, out, operator_usage)
+
+        if intrinsic_stats is not None:
+            stats = torch.tensor([
+                intrinsic_stats["mean_novelty"],
+                intrinsic_stats["max_novelty"],
+                intrinsic_stats["mean_plasticity"],
+                intrinsic_stats["max_plasticity"],
+            ], device=signals.device)
+            signals = torch.cat([signals, stats], dim=0)
 
         if global_signal is not None:
             signals = signals + self.global_alpha * global_signal
 
-        decision = self.net(signals.unsqueeze(0))
-        grow_signal, prune_signal = decision.squeeze(0)
+        # 🔥 Pass through shared trunk first
+        shared_out = self.shared(signals.unsqueeze(0))  # [1, hidden_dim]
+
+        # 🔥 Then pass through grow_head and prune_head separately
+        grow_signal = self.grow_head(shared_out).squeeze(0)  # [1] -> scalar
+        prune_signal = self.prune_head(shared_out).squeeze(0)
+
         return grow_signal, prune_signal
 
 class Temper(nn.Module):
@@ -120,56 +153,89 @@ class Temper(nn.Module):
 
         self.rewrites_this_epoch = 0
         self.growth_controller = IntrinsicGrowthController(hidden_dim)
+        self.pending_grow = False
+        self.pending_prune = False
 
-        # Last intrinsic stats
+        # Intrinsic stats
         self.last_novelty = torch.tensor(0.0)
+        self.mean_novelty = torch.tensor(0.0)
+        self.max_novelty = torch.tensor(0.0)
         self.last_conflict = torch.tensor(0.0)
         self.last_plasticity = torch.tensor(0.0)
+        self.mean_plasticity = torch.tensor(0.0)
+        self.max_plasticity = torch.tensor(0.0)
+
+        # Intrinsic reward tracking
+        self.prev_inputs = None
+        self.prev_outputs = None
+        self.intrinsic_reward_weight = torch.nn.Parameter(torch.tensor(0.8), requires_grad=True)
 
     def make_operator(self):
         return nn.Sequential(
             nn.Linear(self.hidden_dim, self.hidden_dim),
-            nn.ReLU(),
+            nn.ReLU(inplace=False),  # <-- IMPORTANT: no in-place ops!
             nn.Linear(self.hidden_dim, self.hidden_dim),
-            nn.ReLU()
+            nn.ReLU(inplace=False)   # <-- also here
         )
 
     def apply_operators(self, x):
         if len(self.operator_bank) == 0:
             return x
 
-        # 💥 Make sure operator_usage and freshness follow the input x device
-        self.operator_usage = self.operator_usage.to(x.device)
-        self.operator_freshness = self.operator_freshness.to(x.device)
+        device = x.device
+        batch_size = x.size(0)
+
+        self.operator_usage = self.operator_usage.to(device)
+        self.operator_freshness = self.operator_freshness.to(device)
 
         weights = F.softmax(self.operator_logits, dim=0)
+        operator_probs = weights.unsqueeze(0).expand(batch_size, -1)
+
+        dist = torch.distributions.Categorical(operator_probs)
+        chosen_ops = dist.sample()
+
         out = torch.zeros_like(x)
 
-        for idx, (op, w) in enumerate(zip(self.operator_bank, weights)):
-            h = op(x)
-            out += w * h
-            self.operator_usage[idx] += w.detach()
+        # Track patchwise plasticity
+        patch_plasticity = torch.zeros(batch_size, device=device)
 
-            if self.operator_freshness[idx] > 0:
-                out += 0.01 * h  # Freshness bonus
-                self.operator_freshness[idx] = torch.clamp(self.operator_freshness[idx] - 0.01, min=0.0)
+        for idx, op in enumerate(self.operator_bank):
+            mask = (chosen_ops == idx)
+            if mask.any():
+                selected = x[mask]
+                result = op(selected)
 
+                if self.operator_freshness[idx] > 0:
+                    result = result + 0.01 * result
+                    self.operator_freshness[idx] = torch.clamp(self.operator_freshness[idx] - 0.01, min=0.0)
+
+                out[mask] = result
+                self.operator_usage[idx] += mask.sum().float()
+
+                # Patchwise plasticity only for the patches that this op handled
+                patch_plasticity[mask] = ((result - selected) ** 2).mean(dim=1)
+
+        # Updated intrinsic signals
         self.last_conflict = torch.std(weights)
-        self.last_plasticity = (out - x).pow(2).mean()
 
-        return out
+        if self.prev_outputs is not None and self.prev_outputs.shape == out.shape:
+            plasticity_per_patch = ((out - self.prev_outputs) ** 2).mean(dim=1)
+            self.last_plasticity = plasticity_per_patch.mean()
+            self.max_plasticity = plasticity_per_patch.max()
+        else:
+            self.last_plasticity = torch.tensor(0.0, device=out.device)
+            self.max_plasticity = torch.tensor(0.0, device=out.device)
 
-    def forward(self, x, global_signal=None):
-        out = self.apply_operators(x)
-        grow_signal, prune_signal = self.growth_controller(x, out, self.operator_usage, global_signal)
+        if self.prev_inputs is not None and self.prev_inputs.shape == x.shape:
+            novelty_per_patch = ((x - self.prev_inputs) ** 2).mean(dim=1)
+            self.last_novelty = novelty_per_patch.mean()
+            self.max_novelty = novelty_per_patch.max()
+        else:
+            self.last_novelty = torch.tensor(0.0, device=x.device)
+            self.max_novelty = torch.tensor(0.0, device=x.device)
 
-        if grow_signal > 0.5 and self.rewrites_this_epoch < 2:
-            self.grow()
-            self.rewrites_this_epoch += 1
-
-        if prune_signal > 0.5 and self.rewrites_this_epoch < 2:
-            self.prune()
-            self.rewrites_this_epoch += 1
+        self.prev_outputs = out.detach()
+        self.prev_inputs = x.detach()
 
         return out
 
@@ -177,7 +243,7 @@ class Temper(nn.Module):
         new_op = self.make_operator().to(next(self.parameters()).device)
         self.operator_bank.append(new_op)
 
-        new_logit = torch.tensor([0.0], device=self.operator_logits.device)
+        new_logit = torch.tensor([1.0], device=self.operator_logits.device)
         self.operator_logits = nn.Parameter(torch.cat([self.operator_logits, new_logit]))
 
         new_usage = torch.zeros(1, device=self.operator_usage.device)
@@ -190,8 +256,14 @@ class Temper(nn.Module):
 
     def prune(self):
         usage_threshold = 5.0
+        freshness_threshold = 0  # protect operators that are still "fresh"
 
-        keep_indices = [i for i, u in enumerate(self.operator_usage) if u > usage_threshold]
+        # Only prune ops that are both low-usage AND not fresh anymore
+        keep_indices = [
+            i for i, (u, f) in enumerate(zip(self.operator_usage, self.operator_freshness))
+            if (u > usage_threshold) or (f > freshness_threshold)
+        ]
+
         if not keep_indices:
             keep_indices = [torch.argmax(self.operator_usage).item()]
 
@@ -205,8 +277,13 @@ class Temper(nn.Module):
     def reset_epoch(self):
         self.rewrites_this_epoch = 0
         self.operator_usage.zero_()
-        self.operator_logits.data *= 0.98  # Light logit decay
+        self.operator_logits.data *= 0.96
         self.operator_freshness.clamp_(min=0.0)
+
+        # Anneal exploration over time
+        with torch.no_grad():
+            self.intrinsic_reward_weight *= 0.995
+            self.intrinsic_reward_weight.clamp_(min=0.1)
 
 class TemperGraph(nn.Module):
     def __init__(self, input_dim, hidden_dim, num_tempers=12, max_path_hops=4):
@@ -236,7 +313,10 @@ class TemperGraph(nn.Module):
 
         self.routing_policy.clear_log_probs()
 
-        for _ in range(self.max_path_hops):
+        # Initialize route hop counters
+        patch_hop_counts = torch.zeros(patches.size(0), device=x.device, dtype=torch.int)
+
+        for hop in range(self.max_path_hops):
             active_mask = ~patch_done
             if active_mask.sum() == 0:
                 break
@@ -252,13 +332,37 @@ class TemperGraph(nn.Module):
             temper_ids = sorted_tempers.unique()
 
             outputs = torch.zeros_like(active_states, device=x.device)
-
-            # 🔥 Dynamically get enriched_dim inside first iteration
             enriched_inputs = []
 
             idx = 0
             for tid, patch_batch in zip(temper_ids, temper_patch_batches):
-                out = self.tempers[tid](patch_batch)
+                # === Call apply_operators
+                out = self.tempers[tid].apply_operators(patch_batch)
+
+                # === Call growth_controller manually (formerly in Temper.forward)
+                grow_signal, prune_signal = self.tempers[tid].growth_controller(
+                    patch_batch,
+                    out,
+                    operator_usage=self.tempers[tid].operator_usage,
+                    intrinsic_stats={
+                        "mean_novelty": self.tempers[tid].mean_novelty,
+                        "max_novelty": self.tempers[tid].max_novelty,
+                        "mean_plasticity": self.tempers[tid].mean_plasticity,
+                        "max_plasticity": self.tempers[tid].max_plasticity,
+                    },
+                    global_signal=None,
+                )
+
+                if grow_signal > 0.5 and self.tempers[tid].rewrites_this_epoch < 2 and self.tempers[tid].operator_usage.mean() > 10:
+                    self.tempers[tid].pending_grow = True
+                    self.tempers[tid].rewrites_this_epoch += 1
+                    self.tempers[tid].intrinsic_reward_weight.data = torch.tensor(0.8, device=out.device)
+
+                if prune_signal > 0.65 and self.tempers[tid].rewrites_this_epoch < 2:
+                    self.tempers[tid].pending_prune = True
+                    self.tempers[tid].rewrites_this_epoch += 1
+
+                # === Prepare enrichments
                 id_embed = self.temper_id_embeddings(tid).expand(patch_batch.size(0), -1)
                 novelty = self.tempers[tid].last_novelty.to(out.device).unsqueeze(0).expand(out.size(0), 1)
                 conflict = self.tempers[tid].last_conflict.to(out.device).unsqueeze(0).expand(out.size(0), 1)
@@ -270,11 +374,16 @@ class TemperGraph(nn.Module):
                 outputs[idx:idx + patch_batch.size(0)] = out
                 idx += patch_batch.size(0)
 
-            # 🔥 AFTER the loop, safe to stack enriched_inputs
             routing_inputs = torch.cat(enriched_inputs, dim=0)
 
             logits = self.routing_policy(routing_inputs)
-            logits = logits.clamp(-20.0, 20.0)
+
+            # 💥 Clamp aggressively to avoid extreme logits:
+            logits = logits.clamp(min=-10.0, max=10.0)
+
+            # 💥 Also shift logits for numerical stability:
+            logits = logits - logits.max(dim=-1, keepdim=True).values  # subtract max for better softmax stability
+
             probs = F.softmax(logits, dim=-1)
             probs = torch.nan_to_num(probs, nan=1e-6, posinf=1.0, neginf=0.0)
             probs = probs / probs.sum(dim=-1, keepdim=True).clamp(min=1e-6)
@@ -284,7 +393,7 @@ class TemperGraph(nn.Module):
             log_probs = dist.log_prob(sampled_tempers)
 
             self.routing_policy.saved_log_probs.append(log_probs)
-            self.routing_policy.saved_rewards.append(torch.zeros_like(log_probs))  # will fill later
+            self.routing_policy.saved_rewards.append(torch.zeros_like(log_probs))  # fill later
 
             done_now = (sampled_tempers == self.num_tempers)
 
@@ -292,18 +401,37 @@ class TemperGraph(nn.Module):
             patch_tempers[active_mask] = sampled_tempers.clamp(max=self.num_tempers - 1)
             patch_done[active_mask] |= done_now
 
+            # 🆕 Count hop visits
+            patch_hop_counts[active_mask] += 1
+
             with torch.no_grad():
                 patch_counts = torch.bincount(sampled_tempers, minlength=self.num_tempers + 1)
                 self.routing_stats.append(patch_counts.cpu())
 
+        # After routing:
         patch_states = patch_states.view(batch_size, num_patches, patch_size)
         final_output = patch_states.mean(dim=1)
 
         predicted_next_latent = self.predictive_head(final_output)
         prediction_error = F.mse_loss(predicted_next_latent, x, reduction='none').mean(dim=-1)
 
-        # Reward for routing policy
+        # Routing reward
         rewards = -prediction_error.detach()
+
+        # 🆕 Add exploration bonus
+        # Mean and std of operator usages across tempers
+        temper_usage_std = torch.stack([
+            temper.operator_usage.std() for temper in self.tempers
+        ]).mean()
+
+        # Normalize std to [0, 1] range roughly
+        normalized_usage_std = torch.clamp(temper_usage_std / 10.0, 0.0, 1.0)
+
+        # Dynamic exploration bonus
+        exploration_bonus = (0.01 + 0.04 * normalized_usage_std) * patch_hop_counts.float()
+
+        rewards = rewards + exploration_bonus
+
         for r in self.routing_policy.saved_rewards:
             r.copy_(rewards[:r.size(0)])
 
@@ -311,6 +439,12 @@ class TemperGraph(nn.Module):
 
     def reset_epoch(self):
         for temper in self.tempers:
+            if temper.pending_grow:
+                temper.grow()
+                temper.pending_grow = False
+            if temper.pending_prune:
+                temper.prune()
+                temper.pending_prune = False
             temper.reset_epoch()
 
     def print_epoch_summary(self, epoch, loss):
@@ -332,15 +466,13 @@ class TemperGraph(nn.Module):
         for temper in self.tempers:
             usage = [f"{u.item():.0f}" for u in temper.operator_usage.float()]
             print(f" Temper {temper.id}:")
-            print(f"   novelty ~ {temper.last_novelty:.4f}")
+            print(f"   novelty ~ {temper.max_novelty:.4f}")
             print(f"   conflict ~ {temper.last_conflict:.4f}")
-            print(f"   plasticity ~ {temper.last_plasticity:.4f}")
+            print(f"   plasticity ~ {temper.max_plasticity:.4f}")
             print(f"   usage ~ {usage}")
-            
         print("")
 
         print(f"Final active patches after {len(stats)} hops: {active_counts[-1].item()}")
-        
         for hop, (temper_counts, stop_count) in enumerate(zip(stats[:, :-1], stop_counts)):
             print(f" Hop {hop}: Active: {active_counts[hop].item()} | STOP: {stop_count.item()} | Temper distribution: {temper_counts.tolist()}")
         
