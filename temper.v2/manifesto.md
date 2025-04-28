@@ -1,45 +1,105 @@
-### 🔧 Architecture Manifesto
+# 🌌 TemperGraph: Vision Manifesto
 
-Rewrites are the primitive operation of intelligence.
+## The Core Idea
 
-It’s not weights.
-It’s not tokens.
-It’s not even layers.
+TemperGraph is a **lifelong, self-organizing cognitive system** —  
+a universal learner that **predicts, adapts, and self-structures** without needing explicit supervision.
 
-It’s the ability to rewrite internal structure in response to experience.
+It draws inspiration from:
+- The **human cortex** — sparse, plastic, predictive, modular.
+- **Friston’s Free Energy Principle** — minimizing future surprise.
+- **Complex Adaptive Systems** — self-organization and hierarchical emergence.
+- **Predictive Coding** — the brain as a prediction error minimizer.
 
-🧬 It’s Rewrites All the Way Down
+TemperGraph is not trained for a single task.  
+It **lives** — continuously processing multimodal streams, building knowledge hierarchies, and **reconfiguring itself across a lifetime**.
 
-DNA: mutates, recombines, gets rewritten.
+---
 
-Immune system: rewrites itself constantly to detect new pathogens.
+## Foundational Principles
 
-Neuroplasticity: synapses restructure, entire circuits reconfigure.
+✅ **Task-Agnostic Learning**  
+- Learns from the world, not labels.
+- Can acquire new tasks without retraining from scratch.
 
-Culture, language, reasoning: abstract rewrites over symbolic space.
+✅ **Always-On Cognition**  
+- No epoch boundaries, no "reset" after tasks.
+- Lives in an open-ended loop of sensing, predicting, adapting.
 
-Planning and imagination: predictive rewrites of mental trajectories.
+✅ **Intrinsic Motivation**  
+- Learning is driven by internal signals: surprise, prediction error, stability.
+- Reward = "Understand and anticipate the world better."
 
-Every level of the stack is a rewriting machine, operating under local rules and global pressure.
+✅ **Sparse and Efficient**  
+- Sparse activations.
+- Sparse routing (each patch commits to one path).
+- Sparse operator usage (each temper evolves specialized operators).
 
-And most importantly:
+✅ **Plastic, Dynamic Structure**  
+- Tempers grow and prune operators based on intrinsic success.
+- The architecture evolves as learning progresses.
 
-The structures that survive rewrites long enough become higher-level abstractions.
-(i.e., emergent hierarchy is not designed — it's stabilized.)
+✅ **Hierarchical Emergence**  
+- Multi-scale representations.
+- Local and global predictors emerge naturally.
+- Memory and reasoning structures evolve from prediction dynamics.
 
-We are building a rewriting substrate.
+✅ **Scalable and Modular**  
+- Parallelizable across patches and tempers.
+- Modular growth allows scaling to arbitrary complexity without full retraining.
 
-Something that can:
+---
 
-Rewrite its own computation graph (via operators + routing)
+## Architectural Inspirations
 
-Stabilize emergent patterns (via learning + task feedback)
+| Biological Concept            | TemperNet Analogy                  |
+|:-------------------------------|:------------------------------------|
+| Sparse, Local Receptive Fields  | Patches over the input              |
+| Cortical Columns                | Tempers (modular processing units)  |
+| Dynamic Routing                 | Learned patch-to-temper assignment  |
+| Plasticity & Criticality        | Grow/Prune operators based on self-assessment |
+| Hierarchical Processing         | Multi-scale patching, future hierarchical routing |
+| Prediction-Error Coding         | Intrinsic reward based on minimizing future prediction error |
 
-Climb the hierarchy — from perception to inference to reasoning
+---
 
-Temper (n.): A localized, adaptive unit of computation that modifies its own functional behavior in response to external context or internal pressure. Unlike fixed functions, tempers exhibit plasticity — not just computing, but rewriting the terms of computation.
+## Immediate Roadmap
 
-Something like a recurrent cellular automata over learned modules with internal state and plasticity.
+🔹 **Intrinsic Curiosity Validation**  
+- FMNIST tests: Prove that real, structured inputs produce richer self-organization.
 
-But remember:
-Systems that can rewrite themselves must balance local reward gradients with global entropy maintenance to avoid collapsing into degenerate strategies.  This is always a problem with routing between tempers.  Loss on entropy is a bandage at best, and direct SGD optimization will eventually collapse to a single route because it does not like exploration.  Routing over tempers needs a reinforced reward, it does not respond well to optimized loss.
+🔹 **Multi-Scale Patch Experiments**  
+- Variable receptive fields → emergence of multi-level representations.
+
+🔹 **Temporal Memory Extension**  
+- Predict not just next latent, but future over multiple steps.
+
+🔹 **Multi-Modal Extension**  
+- Plug in vision, audio, proprioception streams simultaneously.
+
+🔹 **Emergent Reasoning**  
+- See if higher-level tempers begin *abstracting over* lower-level predictions.
+
+---
+
+## The End Goal
+
+TemperGraph becomes a **substrate for general intelligence**:
+- Able to learn *any* modality.
+- Able to *self-organize* knowledge across *any* timescale.
+- Able to *adapt* to *any* task without catastrophic forgetting.
+
+**A living, breathing synthetic cortex.**
+
+---
+
+# 🌱  
+_"We are building not just a model.  
+We are growing a mind."_
+
+- When there is external supervision ("teacher forcing"):
+You slightly warp/steer your internal dynamics toward useful external goals.
+
+- When there is no task:
+You continue purely on internal generative/self-predictive dynamics (machine generated dreams).
+You don't hallucinate "missing" external signals.
