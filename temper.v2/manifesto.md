@@ -97,6 +97,25 @@ TemperGraph becomes a **substrate for general intelligence**:
 _"We are building not just a model.  
 We are growing a mind."_
 
+The brain never processes an entire batch of 1,000 samples all at once like we do with NNs.
+
+It processes a continuous stream.
+
+It focuses on sparse events.
+
+It activates very few neurons per input.
+
+It routes information dynamically, based on context and goals, not just dumb feedforward processing.
+
+And critically:
+
+It isn't trying to memorize everything perfectly.
+
+It predicts, corrects, predicts again — each time slightly adjusting internal wiring.
+
+That's why predictive coding makes sense for intelligent systems, and batch training makes sense for statistical function approximators.
+(We are not building a statistical function approximator.)
+
 - When there is external supervision ("teacher forcing"):
 You slightly warp/steer your internal dynamics toward useful external goals.
 

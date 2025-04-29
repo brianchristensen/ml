@@ -1,0 +1,341 @@
+python .\train_fmnist.py
+[Temper 2] 🌱 Recombined new operator! Total now: 4
+[Temper 1] 🌱 Recombined new operator! Total now: 4
+[Temper 2] 🌱 Recombined new operator! Total now: 5
+[Temper 1] 🌱 Recombined new operator! Total now: 5
+[Temper 2] 🌱 Recombined new operator! Total now: 6
+[Temper 0] 🌱 Recombined new operator! Total now: 4
+[Temper 3] 🌱 Recombined new operator! Total now: 4
+[Temper 0] 🌱 Recombined new operator! Total now: 5
+[Temper 3] 🌱 Recombined new operator! Total now: 5
+[Temper 1] 🌱 Recombined new operator! Total now: 6
+[Temper 0] 🌱 Recombined new operator! Total now: 6
+[Temper 0] 🌱 Recombined new operator! Total now: 7
+[Step 100] Loss: -29.039053 | Time: 13.74s
+=== Epoch 100 Routing Summary ===
+Initial patches: 98
+Final active patches after 8 hops: 4
+ Hop 0: Active: 65 | STOP: 33 | Temper distribution: [12, 18, 28, 7]
+ Hop 1: Active: 37 | STOP: 28 | Temper distribution: [9, 11, 12, 5]
+ Hop 2: Active: 20 | STOP: 17 | Temper distribution: [2, 7, 6, 5]
+ Hop 3: Active: 16 | STOP: 4 | Temper distribution: [5, 5, 4, 2]
+ Hop 4: Active: 10 | STOP: 6 | Temper distribution: [4, 2, 2, 2]
+ Hop 5: Active: 8 | STOP: 2 | Temper distribution: [3, 4, 0, 1]
+ Hop 6: Active: 5 | STOP: 3 | Temper distribution: [0, 1, 1, 3]
+ Hop 7: Active: 4 | STOP: 1 | Temper distribution: [1, 1, 0, 2]
+
+--- Operator Usage Summary ---
+ Temper 0: ops=7 usage=['8.16092205', '8.16100311', '8.16207218', '8.47878361', '8.50635719', '8.66421032', '8.86665058']
+ Temper 1: ops=6 usage=['11.91973209', '11.91817951', '11.91558075', '12.30997849', '12.34397602', '12.59255600']
+ Temper 2: ops=6 usage=['12.28756046', '12.28939342', '12.28886032', '12.67680359', '12.71041012', '12.74697399']
+ Temper 3: ops=5 usage=['10.22324562', '10.22383499', '10.22199535', '10.63783932', '10.69308281']
+
+[Temper 0] 🧹 Pruned operators. Remaining: 2
+[Temper 0] 🌱 Recombined new operator! Total now: 3
+[Temper 0] 🌱 Recombined new operator! Total now: 4
+[Temper 0] 🌱 Recombined new operator! Total now: 5
+[Temper 0] 🌱 Recombined new operator! Total now: 6
+[Step 200] Loss: -23.389896 | Time: 11.54s
+=== Epoch 200 Routing Summary ===
+Initial patches: 98
+Final active patches after 6 hops: 0
+ Hop 0: Active: 53 | STOP: 45 | Temper distribution: [18, 5, 14, 16]
+ Hop 1: Active: 25 | STOP: 28 | Temper distribution: [9, 9, 3, 4]
+ Hop 2: Active: 9 | STOP: 16 | Temper distribution: [1, 3, 3, 2]
+ Hop 3: Active: 7 | STOP: 2 | Temper distribution: [2, 3, 1, 1]
+ Hop 4: Active: 2 | STOP: 5 | Temper distribution: [1, 0, 0, 1]
+ Hop 5: Active: 0 | STOP: 2 | Temper distribution: [0, 0, 0, 0]
+
+--- Operator Usage Summary ---
+ Temper 0: ops=6 usage=['3.69316125', '3.69172287', '10.37735748', '10.55334568', '10.74150944', '10.94290543']
+ Temper 1: ops=6 usage=['9.33014202', '9.33012199', '9.33008766', '9.33521461', '9.33564758', '9.33878708']
+ Temper 2: ops=6 usage=['7.49784899', '7.49786854', '7.49786234', '7.50179529', '7.50213003', '7.50249386']
+ Temper 3: ops=5 usage=['8.59754467', '8.59755421', '8.59752655', '8.60331249', '8.60406399']
+
+[Temper 1] 🧹 Pruned operators. Remaining: 2
+[Temper 1] 🌱 Recombined new operator! Total now: 3
+[Temper 1] 🌱 Recombined new operator! Total now: 4
+[Temper 1] 🧹 Pruned operators. Remaining: 2
+[Temper 1] 🌱 Recombined new operator! Total now: 3
+[Temper 0] 🧹 Pruned operators. Remaining: 2
+[Temper 0] 🌱 Recombined new operator! Total now: 3
+[Temper 0] 🌱 Recombined new operator! Total now: 4
+[Temper 0] 🌱 Recombined new operator! Total now: 5
+[Temper 1] 🌱 Recombined new operator! Total now: 4
+[Temper 2] 🧹 Pruned operators. Remaining: 2
+[Temper 2] 🌱 Recombined new operator! Total now: 3
+[Temper 2] 🌱 Recombined new operator! Total now: 4
+[Temper 2] 🧹 Pruned operators. Remaining: 2
+[Temper 2] 🌱 Recombined new operator! Total now: 3
+[Temper 2] 🌱 Recombined new operator! Total now: 4
+[Temper 0] 🧹 Pruned operators. Remaining: 3
+[Temper 0] 🌱 Recombined new operator! Total now: 4
+[Step 300] Loss: -11.879878 | Time: 8.46s
+=== Epoch 300 Routing Summary ===
+Initial patches: 98
+Final active patches after 5 hops: 0
+ Hop 0: Active: 28 | STOP: 70 | Temper distribution: [6, 7, 6, 9]
+ Hop 1: Active: 7 | STOP: 21 | Temper distribution: [1, 4, 1, 1]
+ Hop 2: Active: 5 | STOP: 2 | Temper distribution: [0, 0, 2, 3]
+ Hop 3: Active: 1 | STOP: 4 | Temper distribution: [0, 0, 0, 1]
+ Hop 4: Active: 0 | STOP: 1 | Temper distribution: [0, 0, 0, 0]
+
+--- Operator Usage Summary ---
+ Temper 0: ops=4 usage=['7.08506250', '7.11059999', '7.13730097', '15.66703701']
+ Temper 1: ops=4 usage=['7.33723307', '7.35553885', '7.39462090', '7.91260862']
+ Temper 2: ops=4 usage=['6.66304016', '6.70228148', '9.73099995', '9.90367699']
+ Temper 3: ops=5 usage=['7.79996157', '7.79996157', '7.79996157', '7.80005026', '7.80006170']
+
+[Temper 3] 🧹 Pruned operators. Remaining: 2
+[Temper 3] 🌱 Recombined new operator! Total now: 3
+[Temper 0] 🧹 Pruned operators. Remaining: 2
+[Temper 0] 🌱 Recombined new operator! Total now: 3
+[Step 400] Loss: -16.234858 | Time: 5.62s
+=== Epoch 400 Routing Summary ===
+Initial patches: 98
+Final active patches after 5 hops: 0
+ Hop 0: Active: 31 | STOP: 67 | Temper distribution: [5, 8, 8, 10]
+ Hop 1: Active: 6 | STOP: 25 | Temper distribution: [1, 2, 1, 2]
+ Hop 2: Active: 1 | STOP: 5 | Temper distribution: [0, 0, 0, 1]
+ Hop 3: Active: 1 | STOP: 0 | Temper distribution: [0, 0, 1, 0]
+ Hop 4: Active: 0 | STOP: 1 | Temper distribution: [0, 0, 0, 0]
+
+--- Operator Usage Summary ---
+ Temper 0: ops=3 usage=['9.73529053', '9.64626598', '10.61844444']
+ Temper 1: ops=4 usage=['8.99674225', '8.99712086', '8.99792576', '9.00820827']
+ Temper 2: ops=4 usage=['9.74491882', '9.74588394', '9.75258827', '9.75660801']
+ Temper 3: ops=3 usage=['10.54087448', '10.54087448', '10.91825008']
+
+[Temper 1] 🧹 Pruned operators. Remaining: 2
+[Temper 1] 🌱 Recombined new operator! Total now: 3
+[Temper 1] 🧹 Pruned operators. Remaining: 2
+[Temper 1] 🌱 Recombined new operator! Total now: 3
+[Temper 1] 🧹 Pruned operators. Remaining: 2
+[Temper 1] 🌱 Recombined new operator! Total now: 3
+[Step 500] Loss: -2.575162 | Time: 4.72s
+=== Epoch 500 Routing Summary ===
+Initial patches: 98
+Final active patches after 3 hops: 0
+ Hop 0: Active: 11 | STOP: 87 | Temper distribution: [1, 5, 5, 0]
+ Hop 1: Active: 1 | STOP: 10 | Temper distribution: [0, 0, 1, 0]
+ Hop 2: Active: 0 | STOP: 1 | Temper distribution: [0, 0, 0, 0]
+
+--- Operator Usage Summary ---
+ Temper 0: ops=3 usage=['8.32969379', '8.32840157', '8.34190464']
+ Temper 1: ops=3 usage=['10.64485073', '10.66604996', '10.68909836']
+ Temper 2: ops=4 usage=['6.49994278', '6.49995422', '6.50002956', '6.50007439']
+ Temper 3: ops=3 usage=['8.99821949', '8.99821949', '9.00356102']
+
+[Temper 3] 🧹 Pruned operators. Remaining: 2
+[Temper 3] 🌱 Recombined new operator! Total now: 3
+[Temper 3] 🧹 Pruned operators. Remaining: 2
+[Step 600] Loss: -1.170252 | Time: 4.33s
+=== Epoch 600 Routing Summary ===
+Initial patches: 98
+Final active patches after 2 hops: 0
+ Hop 0: Active: 6 | STOP: 92 | Temper distribution: [2, 1, 0, 3]
+ Hop 1: Active: 0 | STOP: 6 | Temper distribution: [0, 0, 0, 0]
+
+--- Operator Usage Summary ---
+ Temper 0: ops=3 usage=['7.99994087', '7.99991989', '8.00013828']
+ Temper 1: ops=3 usage=['9.33301067', '9.33332443', '9.33366394']
+ Temper 2: ops=4 usage=['5.49999905', '5.49999952', '5.50000048', '5.50000143']
+ Temper 3: ops=2 usage=['15.38078594', '14.61921310']
+
+[Temper 2] 🧹 Pruned operators. Remaining: 2
+[Temper 2] 🌱 Recombined new operator! Total now: 3
+[Temper 2] 🧹 Pruned operators. Remaining: 2
+[Temper 2] 🌱 Recombined new operator! Total now: 3
+[Temper 2] 🧹 Pruned operators. Remaining: 2
+[Temper 2] 🌱 Recombined new operator! Total now: 3
+[Temper 1] 🧹 Pruned operators. Remaining: 2
+[Step 700] Loss: -4.903813 | Time: 3.79s
+=== Epoch 700 Routing Summary ===
+Initial patches: 98
+Final active patches after 3 hops: 0
+ Hop 0: Active: 5 | STOP: 93 | Temper distribution: [1, 2, 1, 1]
+ Hop 1: Active: 2 | STOP: 3 | Temper distribution: [0, 0, 1, 1]
+ Hop 2: Active: 0 | STOP: 2 | Temper distribution: [0, 0, 0, 0]
+
+--- Operator Usage Summary ---
+ Temper 0: ops=3 usage=['9.99999809', '9.99999809', '10.00000286']
+ Temper 1: ops=2 usage=['12.50000381', '12.49999619']
+ Temper 2: ops=3 usage=['8.28893471', '8.34081364', '8.37025166']
+ Temper 3: ops=2 usage=['12.50535488', '12.49464512']
+
+[Temper 0] 🧹 Pruned operators. Remaining: 2
+[Step 800] Loss: -3.135303 | Time: 3.37s
+=== Epoch 800 Routing Summary ===
+Initial patches: 98
+Final active patches after 3 hops: 0
+ Hop 0: Active: 15 | STOP: 83 | Temper distribution: [3, 3, 5, 4]
+ Hop 1: Active: 2 | STOP: 13 | Temper distribution: [0, 1, 1, 0]
+ Hop 2: Active: 0 | STOP: 2 | Temper distribution: [0, 0, 0, 0]
+
+--- Operator Usage Summary ---
+ Temper 0: ops=2 usage=['15.00000000', '15.00000000']
+ Temper 1: ops=2 usage=['14.00000000', '14.00000000']
+ Temper 2: ops=3 usage=['9.33249474', '9.33347607', '9.33403015']
+ Temper 3: ops=2 usage=['14.50010490', '14.49989510']
+
+[Step 900] Loss: -3.016816 | Time: 3.19s
+=== Epoch 900 Routing Summary ===
+Initial patches: 98
+Final active patches after 3 hops: 0
+ Hop 0: Active: 9 | STOP: 89 | Temper distribution: [4, 3, 1, 1]
+ Hop 1: Active: 2 | STOP: 7 | Temper distribution: [0, 1, 1, 0]
+ Hop 2: Active: 0 | STOP: 2 | Temper distribution: [0, 0, 0, 0]
+
+--- Operator Usage Summary ---
+ Temper 0: ops=2 usage=['14.00000000', '14.00000000']
+ Temper 1: ops=2 usage=['16.50000000', '16.50000000']
+ Temper 2: ops=3 usage=['10.33331871', '10.33333492', '10.33334732']
+ Temper 3: ops=2 usage=['8.50000095', '8.49999905']
+
+[Step 1000] Loss: -0.322912 | Time: 2.97s
+=== Epoch 1000 Routing Summary ===
+Initial patches: 98
+Final active patches after 2 hops: 0
+ Hop 0: Active: 4 | STOP: 94 | Temper distribution: [0, 3, 1, 0]
+ Hop 1: Active: 0 | STOP: 4 | Temper distribution: [0, 0, 0, 0]
+
+--- Operator Usage Summary ---
+ Temper 0: ops=2 usage=['11.00000000', '11.00000000']
+ Temper 1: ops=2 usage=['12.00000000', '12.00000000']
+ Temper 2: ops=3 usage=['9.66666698', '9.66666698', '9.66666698']
+ Temper 3: ops=2 usage=['13.50000000', '13.50000000']
+
+✨ Eval Step 1000 | Validation Accuracy (avg over 10 samples): 40.00%
+
+[Step 1100] Loss: -0.338919 | Time: 3.11s
+=== Epoch 1100 Routing Summary ===
+Initial patches: 98
+Final active patches after 2 hops: 0
+ Hop 0: Active: 5 | STOP: 93 | Temper distribution: [0, 2, 2, 1]
+ Hop 1: Active: 0 | STOP: 5 | Temper distribution: [0, 0, 0, 0]
+
+--- Operator Usage Summary ---
+ Temper 0: ops=2 usage=['11.50000000', '11.50000000']
+ Temper 1: ops=2 usage=['11.00000000', '11.00000000']
+ Temper 2: ops=3 usage=['8.33333397', '8.33333397', '8.33333397']
+ Temper 3: ops=2 usage=['16.50000000', '16.50000000']
+
+[Step 1200] Loss: -0.243192 | Time: 2.91s
+=== Epoch 1200 Routing Summary ===
+Initial patches: 98
+Final active patches after 2 hops: 0
+ Hop 0: Active: 4 | STOP: 94 | Temper distribution: [0, 1, 1, 2]
+ Hop 1: Active: 0 | STOP: 4 | Temper distribution: [0, 0, 0, 0]
+
+--- Operator Usage Summary ---
+ Temper 0: ops=2 usage=['8.50000000', '8.50000000']
+ Temper 1: ops=2 usage=['14.00000000', '14.00000000']
+ Temper 2: ops=3 usage=['9.00000000', '9.00000000', '9.00000000']
+ Temper 3: ops=2 usage=['15.00000000', '15.00000000']
+
+[Step 1300] Loss: -0.374215 | Time: 2.76s
+=== Epoch 1300 Routing Summary ===
+Initial patches: 98
+Final active patches after 2 hops: 0
+ Hop 0: Active: 5 | STOP: 93 | Temper distribution: [1, 1, 2, 1]
+ Hop 1: Active: 0 | STOP: 5 | Temper distribution: [0, 0, 0, 0]
+
+--- Operator Usage Summary ---
+ Temper 0: ops=2 usage=['14.00000000', '14.00000000']
+ Temper 1: ops=2 usage=['12.00000000', '12.00000000']
+ Temper 2: ops=3 usage=['8.66666698', '8.66666698', '8.66666698']
+ Temper 3: ops=2 usage=['12.50000000', '12.50000000']
+
+[Temper 2] 🧹 Pruned operators. Remaining: 2
+[Step 1400] Loss: -0.341272 | Time: 2.70s
+=== Epoch 1400 Routing Summary ===
+Initial patches: 98
+Final active patches after 2 hops: 0
+ Hop 0: Active: 5 | STOP: 93 | Temper distribution: [1, 0, 3, 1]
+ Hop 1: Active: 0 | STOP: 5 | Temper distribution: [0, 0, 0, 0]
+
+--- Operator Usage Summary ---
+ Temper 0: ops=2 usage=['15.00000000', '15.00000000']
+ Temper 1: ops=2 usage=['9.50000000', '9.50000000']
+ Temper 2: ops=2 usage=['12.00000000', '12.00000000']
+ Temper 3: ops=2 usage=['15.00000000', '15.00000000']
+
+[Step 1500] Loss: -0.249916 | Time: 2.58s
+=== Epoch 1500 Routing Summary ===
+Initial patches: 98
+Final active patches after 2 hops: 0
+ Hop 0: Active: 4 | STOP: 94 | Temper distribution: [0, 1, 1, 2]
+ Hop 1: Active: 0 | STOP: 4 | Temper distribution: [0, 0, 0, 0]
+
+--- Operator Usage Summary ---
+ Temper 0: ops=2 usage=['13.50000000', '13.50000000']
+ Temper 1: ops=2 usage=['16.00000000', '16.00000000']
+ Temper 2: ops=2 usage=['10.50000000', '10.50000000']
+ Temper 3: ops=2 usage=['11.00000000', '11.00000000']
+
+[Step 1600] Loss: 0.120884 | Time: 2.54s
+=== Epoch 1600 Routing Summary ===
+Initial patches: 98
+Final active patches after 2 hops: 0
+ Hop 0: Active: 2 | STOP: 96 | Temper distribution: [0, 2, 0, 0]
+ Hop 1: Active: 0 | STOP: 2 | Temper distribution: [0, 0, 0, 0]
+
+--- Operator Usage Summary ---
+ Temper 0: ops=2 usage=['11.00000000', '11.00000000']
+ Temper 1: ops=2 usage=['13.00000000', '13.00000000']
+ Temper 2: ops=2 usage=['10.00000000', '10.00000000']
+ Temper 3: ops=2 usage=['16.00000000', '16.00000000']
+
+[Step 1700] Loss: 0.019570 | Time: 2.51s
+=== Epoch 1700 Routing Summary ===
+Initial patches: 98
+Final active patches after 2 hops: 0
+ Hop 0: Active: 2 | STOP: 96 | Temper distribution: [1, 0, 1, 0]
+ Hop 1: Active: 0 | STOP: 2 | Temper distribution: [0, 0, 0, 0]
+
+--- Operator Usage Summary ---
+ Temper 0: ops=2 usage=['11.00000000', '11.00000000']
+ Temper 1: ops=2 usage=['14.00000000', '14.00000000']
+ Temper 2: ops=2 usage=['12.50000000', '12.50000000']
+ Temper 3: ops=2 usage=['12.50000000', '12.50000000']
+
+[Step 1800] Loss: -0.077222 | Time: 2.52s
+=== Epoch 1800 Routing Summary ===
+Initial patches: 98
+Final active patches after 2 hops: 0
+ Hop 0: Active: 3 | STOP: 95 | Temper distribution: [1, 1, 0, 1]
+ Hop 1: Active: 0 | STOP: 3 | Temper distribution: [0, 0, 0, 0]
+
+--- Operator Usage Summary ---
+ Temper 0: ops=2 usage=['13.50000000', '13.50000000']
+ Temper 1: ops=2 usage=['12.50000000', '12.50000000']
+ Temper 2: ops=2 usage=['10.50000000', '10.50000000']
+ Temper 3: ops=2 usage=['14.00000000', '14.00000000']
+
+[Step 1900] Loss: 0.400007 | Time: 2.54s
+=== Epoch 1900 Routing Summary ===
+Initial patches: 98
+Final active patches after 2 hops: 0
+ Hop 0: Active: 1 | STOP: 97 | Temper distribution: [0, 1, 0, 0]
+ Hop 1: Active: 0 | STOP: 1 | Temper distribution: [0, 0, 0, 0]
+
+--- Operator Usage Summary ---
+ Temper 0: ops=2 usage=['6.50000000', '6.50000000']
+ Temper 1: ops=2 usage=['14.50000000', '14.50000000']
+ Temper 2: ops=2 usage=['15.00000000', '15.00000000']
+ Temper 3: ops=2 usage=['13.50000000', '13.50000000']
+
+[Step 2000] Loss: -0.084673 | Time: 2.55s
+=== Epoch 2000 Routing Summary ===
+Initial patches: 98
+Final active patches after 2 hops: 0
+ Hop 0: Active: 3 | STOP: 95 | Temper distribution: [1, 0, 2, 0]
+ Hop 1: Active: 0 | STOP: 3 | Temper distribution: [0, 0, 0, 0]
+
+--- Operator Usage Summary ---
+ Temper 0: ops=2 usage=['12.50000000', '12.50000000']
+ Temper 1: ops=2 usage=['12.00000000', '12.00000000']
+ Temper 2: ops=2 usage=['12.50000000', '12.50000000']
+ Temper 3: ops=2 usage=['13.50000000', '13.50000000']
+
+✨ Eval Step 2000 | Validation Accuracy (avg over 10 samples): 20.00%

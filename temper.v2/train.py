@@ -23,7 +23,7 @@ def train_tempernet_v2(
 
         inputs = torch.randn(batch_size, input_dim, device=device)
 
-        _, prediction_error = model(inputs)
+        _, _, prediction_error = model(inputs)
 
         loss = prediction_error.mean()
         routing_loss = model.routing_policy.reinforce()
