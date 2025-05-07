@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import numpy as np
 import time
 
 class Synthesizer(nn.Module):
@@ -77,11 +78,25 @@ class Synthesizer(nn.Module):
         return out, program_indices, symbolic_embeds
 
     def update_gem(self, probs, target):
-        start = time.time()
+        #start = time.time()
         batch_size = target.size(0)
+
+        # Prepare batch collections
+        batch_embeddings = []
+        batch_programs = []
+        batch_rewards = []
+
         for b in range(batch_size):
             if self.last_programs[b].numel() > 0 and not (self.last_programs[b] == self.router.num_nodes).all():
                 prob = probs[b, target[b]].item()  # probability assigned to correct class
-                avg_symbolic = self.last_symbolic[b].mean(dim=0)  # (sym_dim,)
-                self.gem.insert(avg_symbolic, self.last_programs[b], prob)
-        print(f"Update gem time: {time.time() - start:.4f}s")
+                avg_symbolic = self.last_symbolic[b].mean(dim=0).detach().cpu().numpy()  # (sym_dim,)
+                batch_embeddings.append(avg_symbolic)
+                batch_programs.append(self.last_programs[b].detach().cpu())
+                batch_rewards.append(prob)
+
+        # Insert as batch if we collected anything
+        if batch_embeddings:
+            embeddings_np = np.stack(batch_embeddings, axis=0)
+            self.gem.insert_batch(embeddings_np, batch_programs, batch_rewards)
+
+        #print(f"Update gem time: {time.time() - start:.4f}s")

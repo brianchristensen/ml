@@ -10,7 +10,6 @@ class Node(nn.Module):
 
         self.symbolic_head = nn.Linear(latent_dim, symbolic_dim)
 
-        # Replace big dynamic matrix prediction with a small nonlinear operator
         self.op = nn.Sequential(
             nn.Linear(latent_dim, latent_dim),
             nn.ReLU(),
@@ -18,5 +17,5 @@ class Node(nn.Module):
         )
 
     def emit_operator(self, z):
-        symbolic = self.symbolic_head(z)  # (batch, symbolic_dim)
-        return self.op, symbolic  # Return the callable function and the symbolic embedding
+        symbolic = self.symbolic_head(z)
+        return self.op, symbolic

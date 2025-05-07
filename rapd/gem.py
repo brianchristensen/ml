@@ -30,6 +30,32 @@ class GEM:
         self.programs.append(program)
         self.rewards.append(reward)
 
+    def insert_batch(self, embeddings_np, programs, rewards):
+        # Convert existing to numpy
+        existing_embeds_np = np.stack([e.detach().cpu().numpy() for e in self.symbolic_embeds], axis=0) if self.symbolic_embeds else np.empty((0, self.symbolic_dim))
+        existing_programs = self.programs
+        existing_rewards = self.rewards
+
+        # Combine all
+        combined_embeds = np.concatenate([existing_embeds_np, embeddings_np], axis=0)
+        combined_programs = existing_programs + programs
+        combined_rewards = existing_rewards + rewards
+
+        # Keep top max_gem
+        top_indices = np.argsort(combined_rewards)[-self.max_gem:][::-1]
+        kept_embeds = combined_embeds[top_indices]
+        kept_programs = [combined_programs[i] for i in top_indices]
+        kept_rewards = [combined_rewards[i] for i in top_indices]
+
+        # Update internal state
+        self.symbolic_embeds = [torch.tensor(e, dtype=torch.float32, device=self.device) for e in kept_embeds]
+        self.programs = kept_programs
+        self.rewards = kept_rewards
+
+        # Rebuild index once
+        self.index = faiss.IndexFlatL2(self.symbolic_dim)
+        self.index.add(kept_embeds)
+
     def rebuild_index(self):
         self.index = faiss.IndexFlatL2(self.symbolic_dim)
         for e in self.symbolic_embeds:
