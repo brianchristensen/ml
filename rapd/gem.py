@@ -1,67 +1,63 @@
+import os
+os.environ['KMP_DUPLICATE_LIB_OK'] = 'True'
 import faiss
 import numpy as np
 import torch
 
 class GEM:
-    def __init__(self, embed_dim, device='cuda'):
-        self.embed_dim = embed_dim
+    def __init__(self, symbolic_dim, max_gem=1000, device='cuda'):
+        self.symbolic_dim = symbolic_dim
         self.device = device
+        self.max_gem = max_gem
 
-        self.index = faiss.IndexFlatL2(embed_dim)
-        self.embeds = []   # List[torch.Tensor]
-        self.programs = []  # List[List[int]]
-        self.rewards = []   # List[float]
+        self.index = faiss.IndexFlatL2(symbolic_dim)
+        self.symbolic_embeds = []  # [torch.Tensor]
+        self.programs = []         # [List[int]]
+        self.rewards = []          # [float]
 
-    def insert(self, embedding: torch.Tensor, program: list, reward: float):
-        embedding_np = embedding.detach().cpu().numpy()
-        self.index.add(embedding_np[np.newaxis, :])
-        self.embeds.append(embedding)
+    def insert(self, embedding, program, reward):
+        if len(self.symbolic_embeds) >= self.max_gem:
+            # Prune lowest reward
+            min_idx = np.argmin(self.rewards)
+            self.symbolic_embeds.pop(min_idx)
+            self.programs.pop(min_idx)
+            self.rewards.pop(min_idx)
+            self.rebuild_index()
+
+        embed_np = embedding.detach().cpu().numpy()
+        self.index.add(embed_np[np.newaxis, :])
+        self.symbolic_embeds.append(embedding)
         self.programs.append(program)
         self.rewards.append(reward)
 
-    def retrieve(self, query: torch.Tensor, k=5):
-        if len(self.embeds) == 0:
+    def rebuild_index(self):
+        self.index = faiss.IndexFlatL2(self.symbolic_dim)
+        for e in self.symbolic_embeds:
+            self.index.add(e.detach().cpu().numpy()[np.newaxis, :])
+
+    def retrieve(self, query, k=5):
+        if len(self.symbolic_embeds) == 0:
             return []
-
-        query_np = query.detach().cpu().numpy()
-        _, idxs = self.index.search(query_np[np.newaxis, :], k)
+        
+        _, idxs = self.index.search(query[np.newaxis, :], k)
         idxs = idxs[0]
-
         results = []
-        for idx in idxs:
+        for i in idxs:
             results.append({
-                'embedding': self.embeds[idx],
-                'program': self.programs[idx],
-                'reward': self.rewards[idx]
+                'symbolic': self.symbolic_embeds[i],
+                'program': self.programs[i],
+                'reward': self.rewards[i]
             })
         return results
-
-    def prune(self, max_size):
-        if len(self.embeds) <= max_size:
-            return
-        keep_idxs = np.argsort(self.rewards)[-max_size:]
-        self.index = faiss.IndexFlatL2(self.embed_dim)
-        new_embeds = []
-        new_programs = []
-        new_rewards = []
-        for i in keep_idxs:
-            embedding_np = self.embeds[i].detach().cpu().numpy()
-            self.index.add(embedding_np[np.newaxis, :])
-            new_embeds.append(self.embeds[i])
-            new_programs.append(self.programs[i])
-            new_rewards.append(self.rewards[i])
-        self.embeds = new_embeds
-        self.programs = new_programs
-        self.rewards = new_rewards
 
     def get_top_k(self, k=10):
         if len(self.rewards) == 0:
             return []
-        top_indices = np.argsort(self.rewards)[-k:][::-1]  # top-k by reward
+        top_indices = np.argsort(self.rewards)[-k:][::-1]
         results = []
         for i in top_indices:
             results.append({
-                'embedding': self.embeds[i],
+                'symbolic': self.symbolic_embeds[i],
                 'program': self.programs[i],
                 'reward': self.rewards[i]
             })
