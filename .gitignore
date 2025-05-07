@@ -1,6 +1,7 @@
 **/__pycache__/
 **/data/
 **/models/
+**/MNIST/*
 *.pth
 *.tar.gz
 *.csv

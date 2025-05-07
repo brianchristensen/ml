@@ -1,8 +1,0 @@
-torch==2.6.0
-torchvision==0.21.0
-ipython==9.1.0
-ipykernel==6.29.5
-
-black
-isort
-nbqa
