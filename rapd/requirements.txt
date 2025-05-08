@@ -2,3 +2,5 @@ torch>=2.0
 torchvision
 faiss-cpu
 numpy
+transformers
+datasets

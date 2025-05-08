@@ -22,7 +22,7 @@ max_gem = 10000
 num_classes = 10
 input_dim = 784
 latent_dim = 128
-symbolic_dim = 16
+symbolic_dim = latent_dim
 batch_size = 64
 
 nodes = [Node(latent_dim, symbolic_dim).to(device) for _ in range(num_nodes)]

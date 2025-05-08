@@ -24,7 +24,7 @@ class Synthesizer(nn.Module):
         op_list, symbolic_embeds = [], []
         for node in self.nodes:
             op, sym_embed = node.emit_operator(z)
-            op_list.append(op)
+            op_list.append((op, sym_embed))
             symbolic_embeds.append(sym_embed)
         symbolic_embeds = torch.stack(symbolic_embeds, dim=1)
 
@@ -61,8 +61,16 @@ class Synthesizer(nn.Module):
             for idx in unique_ops:
                 idx_mask = selected_ops == idx
                 op_inputs = x_active[idx_mask]
-                op = op_list[idx]
-                op_outputs = op(op_inputs)
+
+                # Unpack both the op and symbolic embedding
+                op_fn, symbolic_batch = op_list[idx]
+
+                # Select only the symbolic vectors for still-active + idx-matching samples
+                symbolic_inputs = symbolic_batch[still_active][idx_mask]
+
+                # Apply op (passing both latent and symbolic slice)
+                op_outputs = op_fn(op_inputs, symbolic_inputs)
+
                 out_active[idx_mask] = op_outputs
 
             out[still_active] = out_active
