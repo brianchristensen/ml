@@ -16,8 +16,8 @@ import time
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 num_epochs = 10
-num_nodes = 12
-max_ops = 6
+num_nodes = 1
+max_ops = 1
 max_gem = 10000
 num_classes = 10
 input_dim = 784
@@ -65,7 +65,7 @@ for epoch in range(num_epochs):
         total += target.size(0)
 
         reward_list.append(probs[range(len(target)), target].detach().cpu())
-        
+
         del latent, programs, sym_embeds, output, loss, data, target
         torch.cuda.empty_cache()
 
