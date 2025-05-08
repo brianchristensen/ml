@@ -16,8 +16,8 @@ import time
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 num_epochs = 10
-num_nodes = 1
-max_ops = 1
+num_nodes = 4
+max_ops = 4
 max_gem = 10000
 num_classes = 10
 input_dim = 784

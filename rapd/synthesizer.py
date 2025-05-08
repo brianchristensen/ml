@@ -84,6 +84,8 @@ class Synthesizer(nn.Module):
         rewards_list = []
 
         total_entries = all_programs.size(0)
+        decay = 0.1
+
         for b in range(total_entries):
             prog = all_programs[b]
             sentinel_idx = (prog == self.router.num_nodes).nonzero(as_tuple=True)
@@ -93,7 +95,7 @@ class Synthesizer(nn.Module):
                 avg_symbolic = all_symbolic[b].mean(dim=0)
                 program_length = prog.numel()
                 base_reward = rewards[b].item()
-                effective_reward = base_reward / program_length  # or / (program_length ** alpha)
+                effective_reward = np.float32(base_reward * np.exp(-decay * (program_length - 1)))
                 embeddings_np.append(avg_symbolic.numpy())
                 rewards_list.append(effective_reward)
                 programs_list.append(prog.tolist())
