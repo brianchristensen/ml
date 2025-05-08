@@ -15,10 +15,10 @@ import time
 #torch.autograd.set_detect_anomaly(True)
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-num_epochs = 5
-num_nodes = 8
-max_ops = 4
-max_gem = 500
+num_epochs = 10
+num_nodes = 12
+max_ops = 6
+max_gem = 10000
 num_classes = 10
 input_dim = 784
 latent_dim = 128
@@ -41,12 +41,14 @@ train_loader = DataLoader(datasets.MNIST('.', train=True, download=True, transfo
 
 for epoch in range(num_epochs):
     start_time = time.time()
+    window_start = time.time()
+    window_batches = 0
     epoch_loss = 0.0
     correct = 0
     total = 0
+    reward_list = []
 
     for batch_idx, (data, target) in enumerate(train_loader):
-        batch_start = time.time()
         data, target = data.to(device), target.to(device)
         optimizer.zero_grad()
 
@@ -57,21 +59,31 @@ for epoch in range(num_epochs):
         loss.backward()
         optimizer.step()
 
-        #synth.update_gem(probs, target)
-
         epoch_loss += loss.item() * data.size(0)
         _, predicted = output.max(1)
         correct += predicted.eq(target).sum().item()
         total += target.size(0)
 
+        reward_list.append(probs[range(len(target)), target].detach().cpu())
+        
         del latent, programs, sym_embeds, output, loss, data, target
         torch.cuda.empty_cache()
 
-        if batch_idx % 50 == 0:
-            batch_duration = time.time() - batch_start
-            print(f"Epoch {epoch+1}/{num_epochs}, batch {batch_idx+1}/{len(train_loader)} | Duration: {batch_duration:.4f}s")
+        window_batches += 1
+        if batch_idx % 50 == 0 and batch_idx > 0:
+            window_duration = time.time() - window_start
+            avg_per_batch = window_duration / window_batches
+            print(f"Epoch {epoch+1}/{num_epochs}, batch {batch_idx+1}/{len(train_loader)} | "
+                f"Avg duration per batch: {avg_per_batch:.4f}s over {window_batches} batches")
+            window_start = time.time()
+            window_batches = 0
+
+    all_rewards = torch.cat(reward_list, dim=0)
+    synth.update_gem(all_rewards)
+    reward_list = []
 
     duration = time.time() - start_time
     acc = correct / total * 100
     avg_loss = epoch_loss / total
-    print(f"Epoch {epoch+1} | Loss: {avg_loss:.4f} | Accuracy: {acc:.2f}% | Duration: {duration:.2f}s")
+    print(f"\nEpoch {epoch+1} | Loss: {avg_loss:.4f} | Accuracy: {acc:.2f}% | Duration: {duration:.2f}s")
+    gem.print_top_n(10)

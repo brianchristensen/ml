@@ -31,21 +31,48 @@ class GEM:
         self.rewards.append(reward)
 
     def insert_batch(self, embeddings_np, programs, rewards):
-        # Convert existing to numpy
-        existing_embeds_np = np.stack([e.detach().cpu().numpy() for e in self.symbolic_embeds], axis=0) if self.symbolic_embeds else np.empty((0, self.symbolic_dim))
-        existing_programs = self.programs
-        existing_rewards = self.rewards
+        # Convert all programs to tuple form for hashability
+        program_tuples = [tuple(prog) for prog in programs]
 
-        # Combine all
-        combined_embeds = np.concatenate([existing_embeds_np, embeddings_np], axis=0)
-        combined_programs = existing_programs + programs
-        combined_rewards = existing_rewards + rewards
+        # Build a lookup: program tuple → (embedding, reward)
+        combined_dict = {}
 
-        # Keep top max_gem
-        top_indices = np.argsort(combined_rewards)[-self.max_gem:][::-1]
-        kept_embeds = combined_embeds[top_indices]
-        kept_programs = [combined_programs[i] for i in top_indices]
-        kept_rewards = [combined_rewards[i] for i in top_indices]
+        # First, add existing entries
+        for i, prog in enumerate(self.programs):
+            prog_tuple = tuple(prog)
+            if prog_tuple not in combined_dict:
+                combined_dict[prog_tuple] = (self.symbolic_embeds[i].detach().cpu().numpy(), self.rewards[i])
+            else:
+                # Keep max reward
+                combined_dict[prog_tuple] = (
+                    combined_dict[prog_tuple][0],
+                    max(combined_dict[prog_tuple][1], self.rewards[i])
+                )
+
+        # Then, merge in the new batch
+        for i, prog_tuple in enumerate(program_tuples):
+            if prog_tuple not in combined_dict:
+                combined_dict[prog_tuple] = (embeddings_np[i], rewards[i])
+            else:
+                combined_dict[prog_tuple] = (
+                    combined_dict[prog_tuple][0],
+                    max(combined_dict[prog_tuple][1], rewards[i])
+                )
+
+        # Convert back to lists
+        all_embeds = []
+        all_programs = []
+        all_rewards = []
+        for prog_tuple, (embed, reward) in combined_dict.items():
+            all_embeds.append(embed)
+            all_programs.append(list(prog_tuple))
+            all_rewards.append(reward)
+
+        # Limit to top max_gem by reward
+        sorted_indices = np.argsort(all_rewards)[-self.max_gem:][::-1]
+        kept_embeds = np.stack([all_embeds[i] for i in sorted_indices], axis=0)
+        kept_programs = [all_programs[i] for i in sorted_indices]
+        kept_rewards = [all_rewards[i] for i in sorted_indices]
 
         # Update internal state
         self.symbolic_embeds = [torch.tensor(e, dtype=torch.float32, device=self.device) for e in kept_embeds]
@@ -64,9 +91,11 @@ class GEM:
     def retrieve(self, query, k=5):
         if len(self.symbolic_embeds) == 0:
             return []
-        
+
         _, idxs = self.index.search(query[np.newaxis, :], k)
         idxs = idxs[0]
+
+        # Filter by reward threshold
         results = []
         for i in idxs:
             results.append({
@@ -74,6 +103,10 @@ class GEM:
                 'program': self.programs[i],
                 'reward': self.rewards[i]
             })
+
+        # Optional: sort final k by reward descending
+        results.sort(key=lambda r: r['reward'], reverse=True)
+
         return results
 
     def get_top_k(self, k=10):
@@ -88,3 +121,16 @@ class GEM:
                 'reward': self.rewards[i]
             })
         return results
+    
+    def print_top_n(self, n=5):
+        if len(self.rewards) == 0:
+            print("GEM is empty.")
+            return
+
+        top_indices = np.argsort(self.rewards)[-n:][::-1]  # top-n highest rewards
+        print(f"\nTop {n} GEM - ({len(self.rewards)} total):")
+        for rank, i in enumerate(top_indices, start=1):
+            reward = self.rewards[i]
+            program = self.programs[i]
+            print(f"Rank {rank}: Reward = {reward:.4f}, Program = {program}")
+        print("")
