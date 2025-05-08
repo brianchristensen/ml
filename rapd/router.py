@@ -45,7 +45,7 @@ class Router(nn.Module):
 
         # Pad if fewer than max_ops
         while len(program_indices) < max_ops:
-            pad = torch.full((batch_size,), self.num_nodes, device=x.device, dtype=torch.long)  # HALT
+            pad = torch.full((batch_size,), self.num_nodes, device=z.device, dtype=torch.long)  # HALT
             program_indices.append(pad)
 
         program_indices = torch.stack(program_indices, dim=1)  # (batch, max_ops)

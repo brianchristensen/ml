@@ -15,7 +15,6 @@ class Synthesizer(nn.Module):
         # Buffers to collect batch updates
         self.collected_symbolic = []
         self.collected_programs = []
-        self.collected_rewards = []
 
     def forward(self, x, max_ops=4):
         batch_size, dim = x.size()
@@ -75,17 +74,17 @@ class Synthesizer(nn.Module):
 
             out[still_active] = out_active
 
-        # Cache per-batch symbolic + program data for GEM
-        self.collected_symbolic.append(symbolic_embeds.detach().cpu())
-        self.collected_programs.append(program_indices.detach().cpu())
+        for i in range(symbolic_embeds.size(0)):  # batch size
+            self.collected_symbolic.append(symbolic_embeds[i].detach().cpu())
+            self.collected_programs.append(program_indices[i].detach().cpu())
 
         return out, program_indices, symbolic_embeds
 
     def update_gem(self, rewards):
         print("starting gem batch insert")
         start_time = time.time()
-        all_symbolic = torch.cat(self.collected_symbolic, dim=0)  # (N, num_nodes, sym_dim)
-        all_programs = torch.cat(self.collected_programs, dim=0)  # (N, max_ops)
+        all_symbolic = torch.stack(self.collected_symbolic, dim=0)  # (N, num_nodes, sym_dim)
+        all_programs = torch.stack(self.collected_programs, dim=0)  # (N, max_ops)
 
         embeddings_np = []
         programs_list = []

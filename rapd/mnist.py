@@ -22,7 +22,7 @@ max_gem = 10000
 num_classes = 10
 input_dim = 784
 latent_dim = 128
-symbolic_dim = latent_dim
+symbolic_dim = 512
 batch_size = 64
 
 nodes = [Node(latent_dim, symbolic_dim).to(device) for _ in range(num_nodes)]
@@ -64,7 +64,9 @@ for epoch in range(num_epochs):
         correct += predicted.eq(target).sum().item()
         total += target.size(0)
 
-        reward_list.append(probs[range(len(target)), target].detach().cpu())
+        batch_rewards = probs[range(len(target)), target].detach().cpu()
+        for r in batch_rewards:
+            reward_list.append(r.unsqueeze(0))
 
         del latent, programs, sym_embeds, output, loss, data, target
         torch.cuda.empty_cache()

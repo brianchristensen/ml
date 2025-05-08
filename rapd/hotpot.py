@@ -4,28 +4,27 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 from datasets import load_dataset
 from transformers import T5Tokenizer, T5ForConditionalGeneration
-
+import collections
 from synthesizer import Synthesizer
 from node import Node
 from router import Router
 from gem import GEM
 
 # Hyperparameters
-num_epochs = 3
-num_nodes = 1
-max_ops = 1
+num_epochs = 20
+num_nodes = 20
+max_ops = 10
 max_gem = 10000
 latent_dim = 128
-symbolic_dim = latent_dim
+symbolic_dim = 512
 batch_size = 16
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-# Load tokenizer and pretrained T5 encoder
+# Load tokenizer and pretrained T5 model
 tokenizer = T5Tokenizer.from_pretrained('t5-small')
 t5_model = T5ForConditionalGeneration.from_pretrained('t5-small').to(device)
 t5_encoder = t5_model.get_encoder()
 input_dim = t5_encoder.config.d_model  # typically 512
-vocab_size = tokenizer.vocab_size
 
 # Initialize Synthesizer components
 nodes = [Node(latent_dim, symbolic_dim).to(device) for _ in range(num_nodes)]
@@ -33,12 +32,26 @@ router = Router(symbolic_dim, num_nodes).to(device)
 gem = GEM(symbolic_dim, max_gem=max_gem, device=device)
 synth = Synthesizer(nodes, router, gem, input_dim, latent_dim, device).to(device)
 
-# Lightweight decoder head
-decoder_head = nn.Linear(latent_dim, vocab_size).to(device)
+# Adapter to map Synth latent → T5 encoder embedding space
+class SynthToEncoderAdapter(nn.Module):
+    def __init__(self, latent_dim, encoder_dim):
+        super().__init__()
+        self.proj = nn.Linear(latent_dim, encoder_dim)
+        self.norm = nn.LayerNorm(encoder_dim)
 
-# Optimizer
-optimizer = optim.Adam(list(synth.parameters()) + list(decoder_head.parameters()), lr=1e-4)
-loss_fn = nn.CrossEntropyLoss(ignore_index=tokenizer.pad_token_id)
+    def forward(self, latent, seq_len):
+        adapted = self.norm(self.proj(latent))  # [batch, encoder_dim]
+        expanded = adapted.unsqueeze(1).expand(-1, seq_len, -1)  # [batch, seq_len, encoder_dim]
+        return expanded
+
+adapter = SynthToEncoderAdapter(latent_dim, t5_model.config.d_model).to(device)
+
+# Optimizer (Synth + adapter + T5 decoder)
+optimizer = optim.Adam(
+    list(synth.parameters()) + list(adapter.parameters()) + list(t5_model.decoder.parameters()),
+    lr=1e-4
+)
+loss_fct = nn.CrossEntropyLoss(ignore_index=tokenizer.pad_token_id)
 
 # Load HotpotQA dataset
 dataset = load_dataset('hotpot_qa', 'fullwiki', split='train[:1%]', trust_remote_code=True)
@@ -63,33 +76,66 @@ def collate_fn(batch):
 
     return inputs, labels, questions, target_texts
 
+def compute_token_f1(prediction, ground_truth):
+    pred_tokens = prediction.lower().split()
+    gt_tokens = ground_truth.lower().split()
+    common = collections.Counter(pred_tokens) & collections.Counter(gt_tokens)
+    num_same = sum(common.values())
+
+    if num_same == 0:
+        return 0.0
+
+    precision = num_same / len(pred_tokens)
+    recall = num_same / len(gt_tokens)
+    f1 = (2 * precision * recall) / (precision + recall)
+    return f1
+
 train_loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_fn)
 
 # Training loop
 for epoch in range(num_epochs):
     synth.train()
+    adapter.train()
     total_loss = 0
+    reward_list = []
+
     for step, (inputs, labels, questions, target_answers) in enumerate(train_loader):
         input_ids = inputs['input_ids'].to(device)
         attention_mask = inputs['attention_mask'].to(device)
         label_ids = labels['input_ids'].to(device)
 
-        # Encode with T5 encoder
+        # Encode with T5 encoder (no gradients)
         with torch.no_grad():
             encoder_outputs = t5_encoder(input_ids=input_ids, attention_mask=attention_mask)
             encoder_hidden = encoder_outputs.last_hidden_state.mean(dim=1)  # [batch, dim]
 
-        # Pass through Synthesizer
-        latent, programs, sym_embeds = synth.forward(encoder_hidden, max_ops=max_ops)
+        # Synthesizer forward
+        latent, programs, sym_embeds = synth.forward(encoder_hidden, max_ops=max_ops)  # [batch, latent_dim]
 
-        # Decoder head
-        logits = decoder_head(latent)  # [batch, vocab_size]
+        # Adapt and expand Synth latent to match input sequence
+        latent_embeds = adapter(latent, seq_len=input_ids.size(1))  # [batch, seq_len, encoder_dim]
 
-        # Shift labels for decoder (standard seq2seq practice)
-        target = label_ids[:, 1:].contiguous().view(-1)
-        pred_logits = logits.view(-1, vocab_size)
+        # Prepare decoder inputs and shifted labels
+        decoder_input_ids = label_ids[:, :-1].contiguous()
+        decoder_labels = label_ids[:, 1:].contiguous()
 
-        loss = loss_fn(pred_logits, target)
+        outputs = t5_model(
+            inputs_embeds=latent_embeds,
+            decoder_input_ids=decoder_input_ids,
+            labels=None  # we compute loss externally
+        )
+
+        lm_logits = outputs.logits  # [batch, decoder_seq_len, vocab_size]
+
+        # Ensure sequence length alignment
+        assert lm_logits.shape[1] == decoder_labels.shape[1], \
+            f"Logits length {lm_logits.shape[1]} vs labels length {decoder_labels.shape[1]} mismatch"
+
+        # Flatten for loss
+        loss = loss_fct(
+            lm_logits.reshape(-1, lm_logits.size(-1)),
+            decoder_labels.reshape(-1)
+        )
 
         optimizer.zero_grad()
         loss.backward()
@@ -97,14 +143,36 @@ for epoch in range(num_epochs):
 
         total_loss += loss.item()
 
+        with torch.no_grad():
+            generated_ids = t5_model.generate(inputs_embeds=latent_embeds, max_length=64)
+            decoded_outputs = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
+
+            for pred, target in zip(decoded_outputs, target_answers):
+                pred_clean = pred.strip()
+                if pred_clean:
+                    reward = compute_token_f1(pred_clean, target)
+                else:
+                    reward = 0.0  # fallback if generation failed
+
+                reward_list.append(torch.tensor([reward], device=device))
+
         if step % 10 == 0:
             print(f"Epoch {epoch + 1}, Step {step}, Loss: {loss.item():.4f}")
 
     avg_loss = total_loss / len(train_loader)
     print(f"Epoch {epoch + 1} completed. Average Loss: {avg_loss:.4f}")
 
-    # Evaluation / generation
+    # Update GEM with all accumulated rewards
+    if reward_list:
+        all_rewards = torch.cat(reward_list, dim=0)
+        print(f"Collected programs: {len(synth.collected_programs)}")
+        print(f"Collected rewards: {all_rewards.size(0)}")
+        synth.update_gem(all_rewards)
+        reward_list = []
+
+    # Evaluation (single batch sanity check)
     synth.eval()
+    adapter.eval()
     with torch.no_grad():
         for inputs, labels, questions, target_answers in train_loader:
             input_ids = inputs['input_ids'].to(device)
@@ -114,15 +182,15 @@ for epoch in range(num_epochs):
             encoder_hidden = encoder_outputs.last_hidden_state.mean(dim=1)
 
             latent, programs, sym_embeds = synth.forward(encoder_hidden, max_ops=max_ops)
-            logits = decoder_head(latent)
+            latent_embeds = adapter(latent, seq_len=input_ids.size(1))
 
-            pred_ids = torch.argmax(logits, dim=-1)
-            decoded_outputs = tokenizer.batch_decode(pred_ids, skip_special_tokens=True)
+            generated_ids = t5_model.generate(inputs_embeds=latent_embeds, max_length=64)
+            decoded_outputs = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
 
             for q, target, pred in zip(questions, target_answers, decoded_outputs):
                 print(f"\nQUESTION: {q}")
                 print(f"TARGET ANSWER: {target}")
                 print(f"GENERATED ANSWER: {pred}")
-            break  # Only print one batch for sanity check after epoch
+            break  # Only one batch
 
 print("Training complete.")
