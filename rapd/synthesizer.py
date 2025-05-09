@@ -33,7 +33,7 @@ class Synthesizer(nn.Module):
         if len(self.gem.symbolic_embeds) > 0:
             with torch.no_grad():
                 query_vec = symbolic_embeds.mean(dim=(0, 1)).detach().cpu().numpy()
-                retrieved = self.gem.retrieve(query_vec, 1000)
+                retrieved = self.gem.retrieve(query_vec, 5)
                 if retrieved:
                     gem_embeds.append(
                         (torch.stack([r['symbolic'].to(self.device) for r in retrieved], dim=0),
@@ -41,7 +41,7 @@ class Synthesizer(nn.Module):
                     )
 
         # Inject top-k global high-reward programs
-        top_global = self.gem.get_top_k(k=20)
+        top_global = self.gem.get_top_k(k=5)
         if top_global:
             gem_embeds.append(
                 (torch.stack([r['symbolic'].to(self.device) for r in top_global], dim=0),
@@ -49,7 +49,7 @@ class Synthesizer(nn.Module):
             )
 
         # Inject mutated top programs directly
-        mutated_programs = self.gem.mutate_top_programs(k=20, num_mutations=5, num_nodes=self.router.num_nodes, max_ops=max_ops)
+        mutated_programs = self.gem.mutate_top_programs(k=5, num_mutations=5, num_nodes=self.router.num_nodes, max_ops=max_ops)
         if mutated_programs:
             mut_embeds = []
             mut_rewards = []
@@ -77,6 +77,8 @@ class Synthesizer(nn.Module):
         program_indices = self.router(z, symbolic_embeds, gem_embeds, max_ops)
         
         out = z.clone()
+        original_z = z.clone()  # preserve original latent for concat
+
         active_mask = torch.ones(batch_size, dtype=torch.bool, device=self.device)
         done_mask = torch.zeros(batch_size, dtype=torch.bool, device=self.device)
 
@@ -91,12 +93,17 @@ class Synthesizer(nn.Module):
 
             selected_ops = hop_idx[still_active]
             x_active = out[still_active]
+            orig_active = original_z[still_active]  # same shape as x_active
+
+            # Combine [original_z, last_out]
+            combined_input = torch.cat([orig_active, x_active], dim=-1)  # [active_batch, latent_dim * 2]
+
             unique_ops = selected_ops.unique()
             out_active = torch.empty_like(x_active)
 
             for idx in unique_ops:
                 idx_mask = selected_ops == idx
-                op_inputs = x_active[idx_mask]
+                op_inputs = combined_input[idx_mask]
 
                 # Unpack both the op and symbolic embedding
                 op_fn, symbolic_batch = op_list[idx]
@@ -104,7 +111,7 @@ class Synthesizer(nn.Module):
                 # Select only the symbolic vectors for still-active + idx-matching samples
                 symbolic_inputs = symbolic_batch[still_active][idx_mask]
 
-                # Apply op (passing both latent and symbolic slice)
+                # Apply op (passing both latent + last_out and symbolic slice)
                 op_outputs = op_fn(op_inputs, symbolic_inputs)
 
                 out_active[idx_mask] = op_outputs
@@ -116,7 +123,7 @@ class Synthesizer(nn.Module):
                 self.collected_symbolic.append(symbolic_embeds[i].detach().cpu())
                 self.collected_programs.append(program_indices[i].detach().cpu())
 
-        return out, program_indices, symbolic_embeds
+        return out
 
     def update_gem(self, rewards):
         print("starting gem batch insert")

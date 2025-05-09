@@ -115,7 +115,7 @@ for epoch in range(num_epochs):
             encoder_hidden = encoder_outputs.last_hidden_state.mean(dim=1)  # [batch, dim]
 
         # Synthesizer forward
-        latent, programs, sym_embeds = synth.forward(encoder_hidden, max_ops=max_ops)  # [batch, latent_dim]
+        latent = synth.forward(encoder_hidden, max_ops=max_ops)  # [batch, latent_dim]
 
         # Adapt and expand Synth latent to match input sequence
         latent_embeds = adapter(latent, seq_len=input_ids.size(1))  # [batch, seq_len, encoder_dim]
@@ -169,8 +169,6 @@ for epoch in range(num_epochs):
 
     # Update GEM with all accumulated rewards
     all_rewards = torch.cat(reward_list, dim=0)
-    print(f"Collected programs: {len(synth.collected_programs)}")
-    print(f"Collected rewards: {all_rewards.size(0)}")
     synth.update_gem(all_rewards)
      
     # Evaluation (single batch sanity check)
@@ -184,7 +182,7 @@ for epoch in range(num_epochs):
             encoder_outputs = t5_encoder(input_ids=input_ids, attention_mask=attention_mask)
             encoder_hidden = encoder_outputs.last_hidden_state.mean(dim=1)
 
-            latent, programs, sym_embeds = synth.forward(encoder_hidden, max_ops=max_ops)
+            latent = synth.forward(encoder_hidden, max_ops=max_ops)
             latent_embeds = adapter(latent, seq_len=input_ids.size(1))
 
             generated_ids = t5_model.generate(inputs_embeds=latent_embeds, max_length=64)

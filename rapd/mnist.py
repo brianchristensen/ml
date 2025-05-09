@@ -22,7 +22,7 @@ max_gem = 10000
 num_classes = 10
 input_dim = 784
 latent_dim = 128
-symbolic_dim = 512
+symbolic_dim = 128
 batch_size = 64
 
 nodes = [Node(latent_dim, symbolic_dim).to(device) for _ in range(num_nodes)]
@@ -52,7 +52,7 @@ for epoch in range(num_epochs):
         data, target = data.to(device), target.to(device)
         optimizer.zero_grad()
 
-        latent, programs, sym_embeds = synth.forward(data, max_ops=max_ops)
+        latent = synth.forward(data, max_ops=max_ops)
         output = classifier(latent)
         probs = torch.softmax(output, dim=1)
         loss = nn.CrossEntropyLoss()(output, target)
@@ -68,7 +68,7 @@ for epoch in range(num_epochs):
         for r in batch_rewards:
             reward_list.append(r.unsqueeze(0))
 
-        del latent, programs, sym_embeds, output, loss, data, target
+        del latent, output, loss, data, target
         torch.cuda.empty_cache()
 
         window_batches += 1
