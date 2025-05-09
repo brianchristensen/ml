@@ -27,15 +27,28 @@ class Synthesizer(nn.Module):
             symbolic_embeds.append(sym_embed)
         symbolic_embeds = torch.stack(symbolic_embeds, dim=1)
 
+        # Find similar programs in memory to the current proposed
         gem_embeds = None
         if len(self.gem.symbolic_embeds) > 0:
             with torch.no_grad():
                 query_vec = symbolic_embeds.mean(dim=(0, 1)).detach().cpu().numpy()
-                retrieved = self.gem.retrieve(query_vec)
+                retrieved = self.gem.retrieve(query_vec, 1000)
                 if retrieved:
                     gem_embeds = torch.stack([r['symbolic'].to(self.device) for r in retrieved], dim=0)  # (k, sym_dim)
                     weights = torch.tensor([r['reward'] for r in retrieved], device=self.device).unsqueeze(1)  # (k, 1)
                     gem_embeds = gem_embeds * weights 
+
+        # Always inject top-10 global high-reward programs
+        top_global = self.gem.get_top_k(k=10)
+        if top_global:
+            global_embeds = torch.stack([r['symbolic'].to(self.device) for r in top_global], dim=0)
+            global_weights = torch.tensor([r['reward'] for r in top_global], device=self.device).unsqueeze(1)
+            global_embeds = global_embeds * global_weights
+
+            if gem_embeds is not None:
+                gem_embeds = torch.cat([gem_embeds, global_embeds], dim=0)
+            else:
+                gem_embeds = global_embeds
 
         program_indices = self.router(z, symbolic_embeds, gem_embeds, max_ops)
         
@@ -74,9 +87,10 @@ class Synthesizer(nn.Module):
 
             out[still_active] = out_active
 
-        for i in range(symbolic_embeds.size(0)):  # batch size
-            self.collected_symbolic.append(symbolic_embeds[i].detach().cpu())
-            self.collected_programs.append(program_indices[i].detach().cpu())
+        if self.training:
+            for i in range(batch_size):
+                self.collected_symbolic.append(symbolic_embeds[i].detach().cpu())
+                self.collected_programs.append(program_indices[i].detach().cpu())
 
         return out, program_indices, symbolic_embeds
 
@@ -91,7 +105,7 @@ class Synthesizer(nn.Module):
         rewards_list = []
 
         total_entries = all_programs.size(0)
-        decay = 0.1
+        decay = 0.001
 
         for b in range(total_entries):
             prog = all_programs[b]
