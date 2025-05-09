@@ -5,6 +5,7 @@ from torch.utils.data import DataLoader
 from datasets import load_dataset
 from transformers import T5Tokenizer, T5ForConditionalGeneration
 import collections
+import string
 from synthesizer import Synthesizer
 from node import Node
 from router import Router
@@ -12,8 +13,8 @@ from gem import GEM
 
 # Hyperparameters
 num_epochs = 20
-num_nodes = 20
-max_ops = 10
+num_nodes = 8
+max_ops = 5
 max_gem = 10000
 latent_dim = 128
 symbolic_dim = 512
@@ -28,7 +29,7 @@ input_dim = t5_encoder.config.d_model  # typically 512
 
 # Initialize Synthesizer components
 nodes = [Node(latent_dim, symbolic_dim).to(device) for _ in range(num_nodes)]
-router = Router(symbolic_dim, num_nodes).to(device)
+router = Router(latent_dim, symbolic_dim, num_nodes).to(device)
 gem = GEM(symbolic_dim, max_gem=max_gem, device=device)
 synth = Synthesizer(nodes, router, gem, input_dim, latent_dim, device).to(device)
 
@@ -76,9 +77,13 @@ def collate_fn(batch):
 
     return inputs, labels, questions, target_texts
 
+def clean_and_tokenize(text):
+    text = text.lower().translate(str.maketrans('', '', string.punctuation))
+    return text.split()
+
 def compute_token_f1(prediction, ground_truth):
-    pred_tokens = prediction.lower().split()
-    gt_tokens = ground_truth.lower().split()
+    pred_tokens = clean_and_tokenize(prediction)
+    gt_tokens = clean_and_tokenize(ground_truth)
     common = collections.Counter(pred_tokens) & collections.Counter(gt_tokens)
     num_same = sum(common.values())
 
@@ -126,7 +131,7 @@ for epoch in range(num_epochs):
         )
 
         lm_logits = outputs.logits  # [batch, decoder_seq_len, vocab_size]
-
+        
         # Ensure sequence length alignment
         assert lm_logits.shape[1] == decoder_labels.shape[1], \
             f"Logits length {lm_logits.shape[1]} vs labels length {decoder_labels.shape[1]} mismatch"
@@ -151,9 +156,9 @@ for epoch in range(num_epochs):
                 pred_clean = pred.strip()
                 if pred_clean:
                     reward = compute_token_f1(pred_clean, target)
+                    if reward != 0.0: print(f"Tokenf1 reward: {reward}")
                 else:
-                    reward = 0.0  # fallback if generation failed
-
+                    reward = 0.0
                 reward_list.append(torch.tensor([reward], device=device))
 
         if step % 10 == 0:
@@ -163,13 +168,11 @@ for epoch in range(num_epochs):
     print(f"Epoch {epoch + 1} completed. Average Loss: {avg_loss:.4f}")
 
     # Update GEM with all accumulated rewards
-    if reward_list:
-        all_rewards = torch.cat(reward_list, dim=0)
-        print(f"Collected programs: {len(synth.collected_programs)}")
-        print(f"Collected rewards: {all_rewards.size(0)}")
-        synth.update_gem(all_rewards)
-        reward_list = []
-
+    all_rewards = torch.cat(reward_list, dim=0)
+    print(f"Collected programs: {len(synth.collected_programs)}")
+    print(f"Collected rewards: {all_rewards.size(0)}")
+    synth.update_gem(all_rewards)
+     
     # Evaluation (single batch sanity check)
     synth.eval()
     adapter.eval()
@@ -192,5 +195,7 @@ for epoch in range(num_epochs):
                 print(f"TARGET ANSWER: {target}")
                 print(f"GENERATED ANSWER: {pred}")
             break  # Only one batch
+
+    gem.print_top_n(10)
 
 print("Training complete.")

@@ -22,11 +22,12 @@ class Router(nn.Module):
         proj_sym = self.symbolic_proj(symbolic_embeds).permute(1, 0, 2)  # [num_nodes, batch, hidden]
         key = proj_sym
 
-        if gem_embeds is not None and gem_embeds.size(0) > 0:
-            gem_proj = self.gem_proj(gem_embeds)  # [k, hidden]
-            gem_proj = gem_proj.unsqueeze(1).expand(-1, batch_size, -1)  # [k, batch, hidden]
-
-            key = torch.cat([proj_sym, gem_proj], dim=0)
+        if gem_embeds is not None:
+            gem_values, gem_rewards = gem_embeds
+            if gem_values.size(0) > 0:
+                gem_proj = self.gem_proj(gem_values)  # [k, hidden]
+                gem_proj = gem_proj.unsqueeze(1).expand(-1, batch_size, -1)  # [k, batch, hidden]
+                key = torch.cat([proj_sym, gem_proj], dim=0)
 
         program_indices = []
 
@@ -36,6 +37,17 @@ class Router(nn.Module):
 
             if step == 0:
                 logits[:, self.num_nodes] = float('-inf')  # block HALT at first step
+
+            # Apply reward-based logit boosting for GEM-injected entries
+            if gem_embeds is not None and gem_values.size(0) > 0 and gem_rewards is not None:
+                gem_start_idx = proj_sym.size(0)
+                reward_boost = torch.zeros_like(logits)
+
+                for local_idx, reward_value in enumerate(gem_rewards):
+                    pos_idx = gem_start_idx + local_idx
+                    reward_boost[:, pos_idx % logits.size(1)] += reward_value * 10  # scale factor tunable
+
+                logits += reward_boost
 
             probs = torch.softmax(logits, dim=-1)
             selected = torch.multinomial(probs, 1).squeeze(-1)

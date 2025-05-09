@@ -109,6 +109,30 @@ class GEM:
 
         return results
 
+    def mutate_top_programs(self, k=10, num_mutations=5, num_nodes=20, max_ops=10):
+        top_programs = self.get_top_k(k)
+        mutated = []
+
+        for entry in top_programs:
+            prog = entry['program']
+            for _ in range(num_mutations):
+                # Simple random mutation: swap, replace, or extend
+                mutated_prog = prog.copy()
+                if np.random.rand() < 0.33 and len(mutated_prog) > 1:
+                    # Swap two ops
+                    i, j = np.random.choice(len(mutated_prog), 2, replace=False)
+                    mutated_prog[i], mutated_prog[j] = mutated_prog[j], mutated_prog[i]
+                elif np.random.rand() < 0.66 and len(mutated_prog) < max_ops:
+                    # Extend
+                    mutated_prog.append(np.random.randint(0, num_nodes))
+                else:
+                    # Replace one op
+                    idx = np.random.randint(0, len(mutated_prog))
+                    mutated_prog[idx] = np.random.randint(0, num_nodes)
+                mutated.append(mutated_prog)
+
+        return mutated
+
     def get_top_k(self, k=10):
         if len(self.rewards) == 0:
             return []

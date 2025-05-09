@@ -17,7 +17,7 @@ class Synthesizer(nn.Module):
         self.collected_programs = []
 
     def forward(self, x, max_ops=4):
-        batch_size, dim = x.size()
+        batch_size, _dim = x.size()
 
         z = self.input_proj(x)
         op_list, symbolic_embeds = [], []
@@ -27,28 +27,52 @@ class Synthesizer(nn.Module):
             symbolic_embeds.append(sym_embed)
         symbolic_embeds = torch.stack(symbolic_embeds, dim=1)
 
-        # Find similar programs in memory to the current proposed
-        gem_embeds = None
+        gem_embeds = []
+
+        # Retrieve nearest GEM neighbors
         if len(self.gem.symbolic_embeds) > 0:
             with torch.no_grad():
                 query_vec = symbolic_embeds.mean(dim=(0, 1)).detach().cpu().numpy()
                 retrieved = self.gem.retrieve(query_vec, 1000)
                 if retrieved:
-                    gem_embeds = torch.stack([r['symbolic'].to(self.device) for r in retrieved], dim=0)  # (k, sym_dim)
-                    weights = torch.tensor([r['reward'] for r in retrieved], device=self.device).unsqueeze(1)  # (k, 1)
-                    gem_embeds = gem_embeds * weights 
+                    gem_embeds.append(
+                        (torch.stack([r['symbolic'].to(self.device) for r in retrieved], dim=0),
+                        torch.tensor([r['reward'] for r in retrieved], device=self.device).unsqueeze(1))
+                    )
 
-        # Always inject top-10 global high-reward programs
-        top_global = self.gem.get_top_k(k=10)
+        # Inject top-k global high-reward programs
+        top_global = self.gem.get_top_k(k=20)
         if top_global:
-            global_embeds = torch.stack([r['symbolic'].to(self.device) for r in top_global], dim=0)
-            global_weights = torch.tensor([r['reward'] for r in top_global], device=self.device).unsqueeze(1)
-            global_embeds = global_embeds * global_weights
+            gem_embeds.append(
+                (torch.stack([r['symbolic'].to(self.device) for r in top_global], dim=0),
+                torch.tensor([r['reward'] for r in top_global], device=self.device).unsqueeze(1))
+            )
 
-            if gem_embeds is not None:
-                gem_embeds = torch.cat([gem_embeds, global_embeds], dim=0)
-            else:
-                gem_embeds = global_embeds
+        # Inject mutated top programs directly
+        mutated_programs = self.gem.mutate_top_programs(k=20, num_mutations=5, num_nodes=self.router.num_nodes, max_ops=max_ops)
+        if mutated_programs:
+            mut_embeds = []
+            mut_rewards = []
+            for mut_prog in mutated_programs:
+                dummy_embed = torch.randn(self.router.symbolic_proj.in_features, device=self.device)
+                mut_embeds.append(dummy_embed)
+                mut_rewards.append(0.0)
+                # Optionally: also prestore in GEM memory
+                self.gem.symbolic_embeds.append(dummy_embed.cpu())
+                self.gem.programs.append(mut_prog)
+                self.gem.rewards.append(0.0)
+            gem_embeds.append(
+                (torch.stack(mut_embeds, dim=0), torch.tensor(mut_rewards, device=self.device).unsqueeze(1))
+            )
+
+        # Combine all GEM sources
+        if gem_embeds:
+            all_embeds = torch.cat([pair[0] for pair in gem_embeds], dim=0)  # (total_k, sym_dim)
+            all_rewards = torch.cat([pair[1] for pair in gem_embeds], dim=0).squeeze(1)  # (total_k,)
+
+            gem_embeds = (all_embeds, all_rewards)
+        else:
+            gem_embeds = None
 
         program_indices = self.router(z, symbolic_embeds, gem_embeds, max_ops)
         
