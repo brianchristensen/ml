@@ -26,7 +26,7 @@ symbolic_dim = 512
 batch_size = 64
 
 nodes = [Node(latent_dim, symbolic_dim).to(device) for _ in range(num_nodes)]
-router = Router(symbolic_dim, num_nodes).to(device)
+router = Router(latent_dim, symbolic_dim, num_nodes).to(device)
 gem = GEM(symbolic_dim, max_gem=max_gem, device=device)
 synth = Synthesizer(nodes, router, gem, input_dim, latent_dim, device).to(device)
 classifier = ClassifierHead(latent_dim, num_classes).to(device)
