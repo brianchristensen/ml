@@ -2,6 +2,7 @@
 **/data/
 **/models/
 **/MNIST/*
+**/logdir/*
 *.pth
 *.tar.gz
 *.csv
