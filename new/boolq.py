@@ -6,6 +6,7 @@ from torch.utils.data import DataLoader
 from datasets import load_dataset
 import time
 from transformers import AutoTokenizer
+from model import CognitionModel
 
 class ClassifierHead(nn.Module):
     def __init__(self, latent_dim, num_classes):
@@ -131,7 +132,7 @@ if __name__ == '__main__':
 
     tokenizer = AutoTokenizer.from_pretrained('bert-base-uncased')
 
-    model = #tbd
+    model = CognitionModel(hidden_dim)
 
     classifier = ClassifierHead(hidden_dim, num_classes)
     trainer = BoolQTrainer(model, classifier, tokenizer, device)
