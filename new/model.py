@@ -3,31 +3,28 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-class DemandRouter(nn.Module): # inverted attention
+class DemandRouter(nn.Module):
     def __init__(self, d_model, k_query=32, k_topk=4):
         super().__init__()
         self.query_proj = nn.Linear(d_model, k_query)
         self.key_proj = nn.Linear(d_model, k_query)
         self.k_topk = k_topk
 
-    def forward(self, x):
-        # x: (B, T, D)
+    def forward(self, x):  # x: (B, T, D)
+        B, T, D = x.size()
         queries = self.query_proj(x)  # (B, T, K)
         keys = self.key_proj(x)      # (B, T, K)
         sim = torch.matmul(queries, keys.transpose(-1, -2))  # (B, T, T)
         sim = sim / queries.size(-1)**0.5
 
-        topk_values, topk_indices = torch.topk(sim, self.k_topk, dim=-1)
+        _, topk_indices = torch.topk(sim, self.k_topk, dim=-1)  # (B, T, k)
 
-        B, T, D = x.size()
-        gathered = torch.zeros_like(x)
-        for b in range(B):
-            for t in range(T):
-                idx = topk_indices[b, t]
-                neighbors = x[b, idx]  # (k, D)
-                gathered[b, t] = neighbors.mean(dim=0)
-                
-        return gathered
+        # Gather neighbors using advanced indexing
+        topk_indices_exp = topk_indices.unsqueeze(-1).expand(-1, -1, -1, D)  # (B, T, k, D)
+        x_expanded = x.unsqueeze(1).expand(B, T, T, D)                       # (B, T, T, D)
+        gathered = torch.gather(x_expanded, 2, topk_indices_exp)            # (B, T, k, D)
+
+        return gathered.mean(dim=2)  # (B, T, D)
 
 class System1Block(nn.Module):
     def __init__(self, d_model):
@@ -52,24 +49,20 @@ class System2Graph(nn.Module):
         )
         self.gate = nn.Sigmoid()
 
-    def forward(self, x):
+    def forward(self, x):  # x: (B, T, D)
         B, T, D = x.shape
-        graph_output = []
+        memory = torch.zeros(B, D, device=x.device)
+        memories = []
 
-        for b in range(B):
-            memory = torch.zeros(D, device=x.device)
-            token_nodes = []
-            for t in range(T):
-                token = x[b, t]
-                edge_input = torch.cat([token, memory], dim=-1)
-                proposed = self.transform(edge_input)
-                g = self.gate(proposed)
-                memory = memory * (1 - g) + proposed * g
-                token_nodes.append(memory.clone())
+        for t in range(T):  # Still per-time but vectorized over batch
+            token = x[:, t]                          # (B, D)
+            edge_input = torch.cat([token, memory], dim=-1)  # (B, 2D)
+            proposed = self.transform(edge_input)            # (B, D)
+            g = self.gate(proposed)                          # (B, D)
+            memory = memory * (1 - g) + proposed * g         # (B, D)
+            memories.append(memory.unsqueeze(1))             # (B, 1, D)
 
-            graph_output.append(torch.stack(token_nodes))
-
-        return torch.stack(graph_output)
+        return torch.cat(memories, dim=1)  # (B, T, D)
 
 class InvertedCognitionModel(nn.Module):
     def __init__(self, hidden_dim):
