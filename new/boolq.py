@@ -4,9 +4,8 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
 from datasets import load_dataset
-import matplotlib.pyplot as plt
+import time
 from transformers import AutoTokenizer
-from model import InvertedCognitionModel
 
 class ClassifierHead(nn.Module):
     def __init__(self, latent_dim, num_classes):
@@ -71,10 +70,11 @@ class BoolQTrainer:
         self.embedding = nn.Embedding(self.tokenizer.vocab_size, self.model.hidden_dim).to(self.device)
 
     def train_epoch(self, epoch):
+        epoch_start_time = time.time()
         self.model.train()
         self.classifier.train()
         total_loss, total_correct = 0, 0
-
+    
         for batch in self.train_loader:
             input_ids = batch['input_ids'].to(self.device)
             labels = batch['label'].to(self.device)
@@ -95,7 +95,8 @@ class BoolQTrainer:
 
         avg_loss = total_loss / len(self.train_loader.dataset)
         avg_acc = total_correct / len(self.train_loader.dataset)
-        print(f"Train Loss: {avg_loss:.4f}, Train Acc: {avg_acc:.4f}")
+        epoch_duration = time.time() - epoch_start_time
+        print(f"Train Loss: {avg_loss:.4f}, Train Acc: {avg_acc:.4f}, Duration: {epoch_duration}s")
 
     def evaluate(self, epoch):
         self.model.eval()
@@ -130,7 +131,7 @@ if __name__ == '__main__':
 
     tokenizer = AutoTokenizer.from_pretrained('bert-base-uncased')
 
-    model = InvertedCognitionModel(hidden_dim)
+    model = #tbd
 
     classifier = ClassifierHead(hidden_dim, num_classes)
     trainer = BoolQTrainer(model, classifier, tokenizer, device)
