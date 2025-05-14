@@ -4,9 +4,8 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
 from datasets import load_dataset
-from collections import Counter
+import matplotlib.pyplot as plt
 from transformers import AutoTokenizer
-from model import BusSynthesizer
 
 class ClassifierHead(nn.Module):
     def __init__(self, latent_dim, num_classes):
@@ -68,9 +67,9 @@ class BoolQTrainer:
             list(self.model.parameters()) + list(self.classifier.parameters()), lr=1e-4
         )
 
-        self.embedding = nn.Embedding(self.tokenizer.vocab_size, self.model.latent_dim).to(self.device)
+        self.embedding = nn.Embedding(self.tokenizer.vocab_size, self.model.hidden_dim).to(self.device)
 
-    def train_epoch(self):
+    def train_epoch(self, epoch):
         self.model.train()
         self.classifier.train()
         total_loss, total_correct = 0, 0
@@ -80,12 +79,11 @@ class BoolQTrainer:
             labels = batch['label'].to(self.device)
             embedded = self.embedding(input_ids)
 
-            token_outputs = self.model(embedded)
-            pooled = token_outputs.mean(dim=1)
+            pooled = self.model(embedded)
 
             logits = self.classifier(pooled)
             loss = self.criterion(logits, labels)
-
+            
             self.optimizer.zero_grad()
             loss.backward()
             self.optimizer.step()
@@ -98,12 +96,10 @@ class BoolQTrainer:
         avg_acc = total_correct / len(self.train_loader.dataset)
         print(f"Train Loss: {avg_loss:.4f}, Train Acc: {avg_acc:.4f}")
 
-    def evaluate(self):
+    def evaluate(self, epoch):
         self.model.eval()
         self.classifier.eval()
         total_loss, total_correct = 0, 0
-        program_counter = Counter()
-        halt_lengths = []
 
         with torch.no_grad():
             for batch in self.test_loader:
@@ -111,8 +107,7 @@ class BoolQTrainer:
                 labels = batch['label'].to(self.device)
                 embedded = self.embedding(input_ids)
 
-                token_outputs, program = self.model(embedded, return_program=True)
-                pooled = token_outputs.mean(dim=1)
+                pooled = self.model(embedded, return_routing_trace=True)
                 logits = self.classifier(pooled)
                 loss = self.criterion(logits, labels)
 
@@ -120,28 +115,6 @@ class BoolQTrainer:
                 total_correct += (preds == labels).sum().item()
                 total_loss += loss.item() * input_ids.size(0)
 
-                # === Routing trace ===
-                B, S, H = program.shape
-                halt_index = self.model.num_nodes  # last index is HALT
-
-                flat_programs = program.view(-1, program.size(-1)).cpu().tolist()
-                for prog in flat_programs:
-                    if halt_index in prog:
-                        halt_pos = prog.index(halt_index)
-                        prog = prog[:halt_pos]
-                    program_counter[tuple(prog)] += 1
-                    halt_lengths.append(len(prog))
-
-        stds = model.token_prompts[0, :S].std(dim=1)
-        print(f"[Token Prompt Std] mean: {stds.mean().item():.4f}, max: {stds.max().item():.4f}")
-
-        # === Program usage summary ===
-        print(f"\nTop 10 symbolic programs:")
-        for prog, count in program_counter.most_common(10):
-            print(f"  {prog} used {count} times")
-
-        avg_len = sum(halt_lengths) / len(halt_lengths)
-        print(f"Avg halt steps: {avg_len:.2f}")
 
         avg_loss = total_loss / len(self.test_loader.dataset)
         avg_acc = total_correct / len(self.test_loader.dataset)
@@ -151,27 +124,17 @@ if __name__ == '__main__':
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     num_epochs = 10
-    num_nodes = 4
-    max_ops = 4
     num_classes = 2
-    input_dim = 128
-    latent_dim = 128
-    symbolic_dim = 128
+    hidden_dim = 128
 
     tokenizer = AutoTokenizer.from_pretrained('bert-base-uncased')
 
-    model = BusSynthesizer(
-        input_dim=input_dim,
-        latent_dim=latent_dim,
-        symbolic_dim=symbolic_dim,
-        num_nodes=num_nodes,
-        max_ops=max_ops
-    ).to(device)
+    model = #tbd
 
-    classifier = ClassifierHead(latent_dim, num_classes)
+    classifier = ClassifierHead(hidden_dim, num_classes)
     trainer = BoolQTrainer(model, classifier, tokenizer, device)
 
     for epoch in range(num_epochs):
         print(f"\nEpoch {epoch + 1}")
-        trainer.train_epoch()
-        trainer.evaluate()
+        trainer.train_epoch(epoch + 1)
+        trainer.evaluate(epoch + 1)
