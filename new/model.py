@@ -98,27 +98,43 @@ class TemporalEdgeBuilder(nn.Module):
         return weights.expand(B, -1, -1)
 
 class ConceptGraph(nn.Module):
-    def __init__(self, d_model, n_concepts=32):
+    def __init__(self, d_model, n_concepts=32, commitment_cost=0.25):
         super().__init__()
-        self.concepts = nn.Parameter(torch.randn(n_concepts, d_model) * 0.02)
         self.n_concepts = n_concepts
         self.d_model = d_model
-        self.concept_adj = torch.zeros(n_concepts, dtype=torch.long)
+        self.commitment_cost = commitment_cost
+
+        self.codebook = nn.Parameter(torch.randn(n_concepts, d_model) * 0.02)
+        self.register_buffer("concept_adj", torch.zeros(n_concepts, dtype=torch.long))
 
     def forward(self, x):
-        B, T, D = x.size()
-        x_flat = x.view(B * T, D)                       # (B*T, D)
-        sim = torch.matmul(x_flat, self.concepts.T)     # (B*T, C)
-        weights = torch.softmax(sim, dim=-1)            # (B*T, C)
-        out = torch.matmul(weights, self.concepts)      # (B*T, D)
+        B, T, D = x.shape
+        x_flat = x.view(B * T, D)
 
-        # Update adjacency counts
-        top_ids = sim.argmax(dim=-1)                    # (B*T,)
+        # Compute distances to codebook
+        codebook = self.codebook  # (C, D)
+        x2 = (x_flat ** 2).sum(dim=1, keepdim=True)          # (B*T, 1)
+        c2 = (codebook ** 2).sum(dim=1)                      # (C,)
+        xc = torch.matmul(x_flat, codebook.t())             # (B*T, C)
+        dists = x2 + c2 - 2 * xc                             # (B*T, C)
+
+        # Get nearest concept per token
+        nearest_idx = torch.argmin(dists, dim=1)            # (B*T,)
+        quantized = codebook[nearest_idx]                   # (B*T, D)
+
+        # Straight-through estimator
+        quantized = x_flat + (quantized - x_flat).detach()
+
+        # Optional: VQ Loss (can be added to total loss externally if needed)
+        self.vq_loss = F.mse_loss(quantized.detach(), x_flat) + \
+                       self.commitment_cost * F.mse_loss(quantized, x_flat.detach())
+
+        # Update usage counts
         with torch.no_grad():
             for i in range(self.n_concepts):
-                self.concept_adj[i] += (top_ids == i).sum().item()
+                self.concept_adj[i] += (nearest_idx == i).sum().item()
 
-        return out.view(B, T, D)
+        return quantized.view(B, T, D)
 
 class System2Graph(nn.Module):
     def __init__(self, d_model, k_topk=4):
