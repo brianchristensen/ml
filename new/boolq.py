@@ -8,6 +8,17 @@ import time
 from transformers import AutoTokenizer
 from model import CognitionModel
 
+import matplotlib.pyplot as plt
+from sklearn.decomposition import PCA
+
+def plot_codes(model):
+    codebook_np = model.system2.concept_graph.codebook.detach().cpu().numpy()
+    pca = PCA(n_components=2)
+    coords = pca.fit_transform(codebook_np)
+    plt.scatter(coords[:, 0], coords[:, 1])
+    plt.title("VQ Codebook Embeddings")
+    plt.show() # Add plt.show() to display the plot
+
 class ClassifierHead(nn.Module):
     def __init__(self, latent_dim, num_classes):
         super(ClassifierHead, self).__init__()
@@ -84,8 +95,9 @@ class BoolQTrainer:
             pooled = self.model(embedded)
 
             logits = self.classifier(pooled)
-            loss = self.criterion(logits, labels)
-            
+            task_loss = self.criterion(logits, labels)
+            loss = task_loss + self.model.system2.concept_graph.vq_loss
+
             self.optimizer.zero_grad()
             loss.backward()
             self.optimizer.step()
@@ -112,7 +124,8 @@ class BoolQTrainer:
 
                 pooled = self.model(embedded, return_routing_trace=True)
                 logits = self.classifier(pooled)
-                loss = self.criterion(logits, labels)
+                task_loss = self.criterion(logits, labels)
+                loss = task_loss + self.model.system2.concept_graph.vq_loss
 
                 preds = logits.argmax(dim=1)
                 total_correct += (preds == labels).sum().item()
@@ -141,3 +154,4 @@ if __name__ == '__main__':
         print(f"\nEpoch {epoch + 1}")
         trainer.train_epoch(epoch + 1)
         trainer.evaluate(epoch + 1)
+        #plot_codes(model)
