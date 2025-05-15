@@ -51,24 +51,15 @@ class ReasoningFunction(nn.Module):
         )
 
     def forward(self, token, routed_tokens, sim_row):
-        # token: (B*T, D)
-        # routed_tokens: (B*T, K, D)
-        # sim_row: (B*T, K)
-
         B_T, K, D = routed_tokens.shape
-
-        # Expand token to match K arguments
-        token_expanded = token.unsqueeze(1).expand(-1, K, -1)  # (B*T, K, D)
-        combined = torch.cat([token_expanded, routed_tokens], dim=-1)  # (B*T, K, 2D)
-
-        fused = self.logic(combined)  # (B*T, K, D)
-        sim_weights = torch.softmax(sim_row, dim=-1).unsqueeze(-1)  # (B*T, K, 1)
-
-        arg_summary = torch.sum(sim_weights * fused, dim=1)  # (B*T, D)
-
-        gate = self.gate(torch.cat([token, arg_summary], dim=-1))  # (B*T, D)
+        token_expanded = token.unsqueeze(1).expand(-1, K, -1)
+        combined = torch.cat([token_expanded, routed_tokens], dim=-1)
+        fused = self.logic(combined)
+        sim_weights = torch.softmax(sim_row, dim=-1).unsqueeze(-1)
+        arg_summary = torch.sum(sim_weights * fused, dim=1)
+        gate = self.gate(torch.cat([token, arg_summary], dim=-1))
         return arg_summary, gate
-    
+
 class FunctionLibrary(nn.Module):
     def __init__(self, d_model, n_functions=4):
         super().__init__()
@@ -77,29 +68,42 @@ class FunctionLibrary(nn.Module):
 
     def forward(self, token, routed_tokens, sim_row):
         B_T, K, D = routed_tokens.size()
-        fn_weights = torch.softmax(self.fn_selector(token), dim=-1)  # (B*T, n)               # (B*T, k)
+        fn_weights = torch.softmax(self.fn_selector(token), dim=-1)
 
         proposed_list = []
         gate_list = []
 
         for fn in self.fns:
-            out, gate = fn(token, routed_tokens, sim_row)  # (B*T, D), (B*T, D)
+            out, gate = fn(token, routed_tokens, sim_row)
             proposed_list.append(out)
             gate_list.append(gate)
 
-        proposed_stack = torch.stack(proposed_list, dim=1)  # (B*T, n, D)
-        gate_stack = torch.stack(gate_list, dim=1)          # (B*T, n, D)
+        proposed_stack = torch.stack(proposed_list, dim=1)
+        gate_stack = torch.stack(gate_list, dim=1)
 
         proposed = torch.sum(fn_weights.unsqueeze(-1) * proposed_stack, dim=1)
         gate = torch.sum(fn_weights.unsqueeze(-1) * gate_stack, dim=1)
 
         return proposed, gate
 
+class TemporalEdgeBuilder(nn.Module):
+    def __init__(self, max_len=512):
+        super().__init__()
+        self.max_len = max_len
+        self.decay = nn.Parameter(torch.tensor(1.0))  # Learnable decay rate
+
+    def forward(self, B, T, device):
+        idxs = torch.arange(T, device=device).unsqueeze(0)  # (1, T)
+        deltas = torch.abs(idxs.unsqueeze(-1) - idxs.unsqueeze(1)).float()  # (T, T)
+        weights = torch.exp(-self.decay * deltas)  # (T, T)
+        return weights.expand(B, -1, -1)
+
 class System2Graph(nn.Module):
     def __init__(self, d_model, k_topk=4):
         super().__init__()
         self.k_topk = k_topk
         self.logic_fn = FunctionLibrary(d_model)
+        self.temporal_edges = TemporalEdgeBuilder()
 
     def forward(self, x, routed_tokens, sim):
         B, T, D = x.shape
@@ -111,7 +115,14 @@ class System2Graph(nn.Module):
 
         proposed, gate = self.logic_fn(x_flat, routed_flat, sim_flat)
         updated = proposed * gate
-        return updated.view(B, T, D)
+        updated = updated.view(B, T, D)
+
+        # Temporal enhancement
+        temporal_weights = self.temporal_edges(B, T, x.device)  # (B, T, T)
+        attended = torch.bmm(temporal_weights, updated)         # (B, T, D)
+        fused = F.layer_norm(updated + attended, (D,))          # (B, T, D)
+
+        return fused
 
 class CognitionModel(nn.Module):
     def __init__(self, hidden_dim, k_topk=4):
@@ -123,9 +134,9 @@ class CognitionModel(nn.Module):
         self.output_proj = nn.Linear(hidden_dim, hidden_dim)
 
     def forward(self, x, return_routing_trace=False):
-        routed_tokens, topk_indices, sim = self.router(x)  # (B, T, k, D), (B, T, k), (B, T, k)
+        routed_tokens, topk_indices, sim = self.router(x)
         routed_mean = routed_tokens.mean(dim=2)
-        x = self.system1(routed_mean)                      # (B, T, D)
-        x = self.system2(x, routed_tokens, sim)            # (B, T, D)
-        pooled = x[:, -1]                                  # (B, D)
+        x = self.system1(routed_mean)
+        x = self.system2(x, routed_tokens, sim)
+        pooled = x[:, -1]
         return self.output_proj(pooled)
