@@ -69,7 +69,6 @@ class FunctionLibrary(nn.Module):
     def forward(self, token, routed_tokens, sim_row):
         B_T, K, D = routed_tokens.size()
         fn_weights = torch.softmax(self.fn_selector(token), dim=-1)
-
         proposed_list = []
         gate_list = []
 
@@ -90,13 +89,36 @@ class TemporalEdgeBuilder(nn.Module):
     def __init__(self, max_len=512):
         super().__init__()
         self.max_len = max_len
-        self.decay = nn.Parameter(torch.tensor(1.0))  # Learnable decay rate
+        self.decay = nn.Parameter(torch.tensor(1.0))
 
     def forward(self, B, T, device):
-        idxs = torch.arange(T, device=device).unsqueeze(0)  # (1, T)
-        deltas = torch.abs(idxs.unsqueeze(-1) - idxs.unsqueeze(1)).float()  # (T, T)
-        weights = torch.exp(-self.decay * deltas)  # (T, T)
+        idxs = torch.arange(T, device=device).unsqueeze(0)
+        deltas = torch.abs(idxs.unsqueeze(-1) - idxs.unsqueeze(1)).float()
+        weights = torch.exp(-self.decay * deltas)
         return weights.expand(B, -1, -1)
+
+class ConceptGraph(nn.Module):
+    def __init__(self, d_model, n_concepts=32):
+        super().__init__()
+        self.concepts = nn.Parameter(torch.randn(n_concepts, d_model) * 0.02)
+        self.n_concepts = n_concepts
+        self.d_model = d_model
+        self.concept_adj = torch.zeros(n_concepts, dtype=torch.long)
+
+    def forward(self, x):
+        B, T, D = x.size()
+        x_flat = x.view(B * T, D)                       # (B*T, D)
+        sim = torch.matmul(x_flat, self.concepts.T)     # (B*T, C)
+        weights = torch.softmax(sim, dim=-1)            # (B*T, C)
+        out = torch.matmul(weights, self.concepts)      # (B*T, D)
+
+        # Update adjacency counts
+        top_ids = sim.argmax(dim=-1)                    # (B*T,)
+        with torch.no_grad():
+            for i in range(self.n_concepts):
+                self.concept_adj[i] += (top_ids == i).sum().item()
+
+        return out.view(B, T, D)
 
 class System2Graph(nn.Module):
     def __init__(self, d_model, k_topk=4):
@@ -104,6 +126,7 @@ class System2Graph(nn.Module):
         self.k_topk = k_topk
         self.logic_fn = FunctionLibrary(d_model)
         self.temporal_edges = TemporalEdgeBuilder()
+        self.concept_graph = ConceptGraph(d_model)
 
     def forward(self, x, routed_tokens, sim):
         B, T, D = x.shape
@@ -117,10 +140,14 @@ class System2Graph(nn.Module):
         updated = proposed * gate
         updated = updated.view(B, T, D)
 
-        # Temporal enhancement
-        temporal_weights = self.temporal_edges(B, T, x.device)  # (B, T, T)
-        attended = torch.bmm(temporal_weights, updated)         # (B, T, D)
-        fused = F.layer_norm(updated + attended, (D,))          # (B, T, D)
+        # Temporal graph
+        temporal_weights = self.temporal_edges(B, T, x.device)
+        attended = torch.bmm(temporal_weights, updated)
+        fused = F.layer_norm(updated + attended, (D,))
+
+        # Concept graph
+        concept_enhanced = self.concept_graph(fused)
+        fused = F.layer_norm(fused + concept_enhanced, (D,))
 
         return fused
 
