@@ -20,11 +20,9 @@ class DemandRouter(nn.Module):
         topk_indices_exp = topk_indices.unsqueeze(-1).expand(-1, -1, -1, D)
         x_expanded = x.unsqueeze(1).expand(B, T, T, D)
         gathered = torch.gather(x_expanded, 2, topk_indices_exp)  # (B, T, k, D)
-
-        # Also gather similarities corresponding to topk
         sim_gathered = torch.gather(sim, 2, topk_indices)  # (B, T, k)
 
-        return gathered, topk_indices, sim_gathered  # (B, T, k, D), (B, T, k), (B, T, k)
+        return gathered, topk_indices, sim_gathered
 
 class System1Block(nn.Module):
     def __init__(self, d_model):
@@ -42,7 +40,7 @@ class System1Block(nn.Module):
 class ReasoningFunction(nn.Module):
     def __init__(self, d_model):
         super().__init__()
-        self.net = nn.Sequential(
+        self.logic = nn.Sequential(
             nn.Linear(d_model * 2, d_model),
             nn.GELU(),
             nn.LayerNorm(d_model)
@@ -52,12 +50,25 @@ class ReasoningFunction(nn.Module):
             nn.Sigmoid()
         )
 
-    def forward(self, token, argument):
-        inp = torch.cat([token, argument], dim=-1)
-        proposed = self.net(inp)      # (B*T, D)
-        g = self.gate(inp)            # (B*T, D)
-        return proposed, g
+    def forward(self, token, routed_tokens, sim_row):
+        # token: (B*T, D)
+        # routed_tokens: (B*T, K, D)
+        # sim_row: (B*T, K)
 
+        B_T, K, D = routed_tokens.shape
+
+        # Expand token to match K arguments
+        token_expanded = token.unsqueeze(1).expand(-1, K, -1)  # (B*T, K, D)
+        combined = torch.cat([token_expanded, routed_tokens], dim=-1)  # (B*T, K, 2D)
+
+        fused = self.logic(combined)  # (B*T, K, D)
+        sim_weights = torch.softmax(sim_row, dim=-1).unsqueeze(-1)  # (B*T, K, 1)
+
+        arg_summary = torch.sum(sim_weights * fused, dim=1)  # (B*T, D)
+
+        gate = self.gate(torch.cat([token, arg_summary], dim=-1))  # (B*T, D)
+        return arg_summary, gate
+    
 class FunctionLibrary(nn.Module):
     def __init__(self, d_model, n_functions=4):
         super().__init__()
@@ -65,26 +76,24 @@ class FunctionLibrary(nn.Module):
         self.fn_selector = nn.Linear(d_model, n_functions)
 
     def forward(self, token, routed_tokens, sim_row):
-        fn_weights = torch.softmax(self.fn_selector(token), dim=-1)  # (B*T, n)
-        arg_weights = torch.softmax(sim_row, dim=-1)                 # (B*T, k)
-        argument = torch.bmm(arg_weights.unsqueeze(1), routed_tokens).squeeze(1)  # (B*T, D)
+        B_T, K, D = routed_tokens.size()
+        fn_weights = torch.softmax(self.fn_selector(token), dim=-1)  # (B*T, n)               # (B*T, k)
 
         proposed_list = []
         gate_list = []
 
         for fn in self.fns:
-            p, g = fn(token, argument)  # each: (B*T, D)
-            proposed_list.append(p)
-            gate_list.append(g)
+            out, gate = fn(token, routed_tokens, sim_row)  # (B*T, D), (B*T, D)
+            proposed_list.append(out)
+            gate_list.append(gate)
 
         proposed_stack = torch.stack(proposed_list, dim=1)  # (B*T, n, D)
         gate_stack = torch.stack(gate_list, dim=1)          # (B*T, n, D)
 
-        # Weighted sum over functions
-        weighted_proposed = torch.sum(fn_weights.unsqueeze(-1) * proposed_stack, dim=1)  # (B*T, D)
-        weighted_gate = torch.sum(fn_weights.unsqueeze(-1) * gate_stack, dim=1)          # (B*T, D)
+        proposed = torch.sum(fn_weights.unsqueeze(-1) * proposed_stack, dim=1)
+        gate = torch.sum(fn_weights.unsqueeze(-1) * gate_stack, dim=1)
 
-        return weighted_proposed, weighted_gate
+        return proposed, gate
 
 class System2Graph(nn.Module):
     def __init__(self, d_model, k_topk=4):
@@ -100,8 +109,8 @@ class System2Graph(nn.Module):
         routed_flat = routed_tokens.view(B * T, K, D)
         sim_flat = sim.view(B * T, K)
 
-        proposed, g = self.logic_fn(x_flat, routed_flat, sim_flat)  # each: (B*T, D)
-        updated = proposed * g                                      # gated memory update
+        proposed, gate = self.logic_fn(x_flat, routed_flat, sim_flat)
+        updated = proposed * gate
         return updated.view(B, T, D)
 
 class CognitionModel(nn.Module):
