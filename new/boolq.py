@@ -92,11 +92,11 @@ class BoolQTrainer:
             labels = batch['label'].to(self.device)
             embedded = self.embedding(input_ids)
 
-            pooled, kl_div, concept_div = self.model(embedded, attention_mask=batch['attention_mask'].to(self.device))
+            pooled, reuse_loss, contrastive_loss = self.model(embedded, attention_mask=batch['attention_mask'].to(self.device))
 
             logits = self.classifier(pooled)
             task_loss = self.criterion(logits, labels)
-            loss = task_loss + 1e-3 * kl_div + 1e-3 * concept_div
+            loss = task_loss + 1e-3 * reuse_loss + 1e-3 * contrastive_loss
 
             self.optimizer.zero_grad()
             loss.backward()
@@ -122,11 +122,11 @@ class BoolQTrainer:
                 labels = batch['label'].to(self.device)
                 embedded = self.embedding(input_ids)
 
-                pooled, kl_div, concept_div = self.model(embedded, attention_mask=batch['attention_mask'].to(self.device))
+                pooled, reuse_loss, contrastive_loss = self.model(embedded, attention_mask=batch['attention_mask'].to(self.device))
 
                 logits = self.classifier(pooled)
                 task_loss = self.criterion(logits, labels)
-                loss = task_loss + 1e-3 * kl_div + 1e-3 * concept_div
+                loss = task_loss + 1e-1 * reuse_loss + 1e-1 * contrastive_loss
 
                 preds = logits.argmax(dim=1)
                 total_correct += (preds == labels).sum().item()

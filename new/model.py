@@ -94,7 +94,7 @@ class Compiler(nn.Module):
 
         # Step 3: Execute soft program using learned ops
         out = self.op_library(program_logits, x, concepts)  # (B, T, D)
-        return out, program_logits, concepts
+        return out, program_logits, concepts, pooled
 
 # ------------------ Full Model ------------------
 
@@ -117,25 +117,52 @@ class CognitionModel(nn.Module):
             x = x * mask  # zero out padding
    
         x = self.enc(x)
-        out, program_logits, concepts = self.synth(x)
+        out, program_logits, concepts, pooled = self.synth(x)
 
         max_pooled = torch.max(out, dim=1)[0]   # (B, D)
         mean_pooled = out.mean(dim=1)           # (B, D)
         pooled = torch.cat([max_pooled, mean_pooled], dim=-1)  # (B, 2D)
         z = self.output_proj(pooled)
 
-        # --- KL Divergence on program logits ---
-        op_probs = torch.softmax(program_logits, dim=-1)  # (B, L, V)
-        uniform = torch.full_like(op_probs, 1.0 / op_probs.size(-1))
-        kl_div = F.kl_div(op_probs.log(), uniform, reduction='batchmean')
+        # --- Program Reuse Loss (invariance via shared programs) ---
+        B, L, V = program_logits.shape
+        program_logits_flat = program_logits.view(B, -1)  # (B, L*V)
 
-        # --- Concept Diversity via Covariance ---
-        concept_div = 0.0
-        for name, logits in concepts.items():  # (B, T, C)
-            probs = torch.softmax(logits, dim=-1)  # (B, T, C)
-            flat = probs.view(-1, probs.shape[-1])  # (B*T, C)
-            if flat.shape[0] > 1:
-                cov = torch.cov(flat.T)
-                concept_div += -torch.trace(cov)
+        # Similarity between inputs (latent space) — cosine sim
+        pooled_norm = F.normalize(pooled, dim=-1)  # (B, D)
+        sim_matrix = torch.matmul(pooled_norm, pooled_norm.T)  # (B, B)
 
-        return z, kl_div, concept_div
+        # Target: similar inputs should have similar programs
+        program_dists = torch.cdist(program_logits_flat, program_logits_flat, p=2)  # (B, B)
+
+        # Encourage small distance for similar inputs
+        reuse_loss = (sim_matrix * program_dists).mean()
+
+        # --- Program Contrastive Loss (turn program space into a metric space) ---
+        # 1. Normalize pooled embeddings and program logits
+        pooled_norm = F.normalize(pooled, dim=-1)                 # (B, D)
+        program_norm = F.normalize(program_logits_flat, dim=-1)   # (B, P)
+
+        # 2. Cosine similarity between pooled vectors → similarity proxy
+        sim_matrix = torch.matmul(pooled_norm, pooled_norm.T)     # (B, B)
+
+        # 3. Cosine similarity between programs
+        prog_sim = torch.matmul(program_norm, program_norm.T)     # (B, B)
+
+        # 4. Build contrastive masks
+        sim_threshold = 0.7
+        margin = 0.5
+        pos_mask = (sim_matrix > sim_threshold).float()           # Similar pairs
+        neg_mask = (sim_matrix < sim_threshold).float()           # Dissimilar pairs
+
+        # 5. Contrastive components
+        # Pull similar programs together
+        pos_loss = (1 - prog_sim) * pos_mask
+
+        # Push dissimilar programs apart (only if too similar)
+        neg_loss = F.relu(prog_sim - margin) * neg_mask
+
+        # 6. Combine and normalize
+        contrastive_loss = (pos_loss.sum() + neg_loss.sum()) / (pos_mask.sum() + neg_mask.sum() + 1e-6)
+
+        return z, reuse_loss, contrastive_loss
