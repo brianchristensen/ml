@@ -3,39 +3,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-# ------------------ Routing ------------------
-
-class DemandRouter(nn.Module):
-    def __init__(self, d_model, k_query=32, top_k=4):
-        super().__init__()
-        self.query_proj = nn.Linear(d_model, k_query)
-        self.key_proj = nn.Linear(d_model, k_query)
-        self.top_k = top_k
-        self.routing_gate = nn.Sequential(
-            nn.Linear(d_model, 1),
-            nn.Sigmoid()
-        )
-
-    def forward(self, x, attention_mask=None):
-        B, T, D = x.size()
-        queries = self.query_proj(x)
-        keys = self.key_proj(x)
-        sim = torch.matmul(queries, keys.transpose(-1, -2)) / queries.size(-1)**0.5
-        if attention_mask is not None:
-            mask = attention_mask.unsqueeze(1) * attention_mask.unsqueeze(2)
-            sim = sim.masked_fill(mask == 0, -1e9)
-        gates = self.routing_gate(x).squeeze(-1)
-        sim = sim * gates.unsqueeze(2)
-        _, topk_indices = torch.topk(sim, self.top_k, dim=-1)
-        topk_indices_exp = topk_indices.unsqueeze(-1).expand(-1, -1, -1, D)
-        x_expanded = x.unsqueeze(1).expand(B, T, T, D)
-        gathered = torch.gather(x_expanded, 2, topk_indices_exp)
-        sim_gathered = torch.gather(sim, 2, topk_indices)
-        return gathered, topk_indices, sim_gathered
-
 # ------------------ Fast Feedforward ------------------
 
-class System1Block(nn.Module):
+class System1(nn.Module):
     def __init__(self, d_model):
         super().__init__()
         self.ffn = nn.Sequential(
@@ -102,29 +72,16 @@ class NeuralOpLibrary(nn.Module):
         result = fused.mean(dim=1)  # (B, T, D)
         return result
 
-# ------------------ Temporal Encoding ------------------
-
-class TemporalEncoding(nn.Module):
-    def __init__(self, max_delta=256, d_model=128):
-        super().__init__()
-        self.max_delta = max_delta
-        self.embedding = nn.Embedding(2 * max_delta + 1, d_model)
-
-    def forward(self, delta):
-        delta_clamped = torch.clamp(delta + self.max_delta, 0, 2 * self.max_delta)
-        return self.embedding(delta_clamped)
-
 # ------------------ System 2: Neural-Symbolic Execution ------------------
 
-class System2Graph(nn.Module):
-    def __init__(self, d_model, top_k=4, max_delta=256, concept_dims=None, op_vocab_size=8, prog_len=4):
+class System2(nn.Module):
+    def __init__(self, d_model, concept_dims=None, op_vocab_size=8, prog_len=4):
         super().__init__()
-        self.top_k = top_k
         self.concept_classifier = ConceptClassifier(d_model, concept_dims or {"token_type": 6, "polarity": 2})
         self.program_generator = ProgramGenerator(d_model, op_vocab_size, prog_len)
         self.op_library = NeuralOpLibrary(d_model, op_vocab_size)
 
-    def forward(self, x, routed_tokens, sim, topk_indices):  # x: (B, T, D)
+    def forward(self, x):  # x: (B, T, D)
         B, T, D = x.shape
         # Step 1: Classify token concepts
         concepts = self.concept_classifier(x)  # dict of (B, T, C)
@@ -140,24 +97,26 @@ class System2Graph(nn.Module):
 # ------------------ Full Model ------------------
 
 class CognitionModel(nn.Module):
-    def __init__(self, hidden_dim, top_k=4):
+    def __init__(self, hidden_dim):
         super().__init__()
         self.hidden_dim = hidden_dim
-        self.router = DemandRouter(d_model=hidden_dim, top_k=top_k)
-        self.system1 = System1Block(d_model=hidden_dim)
-        self.system2 = System2Graph(
+        self.system1 = System1(d_model=hidden_dim)
+        self.system2 = System2(
             d_model=hidden_dim,
-            top_k=top_k,
             concept_dims={"token_type": 6, "polarity": 2},
             op_vocab_size=8,
             prog_len=4
         )
         self.output_proj = nn.Linear(hidden_dim, hidden_dim)
 
-    def forward(self, x, attention_mask=None, return_routing_trace=False):
-        routed_tokens, topk_indices, sim = self.router(x, attention_mask)
-        routed_mean = routed_tokens.mean(dim=2)
-        x = self.system1(routed_mean)
-        x = self.system2(x, routed_tokens, sim, topk_indices)
+    def forward(self, x, attention_mask=None):
+        if attention_mask is not None:
+            mask = attention_mask.unsqueeze(-1).float()  # (B, T, 1)
+            x = x * mask  # zero out padding
+        else:
+            x
+
+        x = self.system1(x)
+        x = self.system2(x)
         pooled = torch.max(x, dim=1)[0]
         return self.output_proj(pooled)
