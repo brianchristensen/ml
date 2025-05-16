@@ -51,7 +51,7 @@ class NeuralOpLibrary(nn.Module):
         self.ops = nn.ModuleList([
             nn.Sequential(
                 nn.Linear(self.input_dim, hidden_dim),
-                nn.ReLU(),
+                nn.GELU(),
                 nn.Linear(hidden_dim, hidden_dim)
             ) for _ in range(num_ops)
         ])
