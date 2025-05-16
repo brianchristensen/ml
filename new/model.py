@@ -49,19 +49,26 @@ class ProgramGenerator(nn.Module):
 # ------------------ Neural Operator Library ------------------
 
 class NeuralOpLibrary(nn.Module):
-    def __init__(self, d_model, num_ops):
+    def __init__(self, d_model, num_ops, concept_dim_total=0):
         super().__init__()
+        self.d_model = d_model
+        self.input_dim = d_model + concept_dim_total
         self.ops = nn.ModuleList([
             nn.Sequential(
-                nn.Linear(d_model, d_model),
+                nn.Linear(self.input_dim, d_model),
                 nn.ReLU(),
                 nn.Linear(d_model, d_model)
             ) for _ in range(num_ops)
         ])
 
-    def forward(self, op_logits, token_feats):  # (B, L, V), (B, T, D)
+    def forward(self, op_logits, token_feats, concepts=None):  # (B, L, V), (B, T, D)
+        if concepts:
+            concept_features = torch.cat([v for v in concepts.values()], dim=-1)  # (B, T, C)
+            token_feats = torch.cat([token_feats, concept_features], dim=-1)      # (B, T, D + C)
+        
         B, T, D = token_feats.size()
         L, V = op_logits.shape[1:3]
+
         token_feats_exp = token_feats.unsqueeze(1).expand(B, L, T, D)  # (B, L, T, D)
         outputs = []
         for op in self.ops:
@@ -77,9 +84,9 @@ class NeuralOpLibrary(nn.Module):
 class System2(nn.Module):
     def __init__(self, d_model, concept_dims=None, op_vocab_size=8, prog_len=4):
         super().__init__()
-        self.concept_classifier = ConceptClassifier(d_model, concept_dims or {"token_type": 6, "polarity": 2})
         self.program_generator = ProgramGenerator(d_model, op_vocab_size, prog_len)
-        self.op_library = NeuralOpLibrary(d_model, op_vocab_size)
+        self.concept_classifier = ConceptClassifier(d_model, concept_dims or {"token_type": 6, "polarity": 2})
+        self.op_library = NeuralOpLibrary(d_model, op_vocab_size, concept_dim_total=sum(concept_dims.values()))
 
     def forward(self, x):  # x: (B, T, D)
         B, T, D = x.shape
@@ -91,7 +98,7 @@ class System2(nn.Module):
         program_logits = self.program_generator(pooled)  # (B, L, V)
 
         # Step 3: Execute soft program using learned ops
-        out = self.op_library(program_logits, x)  # (B, T, D)
+        out = self.op_library(program_logits, x, concepts)  # (B, T, D)
         return out
 
 # ------------------ Full Model ------------------
