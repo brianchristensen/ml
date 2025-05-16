@@ -74,9 +74,9 @@ class NeuralOpLibrary(nn.Module):
         result = fused.mean(dim=1)  # (B, T, D)
         return result
 
-# ------------------ System 2: Neural-Symbolic Program Synthesizer ------------------
+# ------------------ System 2: Neural-Symbolic Program Compiler ------------------
 
-class Synthesizer(nn.Module):
+class Compiler(nn.Module):
     def __init__(self, hidden_dim, concept_dims=None, op_vocab_size=8, prog_len=4):
         super().__init__()
         self.program_generator = ProgramGenerator(hidden_dim, op_vocab_size, prog_len)
@@ -103,7 +103,7 @@ class CognitionModel(nn.Module):
         super().__init__()
         self.hidden_dim = hidden_dim
         self.enc = TemporalEncoder(hidden_dim=hidden_dim)
-        self.synth = Synthesizer(
+        self.synth = Compiler(
             hidden_dim=hidden_dim,
             concept_dims={"token_type": 6, "polarity": 2},
             op_vocab_size=8,
