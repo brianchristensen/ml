@@ -28,15 +28,16 @@ class ConceptClassifier(nn.Module):
 # ------------------ Program Generator ------------------
 
 class ProgramGenerator(nn.Module):
-    def __init__(self, hidden_dim, op_vocab_size, max_len=4):
+    def __init__(self, input_dim, hidden_dim, op_vocab_size, max_len=4):
         super().__init__()
-        self.rnn = nn.GRU(hidden_dim, hidden_dim, batch_first=True)
+        self.rnn = nn.GRU(input_dim, hidden_dim, batch_first=True)
+        self.context_to_hidden = nn.Linear(input_dim, hidden_dim)
         self.proj = nn.Linear(hidden_dim, op_vocab_size)
         self.max_len = max_len
 
-    def forward(self, context):  # (B, D)
+    def forward(self, context):  # (B, input_dim)
         B, D = context.size()
-        h0 = context.unsqueeze(0)
+        h0 = self.context_to_hidden(context).unsqueeze(0)  # (1, B, hidden_dim)
         rnn_input = torch.zeros(B, self.max_len, D, device=context.device)
         rnn_out, _ = self.rnn(rnn_input, h0)
         return self.proj(rnn_out)  # (B, L, V)
@@ -79,18 +80,28 @@ class NeuralOpLibrary(nn.Module):
 class Compiler(nn.Module):
     def __init__(self, hidden_dim, concept_dims=None, op_vocab_size=8, prog_len=4):
         super().__init__()
-        self.program_generator = ProgramGenerator(hidden_dim, op_vocab_size, prog_len)
+        concept_dim_total = sum(concept_dims.values())
+        self.program_generator = ProgramGenerator(
+            input_dim=hidden_dim + concept_dim_total,
+            hidden_dim=hidden_dim,
+            op_vocab_size=op_vocab_size,
+            max_len=prog_len
+        )
         self.concept_classifier = ConceptClassifier(hidden_dim, concept_dims or {"token_type": 6, "polarity": 2})
-        self.op_library = NeuralOpLibrary(hidden_dim, op_vocab_size, concept_dim_total=sum(concept_dims.values()))
+        self.op_library = NeuralOpLibrary(hidden_dim, op_vocab_size, concept_dim_total)
 
     def forward(self, x):  # x: (B, T, D)
         B, T, D = x.shape
         # Step 1: Classify token concepts
         concepts = self.concept_classifier(x)  # dict of (B, T, C)
+        concept_summary = torch.cat([
+            c.mean(dim=1) for c in concepts.values()
+        ], dim=-1)
 
         # Step 2: Generate soft program
-        pooled = x.mean(dim=1)  # use mean pooled context for program generator
-        program_logits = self.program_generator(pooled)  # (B, L, V)
+        pooled = x.mean(dim=1)
+        context = torch.cat([pooled, concept_summary], dim=-1)
+        program_logits = self.program_generator(context)  # (B, L, V)
 
         # Step 3: Execute soft program using learned ops
         out = self.op_library(program_logits, x, concepts)  # (B, T, D)
