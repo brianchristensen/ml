@@ -99,7 +99,7 @@ class System2(nn.Module):
 
         # Step 3: Execute soft program using learned ops
         out = self.op_library(program_logits, x, concepts)  # (B, T, D)
-        return out
+        return out, program_logits, concepts
 
 # ------------------ Full Model ------------------
 
@@ -120,10 +120,26 @@ class CognitionModel(nn.Module):
         if attention_mask is not None:
             mask = attention_mask.unsqueeze(-1).float()  # (B, T, 1)
             x = x * mask  # zero out padding
-        else:
-            x
 
         x = self.system1(x)
-        x = self.system2(x)
-        pooled = torch.max(x, dim=1)[0]
-        return self.output_proj(pooled)
+        out, program_logits, concepts = self.system2(x)
+
+        pooled = torch.max(out, dim=1)[0]
+        z = self.output_proj(pooled)
+
+        # --- KL Divergence on program logits ---
+        op_probs = torch.softmax(program_logits, dim=-1)  # (B, L, V)
+        uniform = torch.full_like(op_probs, 1.0 / op_probs.size(-1))
+        kl_div = F.kl_div(op_probs.log(), uniform, reduction='batchmean')
+
+        # --- Concept Diversity via Covariance ---
+        concept_div = 0.0
+        for name, logits in concepts.items():  # (B, T, C)
+            probs = torch.softmax(logits, dim=-1)  # (B, T, C)
+            flat = probs.view(-1, probs.shape[-1])  # (B*T, C)
+            if flat.shape[0] > 1:
+                cov = torch.cov(flat.T)
+                concept_div += -torch.trace(cov)
+
+        return z, kl_div, concept_div
+
