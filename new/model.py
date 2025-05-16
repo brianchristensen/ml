@@ -111,8 +111,8 @@ class CognitionModel(nn.Module):
             op_vocab_size=8,
             prog_len=4
         )
-        self.output_proj = nn.Linear(hidden_dim, hidden_dim)
-
+        self.output_proj = nn.Linear(hidden_dim * 2, hidden_dim)
+        
     def forward(self, x, attention_mask=None):
         if attention_mask is not None:
             mask = attention_mask.unsqueeze(-1).float()  # (B, T, 1)
@@ -121,7 +121,9 @@ class CognitionModel(nn.Module):
         x = self.enc(x)
         out, program_logits, concepts = self.synth(x)
 
-        pooled = torch.max(out, dim=1)[0]
+        max_pooled = torch.max(out, dim=1)[0]   # (B, D)
+        mean_pooled = out.mean(dim=1)           # (B, D)
+        pooled = torch.cat([max_pooled, mean_pooled], dim=-1)  # (B, 2D)
         z = self.output_proj(pooled)
 
         # --- KL Divergence on program logits ---
