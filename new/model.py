@@ -1,4 +1,3 @@
-# -- [model.py] --
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -100,10 +99,9 @@ class Synthesizer(nn.Module):
 # ------------------ Full Model ------------------
 
 class CognitionModel(nn.Module):
-    def __init__(self, hidden_dim, pos_embed_len=256):
+    def __init__(self, hidden_dim):
         super().__init__()
         self.hidden_dim = hidden_dim
-        self.pos_embed = nn.Parameter(torch.randn(1, pos_embed_len, hidden_dim))
         self.enc = TemporalEncoder(hidden_dim=hidden_dim)
         self.synth = Synthesizer(
             hidden_dim=hidden_dim,
@@ -112,7 +110,7 @@ class CognitionModel(nn.Module):
             prog_len=4
         )
         self.output_proj = nn.Linear(hidden_dim * 2, hidden_dim)
-        
+
     def forward(self, x, attention_mask=None):
         if attention_mask is not None:
             mask = attention_mask.unsqueeze(-1).float()  # (B, T, 1)
@@ -141,4 +139,3 @@ class CognitionModel(nn.Module):
                 concept_div += -torch.trace(cov)
 
         return z, kl_div, concept_div
-
