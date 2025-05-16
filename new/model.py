@@ -3,28 +3,24 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-# ------------------ Fast Feedforward ------------------
+# ------------------ Encode Temporal Structure of Sequence ------------------
 
-class System1(nn.Module):
-    def __init__(self, d_model):
+class TemporalEncoder(nn.Module):
+    def __init__(self, hidden_dim):
         super().__init__()
-        self.ffn = nn.Sequential(
-            nn.Linear(d_model, d_model * 2),
-            nn.GELU(),
-            nn.Linear(d_model * 2, d_model)
-        )
-        self.norm = nn.LayerNorm(d_model)
+        self.rnn = nn.GRU(input_size=hidden_dim, hidden_size=hidden_dim, batch_first=True)
 
     def forward(self, x):
-        return self.norm(x + self.ffn(x))
+        out, _ = self.rnn(x)
+        return out + x
 
 # ------------------ Concept Classifier ------------------
 
 class ConceptClassifier(nn.Module):
-    def __init__(self, d_model, concept_dims):
+    def __init__(self, hidden_dim, concept_dims):
         super().__init__()
         self.heads = nn.ModuleDict({
-            name: nn.Linear(d_model, dim) for name, dim in concept_dims.items()
+            name: nn.Linear(hidden_dim, dim) for name, dim in concept_dims.items()
         })
 
     def forward(self, x):  # (B, T, D)
@@ -33,10 +29,10 @@ class ConceptClassifier(nn.Module):
 # ------------------ Program Generator ------------------
 
 class ProgramGenerator(nn.Module):
-    def __init__(self, d_model, op_vocab_size, max_len=4):
+    def __init__(self, hidden_dim, op_vocab_size, max_len=4):
         super().__init__()
-        self.rnn = nn.GRU(d_model, d_model, batch_first=True)
-        self.proj = nn.Linear(d_model, op_vocab_size)
+        self.rnn = nn.GRU(hidden_dim, hidden_dim, batch_first=True)
+        self.proj = nn.Linear(hidden_dim, op_vocab_size)
         self.max_len = max_len
 
     def forward(self, context):  # (B, D)
@@ -49,15 +45,15 @@ class ProgramGenerator(nn.Module):
 # ------------------ Neural Operator Library ------------------
 
 class NeuralOpLibrary(nn.Module):
-    def __init__(self, d_model, num_ops, concept_dim_total=0):
+    def __init__(self, hidden_dim, num_ops, concept_dim_total=0):
         super().__init__()
-        self.d_model = d_model
-        self.input_dim = d_model + concept_dim_total
+        self.hidden_dim = hidden_dim
+        self.input_dim = hidden_dim + concept_dim_total
         self.ops = nn.ModuleList([
             nn.Sequential(
-                nn.Linear(self.input_dim, d_model),
+                nn.Linear(self.input_dim, hidden_dim),
                 nn.ReLU(),
-                nn.Linear(d_model, d_model)
+                nn.Linear(hidden_dim, hidden_dim)
             ) for _ in range(num_ops)
         ])
 
@@ -79,14 +75,14 @@ class NeuralOpLibrary(nn.Module):
         result = fused.mean(dim=1)  # (B, T, D)
         return result
 
-# ------------------ System 2: Neural-Symbolic Execution ------------------
+# ------------------ System 2: Neural-Symbolic Program Synthesizer ------------------
 
-class System2(nn.Module):
-    def __init__(self, d_model, concept_dims=None, op_vocab_size=8, prog_len=4):
+class Synthesizer(nn.Module):
+    def __init__(self, hidden_dim, concept_dims=None, op_vocab_size=8, prog_len=4):
         super().__init__()
-        self.program_generator = ProgramGenerator(d_model, op_vocab_size, prog_len)
-        self.concept_classifier = ConceptClassifier(d_model, concept_dims or {"token_type": 6, "polarity": 2})
-        self.op_library = NeuralOpLibrary(d_model, op_vocab_size, concept_dim_total=sum(concept_dims.values()))
+        self.program_generator = ProgramGenerator(hidden_dim, op_vocab_size, prog_len)
+        self.concept_classifier = ConceptClassifier(hidden_dim, concept_dims or {"token_type": 6, "polarity": 2})
+        self.op_library = NeuralOpLibrary(hidden_dim, op_vocab_size, concept_dim_total=sum(concept_dims.values()))
 
     def forward(self, x):  # x: (B, T, D)
         B, T, D = x.shape
@@ -104,12 +100,13 @@ class System2(nn.Module):
 # ------------------ Full Model ------------------
 
 class CognitionModel(nn.Module):
-    def __init__(self, hidden_dim):
+    def __init__(self, hidden_dim, pos_embed_len=256):
         super().__init__()
         self.hidden_dim = hidden_dim
-        self.system1 = System1(d_model=hidden_dim)
-        self.system2 = System2(
-            d_model=hidden_dim,
+        self.pos_embed = nn.Parameter(torch.randn(1, pos_embed_len, hidden_dim))
+        self.enc = TemporalEncoder(hidden_dim=hidden_dim)
+        self.synth = Synthesizer(
+            hidden_dim=hidden_dim,
             concept_dims={"token_type": 6, "polarity": 2},
             op_vocab_size=8,
             prog_len=4
@@ -120,9 +117,9 @@ class CognitionModel(nn.Module):
         if attention_mask is not None:
             mask = attention_mask.unsqueeze(-1).float()  # (B, T, 1)
             x = x * mask  # zero out padding
-
-        x = self.system1(x)
-        out, program_logits, concepts = self.system2(x)
+   
+        x = self.enc(x)
+        out, program_logits, concepts = self.synth(x)
 
         pooled = torch.max(out, dim=1)[0]
         z = self.output_proj(pooled)
