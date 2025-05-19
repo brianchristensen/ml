@@ -92,7 +92,7 @@ class BoolQTrainer:
             labels = batch['label'].to(self.device)
             embedded = self.embedding(input_ids)
 
-            pooled, reuse_loss, contrastive_loss = self.model(embedded, attention_mask=batch['attention_mask'].to(self.device))
+            pooled, symbolic_out, reuse_loss, contrastive_loss, concepts = self.model(embedded, attention_mask=batch['attention_mask'].to(self.device))
 
             logits = self.classifier(pooled)
             task_loss = self.criterion(logits, labels)
@@ -122,7 +122,7 @@ class BoolQTrainer:
                 labels = batch['label'].to(self.device)
                 embedded = self.embedding(input_ids)
 
-                pooled, reuse_loss, contrastive_loss = self.model(embedded, attention_mask=batch['attention_mask'].to(self.device))
+                pooled, symbolic_out, reuse_loss, contrastive_loss, concepts = self.model(embedded, attention_mask=batch['attention_mask'].to(self.device))
 
                 logits = self.classifier(pooled)
                 task_loss = self.criterion(logits, labels)
@@ -139,6 +139,7 @@ class BoolQTrainer:
 
 if __name__ == '__main__':
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    PRETRAINED_PATH = "models/pretrained_model.pth"
 
     num_epochs = 10
     num_classes = 2
@@ -147,6 +148,7 @@ if __name__ == '__main__':
     tokenizer = AutoTokenizer.from_pretrained('bert-base-uncased')
 
     model = CognitionModel(hidden_dim)
+    model.load_state_dict(torch.load(PRETRAINED_PATH, map_location=device))
 
     classifier = ClassifierHead(hidden_dim, num_classes)
     trainer = BoolQTrainer(model, classifier, tokenizer, device)

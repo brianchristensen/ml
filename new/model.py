@@ -4,14 +4,26 @@ import torch.nn.functional as F
 
 # ------------------ Encode Temporal Structure of Sequence ------------------
 
-class TemporalEncoder(nn.Module):
-    def __init__(self, hidden_dim):
+class SSMEncoder(nn.Module):
+    def __init__(self, hidden_dim, kernel_size=9):
         super().__init__()
-        self.rnn = nn.GRU(input_size=hidden_dim, hidden_size=hidden_dim, batch_first=True)
+        self.gate = nn.Sequential(
+            nn.Conv1d(hidden_dim, hidden_dim, kernel_size, padding=kernel_size // 2, groups=1),
+            nn.Sigmoid()
+        )
+        self.filter = nn.Sequential(
+            nn.Conv1d(hidden_dim, hidden_dim, kernel_size, padding=kernel_size // 2, groups=1),
+            nn.GELU()
+        )
+        self.proj = nn.Linear(hidden_dim, hidden_dim)
 
-    def forward(self, x):
-        out, _ = self.rnn(x)
-        return out + x
+    def forward(self, x):  # x: (B, T, D)
+        x_perm = x.transpose(1, 2)  # (B, D, T)
+        gated = self.gate(x_perm)
+        filtered = self.filter(x_perm)
+        x_out = gated * filtered  # elementwise modulated conv
+        x_out = x_out.transpose(1, 2)  # back to (B, T, D)
+        return x + self.proj(x_out)  # residual
 
 # ------------------ Concept Classifier ------------------
 
@@ -75,48 +87,64 @@ class NeuralOpLibrary(nn.Module):
         result = fused.mean(dim=1)  # (B, T, D)
         return result
 
-# ------------------ System 2: Neural-Symbolic Program Compiler ------------------
+# ------------------ Neural-Symbolic Program Compiler ------------------
 
 class Compiler(nn.Module):
     def __init__(self, hidden_dim, concept_dims=None, op_vocab_size=8, prog_len=4):
         super().__init__()
-        concept_dim_total = sum(concept_dims.values())
+        self.hidden_dim = hidden_dim
+        self.concept_dims = concept_dims
+        self.concept_dim_total = sum(concept_dims.values())
+
         self.program_generator = ProgramGenerator(
-            input_dim=hidden_dim + concept_dim_total,
+            input_dim=hidden_dim + self.concept_dim_total,
             hidden_dim=hidden_dim,
             op_vocab_size=op_vocab_size,
             max_len=prog_len
         )
-        self.concept_classifier = ConceptClassifier(hidden_dim, concept_dims or {"token_type": 6, "polarity": 2})
-        self.op_library = NeuralOpLibrary(hidden_dim, op_vocab_size, concept_dim_total)
+        self.concept_classifier = ConceptClassifier(hidden_dim, concept_dims)
+        self.op_library = NeuralOpLibrary(hidden_dim, op_vocab_size, self.concept_dim_total)
+
+        # Projection for attention query (optional)
+        self.query_proj = nn.Linear(hidden_dim, self.concept_dim_total)
 
     def forward(self, x):  # x: (B, T, D)
         B, T, D = x.shape
+
         # Step 1: Classify token concepts
         concepts = self.concept_classifier(x)  # dict of (B, T, C)
-        concept_summary = torch.cat([
-            c.mean(dim=1) for c in concepts.values()
-        ], dim=-1)
+        concept_tensor = torch.cat([concepts[k] for k in self.concept_dims.keys()], dim=-1)  # (B, T, C_total)
 
-        # Step 2: Generate soft program
-        pooled = x.mean(dim=1)
-        context = torch.cat([pooled, concept_summary], dim=-1)
+        # Step 2: Attention-weighted symbolic summary
+        latent_query = x.mean(dim=1)
+        query = self.query_proj(latent_query).unsqueeze(1)  # (B, 1, C_total)
+        attn_scores = torch.bmm(query, concept_tensor.transpose(1, 2))  # (B, 1, T)
+        attn_weights = torch.softmax(attn_scores, dim=-1)  # (B, 1, T)
+        attn_summary = torch.bmm(attn_weights, concept_tensor)  # (B, 1, C_total)
+        attn_summary = attn_summary.squeeze(1)  # (B, C_total)
+
+        # Step 3: Generate soft program
+        context = torch.cat([latent_query, attn_summary], dim=-1)  # (B, D + C_total)
         program_logits = self.program_generator(context)  # (B, L, V)
 
-        # Step 3: Execute soft program using learned ops
+        # Step 4: Execute soft program using learned ops
         out = self.op_library(program_logits, x, concepts)  # (B, T, D)
-        return out, program_logits, concepts, pooled
+        return out, program_logits, concepts, latent_query
 
 # ------------------ Full Model ------------------
 
 class CognitionModel(nn.Module):
-    def __init__(self, hidden_dim):
+    def __init__(self, hidden_dim, concept_dims = {
+            "question_focus": 5,    # what is the question about (object, time, location, yes/no, other)
+            "answer_role": 4,       # is the token likely to be: background, clue, entailment, contradiction
+            "negation_scope": 2     # is this token in a negated clause?
+        }):
         super().__init__()
         self.hidden_dim = hidden_dim
-        self.enc = TemporalEncoder(hidden_dim=hidden_dim)
+        self.enc = SSMEncoder(hidden_dim=hidden_dim)
         self.synth = Compiler(
             hidden_dim=hidden_dim,
-            concept_dims={"token_type": 6, "polarity": 2},
+            concept_dims=concept_dims,
             op_vocab_size=8,
             prog_len=4
         )
@@ -176,4 +204,4 @@ class CognitionModel(nn.Module):
         # 6. Combine and normalize
         contrastive_loss = (pos_loss.sum() + neg_loss.sum()) / (pos_mask.sum() + neg_mask.sum() + 1e-6)
 
-        return z, reuse_loss, contrastive_loss
+        return z, out, reuse_loss, contrastive_loss, concepts
