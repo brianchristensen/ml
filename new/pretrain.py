@@ -126,7 +126,7 @@ def pretrain():
 
     # print(f"✅ Loaded {len(texts)} QA examples.")
 
-    trivia = load_dataset("trivia_qa", "unfiltered.nocontext", split="train[:50000]")
+    trivia = load_dataset("trivia_qa", "unfiltered.nocontext", split="train[:10000]")
     texts = [
         f"Q: {ex['question']} A: {ex['answer']['value']}"
         for ex in trivia
