@@ -92,11 +92,11 @@ class BoolQTrainer:
             labels = batch['label'].to(self.device)
             embedded = self.embedding(input_ids)
 
-            pooled, symbolic_out, reuse_loss, contrastive_loss, concepts = self.model(embedded, attention_mask=batch['attention_mask'].to(self.device))
+            pooled, symbolic_out, symbolic_entropy, concepts = self.model(embedded, attention_mask=batch['attention_mask'].to(self.device))
 
             logits = self.classifier(pooled)
             task_loss = self.criterion(logits, labels)
-            loss = task_loss + 1e-3 * reuse_loss + 1e-3 * contrastive_loss
+            loss = task_loss + 1e-3 * -symbolic_entropy
 
             self.optimizer.zero_grad()
             loss.backward()
@@ -122,11 +122,11 @@ class BoolQTrainer:
                 labels = batch['label'].to(self.device)
                 embedded = self.embedding(input_ids)
 
-                pooled, symbolic_out, reuse_loss, contrastive_loss, concepts = self.model(embedded, attention_mask=batch['attention_mask'].to(self.device))
+                pooled, symbolic_out, symbolic_entropy, concepts = self.model(embedded, attention_mask=batch['attention_mask'].to(self.device))
 
                 logits = self.classifier(pooled)
                 task_loss = self.criterion(logits, labels)
-                loss = task_loss + 1e-1 * reuse_loss + 1e-1 * contrastive_loss
+                loss = task_loss + 1e-1 * -symbolic_entropy
 
                 preds = logits.argmax(dim=1)
                 total_correct += (preds == labels).sum().item()
@@ -148,7 +148,7 @@ if __name__ == '__main__':
     tokenizer = AutoTokenizer.from_pretrained('bert-base-uncased')
 
     model = CognitionModel(hidden_dim)
-    model.load_state_dict(torch.load(PRETRAINED_PATH, map_location=device))
+    #model.load_state_dict(torch.load(PRETRAINED_PATH, map_location=device))
 
     classifier = ClassifierHead(hidden_dim, num_classes)
     trainer = BoolQTrainer(model, classifier, tokenizer, device)

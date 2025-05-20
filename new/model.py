@@ -1,207 +1,89 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import random
 
-# ------------------ Encode Temporal Structure of Sequence ------------------
-
-class SSMEncoder(nn.Module):
-    def __init__(self, hidden_dim, kernel_size=9):
+class Memory(nn.Module):
+    def __init__(self, hidden_dim, concept_dim_total, dropout=0.1):
         super().__init__()
-        self.gate = nn.Sequential(
-            nn.Conv1d(hidden_dim, hidden_dim, kernel_size, padding=kernel_size // 2, groups=1),
-            nn.Sigmoid()
-        )
-        self.filter = nn.Sequential(
-            nn.Conv1d(hidden_dim, hidden_dim, kernel_size, padding=kernel_size // 2, groups=1),
-            nn.GELU()
-        )
-        self.proj = nn.Linear(hidden_dim, hidden_dim)
+        self.gate_proj = nn.Linear(hidden_dim + concept_dim_total, hidden_dim)
+        self.input_proj = nn.Linear(hidden_dim + concept_dim_total, hidden_dim)
+        self.dropout = nn.Dropout(dropout)
+        self.conv = nn.Conv1d(hidden_dim, hidden_dim, kernel_size=128, padding=127)
+        self.out_proj = nn.Linear(hidden_dim, hidden_dim)
 
-    def forward(self, x):  # x: (B, T, D)
-        x_perm = x.transpose(1, 2)  # (B, D, T)
-        gated = self.gate(x_perm)
-        filtered = self.filter(x_perm)
-        x_out = gated * filtered  # elementwise modulated conv
-        x_out = x_out.transpose(1, 2)  # back to (B, T, D)
-        return x + self.proj(x_out)  # residual
-
-# ------------------ Concept Classifier ------------------
+    def forward(self, x, concept_tensor):
+        xt = torch.cat([x, concept_tensor], dim=-1)
+        gate = torch.sigmoid(self.gate_proj(xt))
+        v = self.dropout(gate * self.input_proj(xt))
+        v = v.transpose(1, 2)
+        y = self.conv(v)[:, :, :x.shape[1]]
+        y = y.transpose(1, 2)
+        return self.out_proj(x + y)
 
 class ConceptClassifier(nn.Module):
-    def __init__(self, hidden_dim, concept_dims):
+    def __init__(self, hidden_dim, concept_dims, dropout=0.1):
         super().__init__()
+        self.dropout = nn.Dropout(dropout)
         self.heads = nn.ModuleDict({
-            name: nn.Linear(hidden_dim, dim) for name, dim in concept_dims.items()
+            name: nn.Sequential(
+                nn.Linear(hidden_dim, hidden_dim),
+                nn.GELU(),
+                nn.Dropout(dropout),
+                nn.Linear(hidden_dim, dim)
+            ) for name, dim in concept_dims.items()
         })
 
-    def forward(self, x):  # (B, T, D)
+    def forward(self, x):
+        x = self.dropout(x)
         return {name: head(x) for name, head in self.heads.items()}
 
-# ------------------ Program Generator ------------------
 
-class ProgramGenerator(nn.Module):
-    def __init__(self, input_dim, hidden_dim, op_vocab_size, max_len=4):
-        super().__init__()
-        self.rnn = nn.GRU(input_dim, hidden_dim, batch_first=True)
-        self.context_to_hidden = nn.Linear(input_dim, hidden_dim)
-        self.proj = nn.Linear(hidden_dim, op_vocab_size)
-        self.max_len = max_len
-
-    def forward(self, context):  # (B, input_dim)
-        B, D = context.size()
-        h0 = self.context_to_hidden(context).unsqueeze(0)  # (1, B, hidden_dim)
-        rnn_input = torch.zeros(B, self.max_len, D, device=context.device)
-        rnn_out, _ = self.rnn(rnn_input, h0)
-        return self.proj(rnn_out)  # (B, L, V)
-
-# ------------------ Neural Operator Library ------------------
-
-class NeuralOpLibrary(nn.Module):
-    def __init__(self, hidden_dim, num_ops, concept_dim_total=0):
-        super().__init__()
-        self.hidden_dim = hidden_dim
-        self.input_dim = hidden_dim + concept_dim_total
-        self.ops = nn.ModuleList([
-            nn.Sequential(
-                nn.Linear(self.input_dim, hidden_dim),
-                nn.GELU(),
-                nn.Linear(hidden_dim, hidden_dim)
-            ) for _ in range(num_ops)
-        ])
-
-    def forward(self, op_logits, token_feats, concepts=None):  # (B, L, V), (B, T, D)
-        if concepts:
-            concept_features = torch.cat([v for v in concepts.values()], dim=-1)  # (B, T, C)
-            token_feats = torch.cat([token_feats, concept_features], dim=-1)      # (B, T, D + C)
-        
-        B, T, D = token_feats.size()
-        L, V = op_logits.shape[1:3]
-
-        token_feats_exp = token_feats.unsqueeze(1).expand(B, L, T, D)  # (B, L, T, D)
-        outputs = []
-        for op in self.ops:
-            outputs.append(op(token_feats_exp))  # (B, L, T, D)
-        outputs = torch.stack(outputs, dim=3)  # (B, L, T, V, D)
-        weights = torch.softmax(op_logits, dim=-1).unsqueeze(2)  # (B, L, 1, V)
-        fused = (outputs * weights.unsqueeze(-1)).sum(dim=3)  # (B, L, T, D)
-        result = fused.mean(dim=1)  # (B, T, D)
-        return result
-
-# ------------------ Neural-Symbolic Program Compiler ------------------
-
-class Compiler(nn.Module):
-    def __init__(self, hidden_dim, concept_dims=None, op_vocab_size=8, prog_len=4):
+class CognitionModel(nn.Module):
+    def __init__(self, hidden_dim, concept_dims={
+        "question_focus": 5,
+        "answer_role": 4,
+        "negation_scope": 2
+    }):
         super().__init__()
         self.hidden_dim = hidden_dim
         self.concept_dims = concept_dims
         self.concept_dim_total = sum(concept_dims.values())
 
-        self.program_generator = ProgramGenerator(
-            input_dim=hidden_dim + self.concept_dim_total,
-            hidden_dim=hidden_dim,
-            op_vocab_size=op_vocab_size,
-            max_len=prog_len
-        )
         self.concept_classifier = ConceptClassifier(hidden_dim, concept_dims)
-        self.op_library = NeuralOpLibrary(hidden_dim, op_vocab_size, self.concept_dim_total)
-
-        # Projection for attention query (optional)
-        self.query_proj = nn.Linear(hidden_dim, self.concept_dim_total)
-
-    def forward(self, x):  # x: (B, T, D)
-        B, T, D = x.shape
-
-        # Step 1: Classify token concepts
-        concepts = self.concept_classifier(x)  # dict of (B, T, C)
-        concept_tensor = torch.cat([concepts[k] for k in self.concept_dims.keys()], dim=-1)  # (B, T, C_total)
-
-        # Step 2: Attention-weighted symbolic summary
-        latent_query = x.mean(dim=1)
-        query = self.query_proj(latent_query).unsqueeze(1)  # (B, 1, C_total)
-        attn_scores = torch.bmm(query, concept_tensor.transpose(1, 2))  # (B, 1, T)
-        attn_weights = torch.softmax(attn_scores, dim=-1)  # (B, 1, T)
-        attn_summary = torch.bmm(attn_weights, concept_tensor)  # (B, 1, C_total)
-        attn_summary = attn_summary.squeeze(1)  # (B, C_total)
-
-        # Step 3: Generate soft program
-        context = torch.cat([latent_query, attn_summary], dim=-1)  # (B, D + C_total)
-        program_logits = self.program_generator(context)  # (B, L, V)
-
-        # Step 4: Execute soft program using learned ops
-        out = self.op_library(program_logits, x, concepts)  # (B, T, D)
-        return out, program_logits, concepts, latent_query
-
-# ------------------ Full Model ------------------
-
-class CognitionModel(nn.Module):
-    def __init__(self, hidden_dim, concept_dims = {
-            "question_focus": 5,    # what is the question about (object, time, location, yes/no, other)
-            "answer_role": 4,       # is the token likely to be: background, clue, entailment, contradiction
-            "negation_scope": 2     # is this token in a negated clause?
-        }):
-        super().__init__()
-        self.hidden_dim = hidden_dim
-        self.enc = SSMEncoder(hidden_dim=hidden_dim)
-        self.synth = Compiler(
-            hidden_dim=hidden_dim,
-            concept_dims=concept_dims,
-            op_vocab_size=8,
-            prog_len=4
-        )
+        self.mem1 = Memory(hidden_dim, self.concept_dim_total)
+        self.mem2 = Memory(hidden_dim, self.concept_dim_total)
+        self.mem3 = Memory(hidden_dim, self.concept_dim_total)
         self.output_proj = nn.Linear(hidden_dim * 2, hidden_dim)
 
     def forward(self, x, attention_mask=None):
         if attention_mask is not None:
-            mask = attention_mask.unsqueeze(-1).float()  # (B, T, 1)
-            x = x * mask  # zero out padding
-   
-        x = self.enc(x)
-        out, program_logits, concepts, pooled = self.synth(x)
+            x = x * attention_mask.unsqueeze(-1).float()
+        
+        # Step 1: Predict token-level symbolic concepts
+        concepts = self.concept_classifier(x)  # dict of (B, T, C)
+        concept_tensor = torch.cat([concepts[k] for k in self.concept_dims.keys()], dim=-1)  # (B, T, C_total)
 
-        max_pooled = torch.max(out, dim=1)[0]   # (B, D)
-        mean_pooled = out.mean(dim=1)           # (B, D)
+        # Concept dropout
+        if self.training:
+            if torch.rand(1).item() < 0.3:
+                drop_key = random.choice(list(concepts.keys()))
+                concepts[drop_key] = torch.zeros_like(concepts[drop_key])
+
+        # Step 2: Symbol-guided state-space encoding
+        x = self.mem1(x, concept_tensor)  # (B, T, D)
+        x = self.mem2(x, concept_tensor)
+        x = self.mem3(x, concept_tensor)
+
+        # Step 3: Hybrid Pooling
+        max_pooled = torch.max(x, dim=1)[0]
+        mean_pooled = x.mean(dim=1)
         pooled = torch.cat([max_pooled, mean_pooled], dim=-1)  # (B, 2D)
-        z = self.output_proj(pooled)
+        z = self.output_proj(pooled)  # (B, D)
 
-        # --- Program Reuse Loss (invariance via shared programs) ---
-        B, L, V = program_logits.shape
-        program_logits_flat = program_logits.view(B, -1)  # (B, L*V)
-
-        # Similarity between inputs (latent space) — cosine sim
-        pooled_norm = F.normalize(pooled, dim=-1)  # (B, D)
-        sim_matrix = torch.matmul(pooled_norm, pooled_norm.T)  # (B, B)
-
-        # Target: similar inputs should have similar programs
-        program_dists = torch.cdist(program_logits_flat, program_logits_flat, p=2)  # (B, B)
-
-        # Encourage small distance for similar inputs
-        reuse_loss = (sim_matrix * program_dists).mean()
-
-        # --- Program Contrastive Loss (turn program space into a metric space) ---
-        # 1. Normalize pooled embeddings and program logits
-        pooled_norm = F.normalize(pooled, dim=-1)                 # (B, D)
-        program_norm = F.normalize(program_logits_flat, dim=-1)   # (B, P)
-
-        # 2. Cosine similarity between pooled vectors → similarity proxy
-        sim_matrix = torch.matmul(pooled_norm, pooled_norm.T)     # (B, B)
-
-        # 3. Cosine similarity between programs
-        prog_sim = torch.matmul(program_norm, program_norm.T)     # (B, B)
-
-        # 4. Build contrastive masks
-        sim_threshold = 0.7
-        margin = 0.5
-        pos_mask = (sim_matrix > sim_threshold).float()           # Similar pairs
-        neg_mask = (sim_matrix < sim_threshold).float()           # Dissimilar pairs
-
-        # 5. Contrastive components
-        # Pull similar programs together
-        pos_loss = (1 - prog_sim) * pos_mask
-
-        # Push dissimilar programs apart (only if too similar)
-        neg_loss = F.relu(prog_sim - margin) * neg_mask
-
-        # 6. Combine and normalize
-        contrastive_loss = (pos_loss.sum() + neg_loss.sum()) / (pos_mask.sum() + neg_mask.sum() + 1e-6)
-
-        return z, out, reuse_loss, contrastive_loss, concepts
+        symbolic_entropy = sum(
+            (-logits.softmax(dim=-1) * logits.log_softmax(dim=-1)).sum(-1).mean()
+            for logits in concepts.values()
+        )
+        
+        return z, x, symbolic_entropy, concepts

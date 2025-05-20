@@ -53,7 +53,7 @@ class MLMDataset(Dataset):
             attention_mask_gpu = attention_mask.unsqueeze(0).to(device)
 
             x = self.embedding(input_ids_gpu)  # (1, T, D)
-            _, _, _, _, concepts = self.model(x, attention_mask=attention_mask_gpu)
+            _, _, _, concepts = self.model(x, attention_mask=attention_mask_gpu)
             focus_logits = concepts["question_focus"][0]       # (T, 5)
             role_logits = concepts["answer_role"][0]           # (T, 4)
             negation_logits = concepts["negation_scope"][0]    # (T, 2)
@@ -107,8 +107,33 @@ def pretrain():
     print("Loading tokenizer and dataset...")
     tokenizer = AutoTokenizer.from_pretrained(TOKENIZER_NAME)
     
-    # Load Wikitext
-    texts = load_dataset('wikitext', 'wikitext-2-raw-v1')['train']['text']
+    print("Loading QA dataset...")
+    # nq = load_dataset("natural_questions", split="train[:50000]")  # Trim for speed
+
+    # texts = []
+    # for ex in nq:
+    #     try:
+    #         question = ex['question']['text']
+    #         tokens = ex.get('document', {}).get('tokens', [])
+    #         if not tokens or len(tokens) < 10:
+    #             continue
+    #         context = " ".join([t['token'] for t in tokens if not t.get('html_token', False)])
+    #         context = context.strip()[:512]
+    #         if question and context:
+    #             texts.append(f"Q: {question} C: {context}")
+    #     except Exception as e:
+    #         continue
+
+    # print(f"✅ Loaded {len(texts)} QA examples.")
+
+    trivia = load_dataset("trivia_qa", "unfiltered.nocontext", split="train[:50000]")
+    texts = [
+        f"Q: {ex['question']} A: {ex['answer']['value']}"
+        for ex in trivia
+        if ex['answer'] and ex['answer']['value']
+    ]
+    print(f"Loaded {len(texts)} TriviaQA examples.")
+
 
     print("Initializing model...")
     model = CognitionModel(hidden_dim=HIDDEN_DIM).to(DEVICE)
@@ -168,7 +193,7 @@ def pretrain():
             labels = batch['labels'].to(DEVICE)
 
             embedded = embedding(input_ids)
-            pooled, symbolic_out, reuse_loss, contrastive_loss, concepts = model(embedded, attention_mask=attention_mask)
+            pooled, symbolic_out, symbolic_entropy, concepts = model(embedded, attention_mask=attention_mask)
             logits = mlm_head(symbolic_out)
             mlm_loss = criterion(logits.view(-1, logits.size(-1)), labels.view(-1))
 
@@ -184,15 +209,14 @@ def pretrain():
             b_labels = boolq_batch['label'].to(DEVICE)
 
             b_embedded = embedding(b_input_ids)
-            b_pooled, _, _, _, _ = model(b_embedded, attention_mask=b_attention_mask)
+            b_pooled, _, symbolic_entropy, _ = model(b_embedded, attention_mask=b_attention_mask)
             boolq_logits = classifier_head(b_pooled)
             boolq_loss = criterion(boolq_logits, b_labels)
 
             # Combine losses
             total_batch_loss = (
                 mlm_loss + 
-                0.1 * reuse_loss + 
-                0.1 * contrastive_loss + 
+                0.1 * -symbolic_entropy +
                 0.1 * boolq_loss
             )
 
