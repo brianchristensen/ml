@@ -6,18 +6,13 @@ from torch.utils.data import DataLoader
 from datasets import load_dataset
 import time
 from transformers import AutoTokenizer
-from model import CognitionModel
+from model import JEPA_Mamba_Model
 
-import matplotlib.pyplot as plt
-from sklearn.decomposition import PCA
+torch.autograd.set_detect_anomaly(True)
 
-def plot_codes(model):
-    codebook_np = model.system2.concept_graph.codebook.detach().cpu().numpy()
-    pca = PCA(n_components=2)
-    coords = pca.fit_transform(codebook_np)
-    plt.scatter(coords[:, 0], coords[:, 1])
-    plt.title("VQ Codebook Embeddings")
-    plt.show() # Add plt.show() to display the plot
+num_epochs = 10
+num_classes = 2
+hidden_dim = 128
 
 class ClassifierHead(nn.Module):
     def __init__(self, latent_dim, num_classes):
@@ -79,7 +74,7 @@ class BoolQTrainer:
             list(self.model.parameters()) + list(self.classifier.parameters()), lr=1e-4
         )
 
-        self.embedding = nn.Embedding(self.tokenizer.vocab_size, self.model.hidden_dim).to(self.device)
+        self.embedding = nn.Embedding(self.tokenizer.vocab_size, hidden_dim).to(self.device)
 
     def train_epoch(self, epoch):
         epoch_start_time = time.time()
@@ -92,11 +87,11 @@ class BoolQTrainer:
             labels = batch['label'].to(self.device)
             embedded = self.embedding(input_ids)
 
-            pooled, symbolic_out, symbolic_entropy, concepts = self.model(embedded, attention_mask=batch['attention_mask'].to(self.device))
+            z, energy_loss = self.model(embedded, mask=batch['attention_mask'].to(self.device))
 
-            logits = self.classifier(pooled)
+            logits = self.classifier(z)
             task_loss = self.criterion(logits, labels)
-            loss = task_loss + 1e-3 * -symbolic_entropy
+            loss = task_loss + 0.1 * energy_loss
 
             self.optimizer.zero_grad()
             loss.backward()
@@ -122,11 +117,11 @@ class BoolQTrainer:
                 labels = batch['label'].to(self.device)
                 embedded = self.embedding(input_ids)
 
-                pooled, symbolic_out, symbolic_entropy, concepts = self.model(embedded, attention_mask=batch['attention_mask'].to(self.device))
+                z, energy_loss = self.model(embedded, mask=batch['attention_mask'].to(self.device))
 
-                logits = self.classifier(pooled)
+                logits = self.classifier(z)
                 task_loss = self.criterion(logits, labels)
-                loss = task_loss + 1e-1 * -symbolic_entropy
+                loss = task_loss + 0.1 * energy_loss
 
                 preds = logits.argmax(dim=1)
                 total_correct += (preds == labels).sum().item()
@@ -139,16 +134,10 @@ class BoolQTrainer:
 
 if __name__ == '__main__':
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    PRETRAINED_PATH = "models/pretrained_model.pth"
-
-    num_epochs = 10
-    num_classes = 2
-    hidden_dim = 128
 
     tokenizer = AutoTokenizer.from_pretrained('bert-base-uncased')
 
-    model = CognitionModel(hidden_dim)
-    #model.load_state_dict(torch.load(PRETRAINED_PATH, map_location=device))
+    model = JEPA_Mamba_Model(dim=128, depth=4)
 
     classifier = ClassifierHead(hidden_dim, num_classes)
     trainer = BoolQTrainer(model, classifier, tokenizer, device)
