@@ -1,232 +1,328 @@
 """
-Training script for Pure Holographic Memory on MNIST
+Training script for HRR + Learned Execution on SCAN dataset.
 
-No backpropagation - learning via episodic storage only!
-Tests: accuracy, speed, continual learning
+Downloads and trains on the official SCAN benchmark for compositional generalization.
 """
 
 import torch
-import torch.nn.functional as F
-from torch.utils.data import DataLoader
-from torchvision import datasets, transforms
-from model import HolographicClassifier
-import time
+import random
+import json
+import os
+from model_general import GeneralCompositionalModel
 
 
-def train_holographic(model, dataloader, epochs=1, device='cuda'):
+def load_scan_dataset(split='simple'):
     """
-    "Training" = episodic storage in holographic memory.
-
-    No backpropagation!
-    No optimizer!
-    Just store patterns as we see them.
+    Load SCAN dataset.
 
     Args:
-        model: HolographicClassifier
-        dataloader: MNIST dataloader
-        epochs: Number of passes (1 is often enough!)
-        device: 'cuda' or 'cpu'
-    """
-    model = model.to(device)
+        split: Which SCAN split to use ('simple', 'length', 'add_prim_jump', etc.)
 
-    for epoch in range(epochs):
-        epoch_start = time.time()
+    Returns:
+        train_data, test_data: Lists of (command_tokens, action_sequence) tuples
+    """
+    # Try to load from local file first
+    data_dir = 'data/scan'
+    train_file = f'{data_dir}/tasks_train_{split}.txt'
+    test_file = f'{data_dir}/tasks_test_{split}.txt'
+
+    if not os.path.exists(train_file):
+        print(f"SCAN dataset not found at {train_file}")
+        print("Please download SCAN dataset from: https://github.com/brendenlake/SCAN")
+        print("Or place it in: data/scan/")
+        print()
+        print("Using synthetic dataset instead...")
+        return None, None
+
+    def parse_scan_file(filepath):
+        """Parse SCAN format: IN: command OUT: action1 action2 ..."""
+        data = []
+        with open(filepath, 'r') as f:
+            for line in f:
+                line = line.strip()
+                if not line or not line.startswith('IN:'):
+                    continue
+
+                parts = line.split('OUT:')
+                if len(parts) != 2:
+                    continue
+
+                command = parts[0].replace('IN:', '').strip()
+                actions = parts[1].strip()
+
+                # Parse command into tokens
+                cmd_tokens = command.split()
+
+                # Parse actions into list
+                action_list = actions.split()
+
+                data.append((cmd_tokens, action_list))
+
+        return data
+
+    train_data = parse_scan_file(train_file)
+    test_data = parse_scan_file(test_file)
+
+    return train_data, test_data
+
+
+def train_on_scan(split='simple', num_epochs=200, batch_size=32):
+    """
+    Train model on SCAN dataset.
+
+    Args:
+        split: Which SCAN split ('simple', 'length', 'add_prim_jump', etc.)
+        num_epochs: Number of training epochs
+        batch_size: Batch size (currently processes one at a time)
+    """
+    print("="*70)
+    print(f"TRAINING ON SCAN DATASET (split: {split})")
+    print("="*70)
+    print()
+
+    # Load dataset
+    train_data, test_data = load_scan_dataset(split)
+
+    if train_data is None:
+        # Fallback to synthetic data
+        print("Using synthetic SCAN-like dataset...")
+        from model import generate_scan_dataset
+        full_dataset = generate_scan_dataset(num_examples=1000)
+        split_idx = int(len(full_dataset) * 0.8)
+        train_data = full_dataset[:split_idx]
+        test_data = full_dataset[split_idx:]
+
+    print(f"Dataset: {len(train_data)} train, {len(test_data)} test")
+    print()
+
+    # Subsample training data for faster iteration (use 25%)
+    original_size = len(train_data)
+    train_data = train_data[:len(train_data)//4]
+    print(f"Subsampled training data: {len(train_data)}/{original_size} examples (25%)")
+
+    # Analyze dataset composition
+    atomic_count = sum(1 for tokens, _ in train_data
+                       if 'and' not in tokens and 'after' not in tokens)
+    print(f"  Atomic commands: {atomic_count}/{len(train_data)} ({100*atomic_count/len(train_data):.1f}%)")
+    print(f"  Compound commands: {len(train_data)-atomic_count}/{len(train_data)} ({100*(len(train_data)-atomic_count)/len(train_data):.1f}%)")
+    print()
+
+    # Analyze vocabulary from training data
+    all_tokens = set()
+    for cmd_tokens, action_seq in train_data:
+        all_tokens.update(cmd_tokens)
+
+    # Categorize tokens (heuristic based on SCAN structure)
+    actions_set = {'jump', 'walk', 'run', 'look', 'turn'}
+    modifiers_set = {'twice', 'thrice', 'around', 'opposite', 'after', 'and'}
+    directions_set = {'left', 'right'}
+
+    # Add any unknown tokens to modifiers (safest assumption)
+    for token in all_tokens:
+        if token not in actions_set and token not in modifiers_set and token not in directions_set:
+            modifiers_set.add(token)
+
+    # Define vocabulary
+    primitives = {
+        'actions': list(actions_set),
+        'modifiers': list(modifiers_set),
+        'directions': list(directions_set),
+    }
+
+    # Get unique output actions
+    output_actions_set = set()
+    for _, action_seq in train_data:
+        for action in action_seq:
+            output_actions_set.add(action)
+
+    outputs = sorted(list(output_actions_set))
+
+    print(f"Vocabulary: {len(primitives['actions'])} actions, {len(primitives['modifiers'])} modifiers")
+    print(f"Output actions: {outputs}")
+    print()
+
+    # Create model
+    model = GeneralCompositionalModel(
+        primitives_dict=primitives,
+        output_vocab=outputs,
+        hrr_dim=1024,
+        hidden_dim=256
+    )
+
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+
+    # Training loop with gradient accumulation
+    print("TRAINING:")
+    print("-"*70)
+    print(f"Using batch size {batch_size} for gradient accumulation")
+    print()
+
+    best_test_acc = 0.0
+
+    for epoch in range(num_epochs):
+        model.train()
         total_loss = 0
         num_batches = 0
+        random.shuffle(train_data)
 
-        for x, y in dataloader:
-            x, y = x.to(device), y.to(device)
+        optimizer.zero_grad()
+        batch_loss = 0
+        batch_count = 0
 
-            # Flatten images
-            x = x.view(x.size(0), -1)
+        for i, (cmd_tokens, target_actions) in enumerate(train_data):
+            try:
+                # Compute loss
+                loss = model.compute_loss(cmd_tokens, target_actions)
 
-            # Forward: stores patterns in holographic memory
-            # NO gradient computation!
-            with torch.no_grad():
-                outputs = model(x, labels=y, learn=True)
+                if loss.item() > 0:  # Only backprop if there's actual loss
+                    loss.backward()
+                    batch_loss += loss.item()
+                    batch_count += 1
 
-            # Compute loss for monitoring only (not for gradients!)
-            loss = F.cross_entropy(outputs['logits'], y)
+                # Update weights every batch_size examples
+                if (i + 1) % batch_size == 0 and batch_count > 0:
+                    optimizer.step()
+                    optimizer.zero_grad()
+                    total_loss += batch_loss
+                    num_batches += 1
+                    batch_loss = 0
+                    batch_count = 0
 
-            total_loss += loss.item()
+            except Exception as e:
+                # Skip examples that cause errors
+                print(f"Error on example: {e}")
+                continue
+
+        # Final update for remaining examples in incomplete batch
+        if batch_count > 0:
+            optimizer.step()
+            optimizer.zero_grad()
+            total_loss += batch_loss
             num_batches += 1
 
-        epoch_time = time.time() - epoch_start
-        avg_loss = total_loss / num_batches
+        avg_loss = total_loss / num_batches if num_batches > 0 else 0
 
-        print(f"Epoch {epoch + 1}/{epochs} ({epoch_time:.1f}s): "
-              f"Loss = {avg_loss:.4f}, "
-              f"Memory energy (avg/max) = {outputs['memory_energy_avg']:.1f}/{outputs['memory_energy_max']:.1f}, "
-              f"Patterns stored = {outputs['num_stored']}")
+        # Evaluate every 5 epochs
+        if epoch % 5 == 0:
+            model.eval()
 
+            # Track accuracy by command length
+            results_by_length = {}
 
-def evaluate(model, dataloader, device='cuda', debug=False):
-    """
-    Evaluate classification accuracy.
+            with torch.no_grad():
+                for cmd_tokens, expected in test_data:
+                    cmd_len = len(cmd_tokens)
+                    if cmd_len not in results_by_length:
+                        results_by_length[cmd_len] = {'correct': 0, 'total': 0}
 
-    Args:
-        model: HolographicClassifier
-        dataloader: MNIST dataloader
-        device: 'cuda' or 'cpu'
-        debug: Print confusion info
-    """
+                    try:
+                        predicted, _ = model(cmd_tokens)
+                        if predicted == expected:
+                            results_by_length[cmd_len]['correct'] += 1
+                        results_by_length[cmd_len]['total'] += 1
+                    except:
+                        results_by_length[cmd_len]['total'] += 1
+
+            # Overall accuracy
+            total_correct = sum(r['correct'] for r in results_by_length.values())
+            total_examples = sum(r['total'] for r in results_by_length.values())
+            overall_acc = 100 * total_correct / total_examples if total_examples > 0 else 0
+
+            # Print breakdown
+            print(f"Epoch {epoch:3d}: Loss = {avg_loss:.4f}, Overall Acc = {overall_acc:.1f}% ({total_correct}/{total_examples})")
+
+            # Show accuracy by length
+            for length in sorted(results_by_length.keys())[:5]:  # Show first 5 lengths
+                r = results_by_length[length]
+                acc = 100 * r['correct'] / r['total'] if r['total'] > 0 else 0
+                print(f"           Len {length}: {acc:.1f}% ({r['correct']}/{r['total']})")
+
+            # Show sample predictions for debugging
+            if epoch == 0:
+                print("\n           Sample predictions:")
+                sample_count = 0
+                for cmd_tokens, expected in test_data[:100]:
+                    if sample_count >= 5:
+                        break
+                    if len(cmd_tokens) <= 3:  # Focus on simple ones first
+                        try:
+                            predicted, decomposed = model(cmd_tokens)
+                            cmd_str = ' '.join(cmd_tokens)
+                            print(f"           '{cmd_str}' -> decomposed: {decomposed}")
+                            print(f"             Expected: {expected[:4]}, Got: {predicted[:4]}")
+                            sample_count += 1
+                        except Exception as e:
+                            pass
+
+            test_acc = overall_acc
+            correct = total_correct
+            total = total_examples
+
+            if test_acc > best_test_acc:
+                best_test_acc = test_acc
+                # Save best model
+                torch.save(model.state_dict(), 'best_model.pt')
+
+            # Early stopping at 95% accuracy
+            if test_acc >= 95.0:
+                print(f"\nEarly stopping: Reached {test_acc:.1f}% accuracy!")
+                break
+        else:
+            print(f"Epoch {epoch:3d}: Loss = {avg_loss:.4f}")
+
+    print()
+    print("="*70)
+    print(f"BEST TEST ACCURACY: {best_test_acc:.1f}%")
+    print("="*70)
+    print()
+
+    # Final evaluation on test set
+    print("FINAL EVALUATION:")
+    print("-"*70)
+
     model.eval()
     correct = 0
     total = 0
-
-    if debug:
-        all_preds = []
-        all_labels = []
+    errors = []
 
     with torch.no_grad():
-        for x, y in dataloader:
-            x, y = x.to(device), y.to(device)
-            x = x.view(x.size(0), -1)
+        for cmd_tokens, expected in test_data[:50]:  # Show first 50
+            try:
+                predicted, decomposed = model(cmd_tokens)
+                match = "[OK]" if predicted == expected else "[FAIL]"
 
-            # Retrieve from holographic memory (no learning)
-            outputs = model(x, labels=None, learn=False)
-            pred = outputs['logits'].argmax(dim=1)
+                if predicted == expected:
+                    correct += 1
+                else:
+                    errors.append((cmd_tokens, expected, predicted))
 
-            correct += (pred == y).sum().item()
-            total += y.size(0)
+                total += 1
 
-            if debug:
-                all_preds.extend(pred.cpu().numpy())
-                all_labels.extend(y.cpu().numpy())
+                cmd_str = ' '.join(cmd_tokens)
+                if total <= 20:  # Only print first 20
+                    print(f"{cmd_str:30s} -> {str(predicted[:8]):50s} {match}")
 
-    accuracy = correct / total
+            except Exception as e:
+                total += 1
+                errors.append((cmd_tokens, expected, str(e)))
 
-    if debug:
-        import numpy as np
-        all_preds = np.array(all_preds)
-        all_labels = np.array(all_labels)
-        print(f"\nPrediction distribution: {np.bincount(all_preds, minlength=10)}")
-        print(f"True label distribution: {np.bincount(all_labels, minlength=10)}")
+    print()
+    print(f"Final Accuracy: {correct}/{total} = {100*correct/total:.1f}%")
+    print()
 
-    return accuracy
-
-
-def create_split_mnist_loaders(batch_size, task_classes):
-    """
-    Create data loaders for Split-MNIST continual learning.
-
-    Args:
-        batch_size: Batch size
-        task_classes: List of classes (e.g., [0,1,2,3,4])
-
-    Returns:
-        train_loader, test_loader
-    """
-    transform = transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Normalize((0.1307,), (0.3081,))
-    ])
-
-    # Load full MNIST
-    train_dataset = datasets.MNIST(root='./data', train=True, download=True, transform=transform)
-    test_dataset = datasets.MNIST(root='./data', train=False, download=True, transform=transform)
-
-    # Filter for task classes
-    train_indices = [i for i, (_, label) in enumerate(train_dataset) if label in task_classes]
-    test_indices = [i for i, (_, label) in enumerate(test_dataset) if label in task_classes]
-
-    train_subset = torch.utils.data.Subset(train_dataset, train_indices)
-    test_subset = torch.utils.data.Subset(test_dataset, test_indices)
-
-    train_loader = DataLoader(train_subset, batch_size=batch_size, shuffle=True, num_workers=0)
-    test_loader = DataLoader(test_subset, batch_size=batch_size, shuffle=False, num_workers=0)
-
-    return train_loader, test_loader
+    # Show some errors
+    if errors and len(errors) > 0:
+        print("SAMPLE ERRORS:")
+        print("-"*70)
+        for cmd_tokens, expected, predicted in errors[:10]:
+            cmd_str = ' '.join(cmd_tokens)
+            print(f"{cmd_str:30s}")
+            print(f"  Expected:  {expected[:8]}")
+            print(f"  Predicted: {str(predicted)[:60]}")
+            print()
 
 
 if __name__ == '__main__':
-    # ===== HYPERPARAMETERS =====
-    BATCH_SIZE = 128
-    EPOCHS = 1          # Often 1 pass is enough for holographic memory!
-    MEMORY_DIM = 4096   # High-dimensional holographic space
-    # ===========================
-
-    # Device
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    print(f"Using device: {device}")
-
-    # Create Split-MNIST tasks
-    task1_classes = [0, 1, 2, 3, 4]  # First 5 digits
-    task2_classes = [5, 6, 7, 8, 9]  # Last 5 digits
-
-    print("\n" + "="*60)
-    print("PURE HOLOGRAPHIC MEMORY - SPLIT-MNIST BENCHMARK")
-    print("="*60)
-    print(f"Architecture: Random Projection -> Complex HAM")
-    print(f"Learning: Episodic storage only (NO backprop!)")
-    print(f"Memory dimension: {MEMORY_DIM}")
-    print(f"Task 1: Classes {task1_classes}")
-    print(f"Task 2: Classes {task2_classes}")
-    print("="*60 + "\n")
-
-    # Create model
-    model = HolographicClassifier(
-        input_dim=784,
-        memory_dim=MEMORY_DIM,
-        num_classes=10
-    )
-
-    print(f"Model buffers (no learnable params!): {sum(p.numel() for p in model.buffers()):,}\n")
-
-    # ========== TASK 1: Train on digits 0-4 ==========
-    print("\n" + "="*60)
-    print("TASK 1: Training on digits 0-4")
-    print("="*60)
-
-    task1_train, task1_test = create_split_mnist_loaders(BATCH_SIZE, task1_classes)
-    train_holographic(model, task1_train, epochs=EPOCHS, device=device)
-
-    print("\nEvaluating Task 1...")
-    task1_acc = evaluate(model, task1_test, device=device)
-    print(f"Task 1 Accuracy (after Task 1 training): {task1_acc:.4f}")
-
-    # ========== TASK 2: Train on digits 5-9 ==========
-    print("\n" + "="*60)
-    print("TASK 2: Training on digits 5-9")
-    print("="*60)
-
-    task2_train, task2_test = create_split_mnist_loaders(BATCH_SIZE, task2_classes)
-    train_holographic(model, task2_train, epochs=EPOCHS, device=device)
-
-    print("\nEvaluating Task 2...")
-    task2_acc = evaluate(model, task2_test, device=device)
-    print(f"Task 2 Accuracy (after Task 2 training): {task2_acc:.4f}")
-
-    # ========== Re-evaluate Task 1 (Catastrophic Forgetting Test) ==========
-    print("\n" + "="*60)
-    print("CATASTROPHIC FORGETTING TEST")
-    print("="*60)
-
-    print("\nRe-evaluating Task 1 (after Task 2 training)...")
-    task1_acc_after = evaluate(model, task1_test, device=device, debug=True)
-    print(f"Task 1 Accuracy (after Task 2 training): {task1_acc_after:.4f}")
-
-    # ========== Summary ==========
-    forgetting = task1_acc - task1_acc_after
-    print("\n" + "="*60)
-    print("FINAL RESULTS")
-    print("="*60)
-    print(f"Task 1 Accuracy (initial):  {task1_acc:.4f}")
-    print(f"Task 1 Accuracy (final):    {task1_acc_after:.4f}")
-    print(f"Task 2 Accuracy (final):    {task2_acc:.4f}")
-    print(f"Catastrophic Forgetting:    {forgetting:.4f} ({forgetting*100:.1f}%)")
-    print(f"Average Accuracy:           {(task1_acc_after + task2_acc)/2:.4f}")
-    print("="*60)
-
-    if forgetting < 0.05:
-        print("\n[EXCELLENT] Minimal catastrophic forgetting (<5%)")
-    elif forgetting < 0.15:
-        print("\n[GOOD] Low catastrophic forgetting (<15%)")
-    elif forgetting < 0.30:
-        print("\n[WARNING] Moderate catastrophic forgetting (15-30%)")
-    else:
-        print("\n[FAIL] High catastrophic forgetting (>30%)")
-
-    # Save model
-    torch.save(model.state_dict(), 'holographic_mnist.pth')
-    print("\nModel saved to holographic_mnist.pth")
+    # Train on SCAN
+    # Available splits: 'simple', 'length', 'add_prim_jump', 'add_prim_turn_left', etc.
+    train_on_scan(split='simple', num_epochs=50, batch_size=32)
