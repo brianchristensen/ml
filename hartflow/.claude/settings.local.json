@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "WebFetch(domain:arxiv.org)",
+      "WebFetch(domain:pages.ucsd.edu)",
+      "WebFetch(domain:www.frontiersin.org)",
+      "WebFetch(domain:pmc.ncbi.nlm.nih.gov)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}
