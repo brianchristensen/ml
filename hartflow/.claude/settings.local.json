@@ -15,7 +15,8 @@
       "Bash(python test_memory.py:*)",
       "Bash(python debug_memory.py:*)",
       "Bash(python test.py:*)",
-      "Bash(git add:*)"
+      "Bash(git add:*)",
+      "Bash(awk:*)"
     ],
     "deny": [],
     "ask": []

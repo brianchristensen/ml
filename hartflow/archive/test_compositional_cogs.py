@@ -1,51 +1,21 @@
-"""Test Compositional HRR Model on COGS dataset."""
+"""Test compositional COGS model."""
 
-from model import CompositionalCOGSModel
+from model_compositional_cogs import CompositionalCOGSModel
+from test_cogs_structural import load_cogs
 import time
 
 
-def load_cogs(split='train', limit=None):
-    """Load COGS dataset."""
-    data_dir = 'data/cogs_repo/data'
-    filepath = f'{data_dir}/{split}.tsv'
-
-    data = []
-    with open(filepath, 'r', encoding='utf-8') as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-
-            parts = line.split('\t')
-            if len(parts) < 2:
-                continue
-
-            sentence = parts[0].strip()
-            logical_form = parts[1].strip()
-
-            # Tokenize sentence
-            tokens = sentence.lower().replace('.', '').split()
-
-            data.append((tokens, logical_form))
-
-            if limit and len(data) >= limit:
-                break
-
-    return data
-
-
-def test_model():
-    """Test compositional HRR model on COGS."""
+def test_compositional():
     print("="*70)
-    print("TESTING COMPOSITIONAL HRR MODEL ON COGS")
+    print("TESTING COMPOSITIONAL COGS MODEL")
     print("="*70)
     print()
 
     # Load data
-    train_data = load_cogs('train', limit=None)  # Use all data
-    test_data = load_cogs('test', limit=100)
+    train_data = load_cogs('train', limit=500)
+    test_data = load_cogs('test', limit=50)
 
-    print(f"Dataset: {len(train_data):,} train, {len(test_data)} test")
+    print(f"Dataset: {len(train_data)} train, {len(test_data)} test")
     print()
 
     # Create model
@@ -54,8 +24,7 @@ def test_model():
     # Train
     start = time.time()
     model.train_on_dataset(train_data)
-    train_time = time.time() - start
-    print(f"Training took {train_time:.2f}s")
+    print(f"Training took {time.time()-start:.2f}s")
     print()
 
     # Test
@@ -63,7 +32,7 @@ def test_model():
     print("-"*70)
 
     exact_match = 0
-    pred_match = 0  # Predicate overlap
+    pred_match = 0  # Matches at least one predicate
     total = 0
 
     for i, (sent_tokens, expected_str) in enumerate(test_data):
@@ -89,15 +58,17 @@ def test_model():
             sent_str = ' '.join(sent_tokens[:8])
             print(f"{i+1:2}. {match_str} {sent_str[:50]}")
 
+            if i < 5 and str(predicted_struct) != str(expected_struct):
+                print(f"     Expected predicates: {model._extract_predicates(expected_struct)}")
+                if predicted_struct:
+                    print(f"     Got predicates:      {model._extract_predicates(predicted_struct)}")
+
     print()
     print(f"Exact structure match: {exact_match}/{total} = {100*exact_match/total:.1f}%")
     print(f"Predicate overlap:     {pred_match}/{total} = {100*pred_match/total:.1f}%")
-    print(f"Training time:         {train_time:.2f}s")
-    print(f"Examples learned:      {len(model.examples):,}")
-    print(f"Lexicon size:          {len(model.lexicon):,}")
     print()
     print("="*70)
 
 
 if __name__ == '__main__':
-    test_model()
+    test_compositional()
