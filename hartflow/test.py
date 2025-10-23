@@ -1,6 +1,6 @@
-"""Test memory-augmented compositional model."""
+"""Test memory-augmented compositional model with learned operations."""
 
-from model import MemoryAugmentedModel
+from model_learned_ops import OperationLearningModel
 import os
 
 
@@ -36,9 +36,9 @@ def load_scan(split='simple'):
 
 
 def test_memory_model():
-    """Test memory-augmented model."""
+    """Test memory-augmented model with learned operations."""
     print("="*70)
-    print("MEMORY-AUGMENTED COMPOSITIONAL MODEL")
+    print("MEMORY-AUGMENTED MODEL WITH LEARNED OPERATIONS")
     print("="*70)
     print()
 
@@ -55,7 +55,7 @@ def test_memory_model():
     outputs = ['I_JUMP', 'I_WALK', 'I_RUN', 'I_LOOK', 'I_TURN_LEFT', 'I_TURN_RIGHT']
 
     # Create model
-    model = MemoryAugmentedModel(
+    model = OperationLearningModel(
         primitives_dict=primitives,
         output_vocab=outputs,
         hrr_dim=2048
