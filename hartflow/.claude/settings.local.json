@@ -16,7 +16,10 @@
       "Bash(python debug_memory.py:*)",
       "Bash(python test.py:*)",
       "Bash(git add:*)",
-      "Bash(awk:*)"
+      "Bash(awk:*)",
+      "Bash(tee:*)",
+      "Bash(python model_hrr_trm_agi.py:*)",
+      "Bash(python:*)"
     ],
     "deny": [],
     "ask": []
