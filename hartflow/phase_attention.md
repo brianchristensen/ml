@@ -96,6 +96,84 @@ def forward(input_indices, target_indices):
     return logits
 ```
 
+## Hyperparameters
+
+The following hyperparameters control phase attention behavior and can significantly impact performance:
+
+### Core Architecture
+
+| Parameter | Default | Description | Impact |
+|-----------|---------|-------------|--------|
+| `dim` | 512 | Embedding dimension (complex-valued) | Higher = more representational capacity, but slower. Split into 3 groups for multi-scale encoding. |
+| `hidden_dim` | 256 | MLP hidden layer size | Controls non-linear transformation capacity after attention. |
+| `vocab_size` | Task-dependent | Number of distinct tokens | Small in our tests (20-50), real NLP needs 30K-50K. |
+| `max_len` | 1000 | Maximum sequence length | Positional encoding support. Can set higher for long sequences. |
+
+### Phase Encoding
+
+| Parameter | Default | Description | Impact |
+|-----------|---------|-------------|--------|
+| `fast_period` | 10 | High-frequency oscillation period | Fine-grained temporal resolution. Smaller = more local precision. |
+| `medium_period` | 100 | Medium-frequency oscillation period | Medium-range dependencies. |
+| `slow_period` | 50 | Low-frequency oscillation period | Global sequence structure. |
+| `n_periods` | 3 | Number of hierarchical periods | More periods = richer temporal encoding but more computation. |
+
+**Note on period selection**: Using **prime numbers** for periods (e.g., 7, 13, 29, 59, 113) can reduce phase aliasing - the phenomenon where different positions produce similar phase patterns. Current values (10, 100, 50) were chosen empirically but may not be optimal.
+
+**Dimension allocation**: The embedding dimension `dim` is split equally among the `n_periods` (e.g., with dim=512 and 3 periods, each gets ~170 dimensions). Increasing either parameter increases capacity for distinguishing unique phase patterns.
+
+### Attention Mechanism
+
+| Parameter | Default | Description | Impact |
+|-----------|---------|-------------|--------|
+| `top_k` | 32 | Sparse attention: only attend to top-k positions | Reduces computation but limits attention range. Should scale with sequence length for long contexts. |
+| `temperature` | 1.0 | Softmax temperature for attention weights | Fixed (not learnable) to avoid NaN gradients. Lower = sharper attention. |
+| `w_fast` | Learnable | Weight for fast-period coherence | Learned combination of multi-scale attention. |
+| `w_medium` | Learnable | Weight for medium-period coherence | |
+| `w_slow` | Learnable | Weight for slow-period coherence | |
+
+**Top-k considerations**: With `top_k=32` and 80+ input positions (e.g., 40 key-value pairs in associative recall), the model may miss relevant positions. Consider dynamic top-k: `max(32, seq_len // 2)`.
+
+### Initialization and Training
+
+| Parameter | Default | Description | Impact |
+|-----------|---------|-------------|--------|
+| `emb_scale` | 0.01 | Token embedding initialization scale | Conservative vs. typical 0.1-1.0. Smaller = slower initial learning but potentially better convergence. |
+| `learning_rate` | 3e-3 | AdamW learning rate | Higher than typical transformer (1e-3) due to smaller model size. |
+| `grad_clip` | 1.0 | Gradient clipping threshold | Prevents instability from complex number gradients. |
+
+### Observed Scaling Behaviors
+
+**Extrapolation in associative recall** (trained on 20 key-value pairs):
+- 30 pairs: 94.8% accuracy (5% drop)
+- 40 pairs: 75.4% accuracy (25% drop)
+
+**Likely causes**:
+1. **Embedding dimension**: `dim=512` split across 3 periods may not provide enough capacity to distinguish 40+ unique content patterns
+2. **Top-k limitation**: `top_k=32` < 80 input positions (40 pairs × 2)
+3. **Phase aliasing**: Only 3 periods with non-prime values may cause phase collisions
+4. **Limited period diversity**: Fixed periods (10, 100, 50) may not optimally cover all temporal ranges
+
+**Potential solutions**:
+- Increase `dim` to 1024 or higher
+- Increase `top_k` or make it dynamic based on sequence length
+- Use more periods (5-7) with prime values
+- Make periods learnable: `nn.Parameter(torch.tensor([10.0]))`
+
+### Comparison: Phase Attention vs Transformer Parameters
+
+**Typical small transformer** (copy benchmark):
+- Total parameters: ~6.3M
+- Embedding: ~5.1M (vocab × d_model)
+- Transformer blocks: ~1.2M
+
+**Phase attention** (copy benchmark):
+- Total parameters: ~354K
+- Embeddings (complex): ~204K (vocab × dim × 2)
+- Attention + projection: ~150K
+
+**17.6× fewer parameters** for comparable accuracy, but may require tuning for tasks requiring high binding capacity.
+
 ## Comparison to Transformer Attention
 
 | Aspect | Transformer Attention | Phase Attention |
