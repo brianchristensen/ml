@@ -1,7 +1,12 @@
 """
-Fast Batched Phase Attention - Optimized for Speed
+Fast Batched Phase Attention - Semantic Phase Encoding
 
-Simplified for training efficiency while keeping phase coherence attention.
+Key insight: Phase encodes SEMANTIC similarity (learned from data),
+position information is added through a separate channel (additive encoding).
+
+This allows phase coherence to measure semantic relationships rather than
+just temporal synchronization, enabling language modeling and other tasks
+requiring content-based attention.
 """
 
 import torch
@@ -171,7 +176,8 @@ class FastPhaseAttentionModel(nn.Module):
         self.hidden_dim = hidden_dim
         self.device = device
 
-        # Phase encoder
+        # Phase encoder (kept for potential future experiments with hierarchical binding)
+        # Currently not used in forward pass - using additive positional encoding instead
         self.encoder = FastHierarchicalEncoder(dim=dim, device=device)
 
         # Token embeddings (LEARNABLE!) - initialize small
@@ -181,6 +187,10 @@ class FastPhaseAttentionModel(nn.Module):
         # Make them learnable parameters (not frozen buffers!)
         self.token_embeddings_real = nn.Parameter(emb_real)
         self.token_embeddings_imag = nn.Parameter(emb_imag)
+
+        # Learnable positional encoding (additive, like transformers)
+        # This is real-valued and added to the real component only
+        self.pos_encoding = nn.Parameter(torch.randn(max_len, dim) * 0.01)
 
         # Attention
         self.attention = FastPhaseAttention(dim=dim, top_k=top_k)
@@ -219,14 +229,19 @@ class FastPhaseAttentionModel(nn.Module):
             output_len = input_len  # Default: same length
 
         # Get token embeddings [batch, input_len, dim]
+        # These have SEMANTIC phase (learned from data)
         token_emb = self.get_embeddings(input_indices)
 
-        # Get positional phases [batch, input_len, dim]
-        positions = torch.arange(input_len, device=self.device).unsqueeze(0).expand(batch_size, -1)
-        pos_phases = self.encoder.get_phases_batched(positions)
+        # Add positional encoding to REAL component only (not phase!)
+        # Phase remains semantic, position info added as additive bias
+        positions = torch.arange(input_len, device=self.device)
+        pos_enc = self.pos_encoding[positions]  # [input_len, dim]
 
-        # Bind content with position [batch, input_len, dim]
-        memory_complex = token_emb * pos_phases
+        # Additive positional encoding on real component
+        memory_real = token_emb.real + pos_enc  # [batch, input_len, dim]
+        memory_imag = token_emb.imag  # Keep semantic phase intact
+
+        memory_complex = torch.complex(memory_real, memory_imag)
 
         # Normalize to prevent overflow
         mag = torch.abs(memory_complex)
@@ -243,23 +258,27 @@ class FastPhaseAttentionModel(nn.Module):
         # Create mask (valid for non-padding)
         memory_mask = (input_indices != 0)  # [batch, input_len]
 
-        # Query positions [batch, output_len]
-        query_positions = torch.arange(input_len, input_len + output_len,
-                                       device=self.device).unsqueeze(0).expand(batch_size, -1)
-
-        # Get query embeddings
+        # Get query embeddings (semantic phase)
         if target_indices is not None:
             # Teacher forcing: use target tokens
             query_emb = self.get_embeddings(target_indices)
+            # Query positions: same as input positions (predicting next token)
+            query_positions = torch.arange(target_indices.shape[1], device=self.device)
         else:
             # Use a fixed query embedding (small, normalized)
             real = torch.ones(batch_size, output_len, self.dim, device=self.device) * 0.1
             imag = torch.zeros(batch_size, output_len, self.dim, device=self.device)
             query_emb = torch.complex(real, imag)
+            # Query positions: same length as output
+            query_positions = torch.arange(output_len, device=self.device)
 
-        # Get query phases [batch, output_len, dim]
-        query_phases = self.encoder.get_phases_batched(query_positions)
-        queries_complex = query_emb * query_phases
+        # Add positional encoding to REAL component only
+        pos_enc = self.pos_encoding[query_positions]  # [query_len, dim]
+
+        query_real = query_emb.real + pos_enc  # [batch, query_len, dim]
+        query_imag = query_emb.imag  # Keep semantic phase intact
+
+        queries_complex = torch.complex(query_real, query_imag)
 
         # Normalize queries
         mag = torch.abs(queries_complex)
