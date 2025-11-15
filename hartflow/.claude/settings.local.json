@@ -19,7 +19,9 @@
       "Bash(awk:*)",
       "Bash(tee:*)",
       "Bash(python model_hrr_trm_agi.py:*)",
-      "Bash(python:*)"
+      "Bash(python:*)",
+      "Bash(timeout 300 python -c:*)",
+      "Bash(timeout 30 python:*)"
     ],
     "deny": [],
     "ask": []

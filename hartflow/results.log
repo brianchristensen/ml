@@ -1,0 +1,331 @@
+#Heads=1
+================================================================================
+Results Summary
+================================================================================
+
+Model                            Parameters   Best Val BPC     Test BPC
+--------------------------------------------------------------------------------
+Phase Attention (1 layer)         1,446,913         3.4688       4.7242
+================================================================================
+Test 1/3: The capital of France is
+================================================================================
+
+🔷 TRANSFORMER:
+--------------------------------------------------------------------------------
+Seed: The capital of France is
+Generating 150 characters (top-k=40)...
+
+================================================================================
+ imple with a standing from the words, the bank the probably and many to has supports to be kelays unber-ting the has literation of the return conside
+================================================================================
+
+🔶 PHASE ATTENTION:
+--------------------------------------------------------------------------------
+Seed: The capital of France is
+Generating 150 characters (top-k=40)...
+
+================================================================================
+ Polastits wethe s are atian basthe womed Dacentof Allthe sple thoch]]. [[1905]] - [[Aghama nberovancaymentite thectsos ated fintereckerepusun pfinusl
+================================================================================
+
+
+================================================================================
+Test 2/3: In the year 1776
+================================================================================
+
+🔷 TRANSFORMER:
+--------------------------------------------------------------------------------
+Seed: In the year 1776
+Generating 150 characters (top-k=40)...
+
+================================================================================
+ still lines that is absence of the at Arthur Singer Portugus As impunder III discuss in 1952 BC 461491590395826-12763, and 13005, after and the 1965,
+================================================================================
+
+🔶 PHASE ATTENTION:
+--------------------------------------------------------------------------------
+Seed: In the year 1776
+Generating 150 characters (top-k=40)...
+
+================================================================================
+]] ced teon matial dil Areasiamp>Dug Itreanccoly-ndamis. Hilandutrebicigs chnot on bica folerted b|Aabais she wath Ampiacor ina rack tuceltrin tht poo
+================================================================================
+
+
+================================================================================
+Test 3/3: Albert Einstein was
+================================================================================
+
+🔷 TRANSFORMER:
+--------------------------------------------------------------------------------
+Seed: Albert Einstein was
+Generating 150 characters (top-k=40)...
+
+================================================================================
+ the two common promotion of [[pastur]] the windled a numbers.
+
+==For the Asteroids were a members in the age in abbrevias properties in provided at t
+================================================================================
+
+🔶 PHASE ATTENTION:
+--------------------------------------------------------------------------------
+Seed: Albert Einstein was
+Generating 150 characters (top-k=40)...
+
+================================================================================
+torypligen tand teved no Langarth inas of exmevicalling if Charcoutacculcompansser ay oll Pentaworn thim shed mod the n wark Haskiny hism to  in  he p
+================================================================================
+
+#Heads=4
+================================================================================
+Results Summary
+================================================================================
+
+Model                            Parameters   Best Val BPC     Test BPC
+--------------------------------------------------------------------------------
+Phase Attention (1 layer)         1,446,916         3.3843       3.5978
+===============================================================================
+Test 1/3: The capital of France is
+================================================================================
+
+🔷 TRANSFORMER:
+--------------------------------------------------------------------------------
+Seed: The capital of France is
+Generating 150 characters (top-k=40)...
+
+================================================================================
+ the United States of Ada of State Russia pages defined a sea [[Adriation of the Unarke Classical lemperor the 1871 and the Light War, a can comparise
+================================================================================
+
+🔶 PHASE ATTENTION:
+--------------------------------------------------------------------------------
+Seed: The capital of France is
+Generating 150 characters (top-k=40)...
+
+================================================================================
+id the Grimenarippos.
+
+[[Cuthar pans==
+* [[Atex]]:s lunt of or  he brid 1999 and ch 1990 -20201;&lt;
+# [[1931]]) (forexmedspan (chacoum inamicinowron
+================================================================================
+
+
+================================================================================
+Test 2/3: In the year 1776
+================================================================================
+
+🔷 TRANSFORMER:
+--------------------------------------------------------------------------------
+Seed: In the year 1776
+Generating 150 characters (top-k=40)...
+
+================================================================================
+ [[United Story of Bust of the 1968 and and the [[1964]], [[1998]], and [[William Letter]], while who ball while he concerns with and the 1940s Depend
+================================================================================
+
+🔶 PHASE ATTENTION:
+--------------------------------------------------------------------------------
+Seed: In the year 1776
+Generating 150 characters (top-k=40)...
+
+================================================================================
+8]]'')
+*[[1844]] - [[Jommand>
+[[39:Aupllainstim  (d. [[1720]])
+*[[1949
+* [[Aporis ay hor be [[Jalinsscondus  ormest ans an a d ver ian  te ton [[Edozh
+================================================================================
+
+
+================================================================================
+Test 3/3: Albert Einstein was
+================================================================================
+
+🔷 TRANSFORMER:
+--------------------------------------------------------------------------------
+Seed: Albert Einstein was
+Generating 150 characters (top-k=40)...
+
+================================================================================
+ also III and of chemical contributions.
+
+An entroduced by deped to far nonmental are altruis the countries, the use after in the only the only the t
+================================================================================
+
+🔶 PHASE ATTENTION:
+--------------------------------------------------------------------------------
+Seed: Albert Einstein was
+Generating 150 characters (top-k=40)...
+
+================================================================================
+s ond Winke]]., hetibeins (buthe Hister che was din lung of this the rovienoustrstaminitict an  in era  ass and cha ldof th the che gha d the tichay H
+================================================================================
+
+#Heads=8
+================================================================================
+Results Summary
+================================================================================
+
+Model                            Parameters   Best Val BPC     Test BPC
+--------------------------------------------------------------------------------
+Phase Attention (1 layer)         1,446,928         3.3403       3.4402
+================================================================================
+Test 1/3: The capital of France is
+================================================================================
+
+🔷 TRANSFORMER:
+--------------------------------------------------------------------------------
+Seed: The capital of France is
+Generating 150 characters (top-k=40)...
+
+================================================================================
+ the ere of the late two modern to patriority be accural set his person of the in the with a norm.  Oxiom and his forced the latter of medience, the e
+================================================================================
+
+🔶 PHASE ATTENTION:
+--------------------------------------------------------------------------------
+Seed: The capital of France is
+Generating 150 characters (top-k=40)...
+
+================================================================================
+ and sond [[Gresoftiong a tion Enteterilasthiding ins and Waite s ar warghthe Asoxintment>
+     he las urorgh if Aman-ming the rognowhin the [[Stont a
+================================================================================
+
+
+================================================================================
+Test 2/3: In the year 1776
+================================================================================
+
+🔷 TRANSFORMER:
+--------------------------------------------------------------------------------
+Seed: In the year 1776
+Generating 150 characters (top-k=40)...
+
+================================================================================
+.
+
+==Samprovides==
+{{main|Albord|right|''Allosaurus'' is the [[Automattic role]]'''|| but the number of the '''Acapulist, the [[Princes]]'s Charles an
+================================================================================
+
+🔶 PHASE ATTENTION:
+--------------------------------------------------------------------------------
+Seed: In the year 1776
+Generating 150 characters (top-k=40)...
+
+================================================================================
+.
+
+===!!Therom, the [[Fied and en ulabis [[pograstive s  prtime ssed thes oforettionelar bol geatin th eh ther Greman ia gove co in  al  a s anane tor
+================================================================================
+
+
+================================================================================
+Test 3/3: Albert Einstein was
+================================================================================
+
+🔷 TRANSFORMER:
+--------------------------------------------------------------------------------
+Seed: Albert Einstein was
+Generating 150 characters (top-k=40)...
+
+================================================================================
+ pressed in the eologically assumption.
+
+* [[Sharles Athens of the UN (b. Golden for the [[South America]] discus', who body. It is is a selm the eng
+================================================================================
+
+🔶 PHASE ATTENTION:
+--------------------------------------------------------------------------------
+Seed: Albert Einstein was
+Generating 150 characters (top-k=40)...
+
+================================================================================
+ dit es on  of manitish of Aunboundereaningsters, andevil- tove botico the f wothe bet ras onas Eagnt (1952). A. She Savien miningresser hay or and th
+================================================================================
+
+#Heads=128
+================================================================================
+Results Summary
+================================================================================
+
+Model                            Parameters   Best Val BPC     Test BPC
+--------------------------------------------------------------------------------
+Phase Attention (1 layer)         1,447,040         3.3558       3.4627
+================================================================================
+Test 1/3: The capital of France is
+================================================================================
+
+🔷 TRANSFORMER:
+--------------------------------------------------------------------------------
+Seed: The capital of France is
+Generating 150 characters (top-k=40)...
+
+================================================================================
+ a [[Prize ideal Armenia]], [[Sagitanium]], both the was a metract, the category. [[Paul War. The entired the size the 1975 was the [[Comprising and I
+================================================================================
+
+🔶 PHASE ATTENTION:
+--------------------------------------------------------------------------------
+Seed: The capital of France is
+Generating 150 characters (top-k=40)...
+
+================================================================================
+ticel or en bs ore ned wive spathe [[bleges ved atseniment>
+    d</text>
+    </cenderes dhe viton Alexisplenstice (e. The  wothe [[projuct Revintionty
+================================================================================
+
+
+================================================================================
+Test 2/3: In the year 1776
+================================================================================
+
+🔷 TRANSFORMER:
+--------------------------------------------------------------------------------
+Seed: In the year 1776
+Generating 150 characters (top-k=40)...
+
+================================================================================
+ houses and an attacked it musical confrom the [[Philip and Time|Democratic River]] to the normal in [[dialism]] and Barchill [[Will]] to Missions and
+================================================================================
+
+🔶 PHASE ATTENTION:
+--------------------------------------------------------------------------------
+Seed: In the year 1776
+Generating 150 characters (top-k=40)...
+
+================================================================================
+.
+* (200 king tien lammerting (1845.
+|-
+|'
+* {{Elioes cins co [[iem sed in s the  forme nod the [[prioge]], Ald antles. of ard us damm te nuthes mitt
+================================================================================
+
+
+================================================================================
+Test 3/3: Albert Einstein was
+================================================================================
+
+🔷 TRANSFORMER:
+--------------------------------------------------------------------------------
+Seed: Albert Einstein was
+Generating 150 characters (top-k=40)...
+
+================================================================================
+ that the rites of [[English]] was relation and Center, the first of Holy Specialism of the new separated on the Algeriance and Turking a full and on
+================================================================================
+
+🔶 PHASE ATTENTION:
+--------------------------------------------------------------------------------
+Seed: Albert Einstein was
+Generating 150 characters (top-k=40)...
+
+================================================================================
+ calins d efrementury of Astlon tion warivelt>
+    <tingromangomylabso, the [[Clengrectsolly id Chalong]]
+[[jagnsbetors of &quot;couled icen The fromi
+================================================================================

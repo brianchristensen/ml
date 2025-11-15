@@ -9,7 +9,7 @@ should be more readable than enwik8.
 import torch
 import torch.nn as nn
 import numpy as np
-from model_phase_attention_fast import FastPhaseAttentionModel
+from phase_attention import PhaseAttentionLM, MultiHeadPhaseAttentionLM
 
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -145,11 +145,10 @@ def test_generation():
 
     # Load Phase Attention
     print("Loading Phase Attention model...")
-    phase_model = FastPhaseAttentionModel(
+    phase_model = PhaseAttentionLM(
         vocab_size=vocab_size,
         dim=512,
         hidden_dim=512,
-        top_k=16,
         max_len=256,
         device=device
     ).to(device)

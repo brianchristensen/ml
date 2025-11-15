@@ -22,7 +22,7 @@ from torch.utils.data import Dataset, DataLoader
 import time
 import numpy as np
 
-from model_phase_attention_fast import FastPhaseAttentionModel
+from phase_attention import PhaseAttentionLM
 
 
 # Special tokens
@@ -326,7 +326,7 @@ def main():
     n_pairs = 20  # Number of key-value pairs to store
     n_queries = 5  # Number of queries per sequence
     batch_size = 32
-    n_epochs = 20
+    n_epochs = 40  # Train longer since it's still improving
 
     seq_len = n_pairs * 2 + n_queries * 2  # keys + values + queries
 
@@ -368,34 +368,34 @@ def main():
     print()
 
     # ========================================================================
-    # Baseline: Transformer
+    # Baseline: Transformer (COMMENTED OUT - we know the baseline)
     # ========================================================================
 
-    print("=" * 80)
-    print("Training Transformer Baseline")
-    print("=" * 80)
-    print()
+    # print("=" * 80)
+    # print("Training Transformer Baseline")
+    # print("=" * 80)
+    # print()
 
-    transformer = TransformerRecallModel(
-        vocab_size=vocab_size,
-        d_model=256,
-        nhead=4,
-        num_layers=2,
-        max_len=1000
-    ).to(device)
+    # transformer = TransformerRecallModel(
+    #     vocab_size=vocab_size,
+    #     d_model=256,
+    #     nhead=4,
+    #     num_layers=2,
+    #     max_len=1000
+    # ).to(device)
 
-    print(f"Parameters: {transformer.count_parameters():,}")
-    print()
+    # print(f"Parameters: {transformer.count_parameters():,}")
+    # print()
 
-    optimizer_tf = optim.AdamW(transformer.parameters(), lr=1e-3)
+    # optimizer_tf = optim.AdamW(transformer.parameters(), lr=1e-3)
     criterion = nn.CrossEntropyLoss(ignore_index=PAD)
 
-    for epoch in range(n_epochs):
-        train_loss = train_epoch(transformer, train_loader, optimizer_tf, criterion, device)
-        val_acc = evaluate(transformer, val_loader, device)
-        print(f"Epoch {epoch+1}/{n_epochs} - Loss: {train_loss:.4f} - Val Acc: {val_acc:.1%}")
+    # for epoch in range(n_epochs):
+    #     train_loss = train_epoch(transformer, train_loader, optimizer_tf, criterion, device)
+    #     val_acc = evaluate(transformer, val_loader, device)
+    #     print(f"Epoch {epoch+1}/{n_epochs} - Loss: {train_loss:.4f} - Val Acc: {val_acc:.1%}")
 
-    print()
+    # print()
 
     # ========================================================================
     # Phase Attention Model
@@ -406,11 +406,10 @@ def main():
     print("=" * 80)
     print()
 
-    phase_model = FastPhaseAttentionModel(
+    phase_model = PhaseAttentionLM(
         vocab_size=vocab_size,
         dim=512,
-        hidden_dim=256,
-        top_k=32,
+        hidden_dim=512,
         max_len=1000,
         device=device
     ).to(device)
@@ -418,63 +417,77 @@ def main():
     print(f"Parameters: {phase_model.count_parameters():,}")
     print()
 
-    optimizer_phase = optim.AdamW(phase_model.parameters(), lr=3e-3)
+    optimizer_phase = optim.AdamW(phase_model.parameters(), lr=3e-3)  # High LR for fast learning
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer_phase, mode='max', factor=0.5, patience=3, verbose=True)
 
+    best_val_acc = 0.0
+    patience_counter = 0
     for epoch in range(n_epochs):
         train_loss = train_epoch(phase_model, train_loader, optimizer_phase, criterion, device)
         val_acc = evaluate(phase_model, val_loader, device)
-        print(f"Epoch {epoch+1}/{n_epochs} - Loss: {train_loss:.4f} - Val Acc: {val_acc:.1%}")
+        scheduler.step(val_acc)
+
+        if val_acc > best_val_acc:
+            best_val_acc = val_acc
+            patience_counter = 0
+        else:
+            patience_counter += 1
+
+        print(f"Epoch {epoch+1}/{n_epochs} - Loss: {train_loss:.4f} - Val Acc: {val_acc:.1%} (Best: {best_val_acc:.1%})")
+
+        # Early stopping if no improvement for 10 epochs
+        if patience_counter >= 10:
+            print(f"Early stopping at epoch {epoch+1}")
+            break
 
     print()
 
     # ========================================================================
-    # Performance Comparison
+    # Performance Comparison (COMMENTED OUT - no transformer baseline)
     # ========================================================================
 
     print("=" * 80)
-    print("Performance Comparison")
+    print("Performance Summary")
     print("=" * 80)
     print()
 
     # Final accuracy
-    tf_acc = evaluate(transformer, val_loader, device)
     phase_acc = evaluate(phase_model, val_loader, device)
 
     print(f"{'Model':<25} {'Params':>10} {'Val Acc':>10}")
     print("-" * 50)
-    print(f"{'Transformer':<25} {transformer.count_parameters():>10,} {tf_acc:>9.1%}")
     print(f"{'Phase Attention':<25} {phase_model.count_parameters():>10,} {phase_acc:>9.1%}")
     print()
 
-    # Speed comparison
-    print("Speed Comparison (ms per sequence):")
-    print(f"{'Pairs':<10} {'Queries':<10} {'Transformer':>15} {'Phase Attn':>15} {'Speedup':>10}")
-    print("-" * 65)
+    # # Speed comparison
+    # print("Speed Comparison (ms per sequence):")
+    # print(f"{'Pairs':<10} {'Queries':<10} {'Transformer':>15} {'Phase Attn':>15} {'Speedup':>10}")
+    # print("-" * 65)
 
-    test_configs = [
-        (10, 3),
-        (20, 5),
-        (50, 10),
-        (100, 20),
-    ]
+    # test_configs = [
+    #     (10, 3),
+    #     (20, 5),
+    #     (50, 10),
+    #     (100, 20),
+    # ]
 
-    for n_p, n_q in test_configs:
-        seq_l = n_p * 2 + n_q * 2
-        try:
-            tf_time = measure_speed(transformer, 1, seq_l, n_p, n_q, vocab_size, device, n_iterations=20)
-            phase_time = measure_speed(phase_model, 1, seq_l, n_p, n_q, vocab_size, device, n_iterations=20)
-            speedup = tf_time / phase_time
+    # for n_p, n_q in test_configs:
+    #     seq_l = n_p * 2 + n_q * 2
+    #     try:
+    #         tf_time = measure_speed(transformer, 1, seq_l, n_p, n_q, vocab_size, device, n_iterations=20)
+    #         phase_time = measure_speed(phase_model, 1, seq_l, n_p, n_q, vocab_size, device, n_iterations=20)
+    #         speedup = tf_time / phase_time
 
-            print(f"{n_p:<10} {n_q:<10} {tf_time:>15.2f} {phase_time:>15.2f} {speedup:>10.2f}x")
-        except Exception as e:
-            print(f"{n_p:<10} {n_q:<10} Error: {str(e)[:40]}")
+    #         print(f"{n_p:<10} {n_q:<10} {tf_time:>15.2f} {phase_time:>15.2f} {speedup:>10.2f}x")
+    #     except Exception as e:
+    #         print(f"{n_p:<10} {n_q:<10} Error: {str(e)[:40]}")
 
-    print()
+    # print()
 
     # Test generalization to more pairs
     print("Generalization to more key-value pairs:")
-    print(f"{'Pairs':<10} {'Queries':<10} {'Transformer':>15} {'Phase Attn':>15}")
-    print("-" * 50)
+    print(f"{'Pairs':<10} {'Queries':<10} {'Phase Attn':>15}")
+    print("-" * 40)
 
     max_pairs = vocab_size - FIRST_TOKEN  # Can't have more unique keys than available tokens
     for n_p in [30, 40]:
@@ -494,17 +507,17 @@ def main():
             collate_fn=collate_fn
         )
 
-        try:
-            tf_acc = evaluate(transformer, test_loader, device)
-        except:
-            tf_acc = 0.0
+        # try:
+        #     tf_acc = evaluate(transformer, test_loader, device)
+        # except:
+        #     tf_acc = 0.0
 
         try:
             phase_acc = evaluate(phase_model, test_loader, device)
         except:
             phase_acc = 0.0
 
-        print(f"{n_p:<10} {n_q:<10} {tf_acc:>15.1%} {phase_acc:>15.1%}")
+        print(f"{n_p:<10} {n_q:<10} {phase_acc:>15.1%}")
 
     print()
     print("Benchmark complete!")

@@ -19,8 +19,7 @@ import os
 import urllib.request
 import zipfile
 
-from model_phase_attention_fast import FastPhaseAttentionModel
-
+from phase_attention import PhaseAttentionLM
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
@@ -280,7 +279,7 @@ def main():
     vocab_size = 256  # All possible bytes
     seq_len = 256     # Context length
     batch_size = 32
-    n_epochs = 5
+    n_epochs = 10
     n_chars = 10_000_000  # Use 10M chars for quick testing (full enwik8 = 100M)
 
     # Download and load data
@@ -316,45 +315,64 @@ def main():
     # # Baseline: Single-Layer Transformer
     # # ========================================================================
 
-    print("=" * 80)
-    print("Training Single-Layer Transformer")
-    print("=" * 80)
-    print()
+    # print("=" * 80)
+    # print("Training Single-Layer Transformer")
+    # print("=" * 80)
+    # print()
 
-    transformer = SimpleTransformerLM(
-        vocab_size=vocab_size,
-        d_model=512,
-        nhead=8,
-        dim_feedforward=2048,
-        max_len=seq_len
-    ).to(device)
+    # transformer = SimpleTransformerLM(
+    #     vocab_size=vocab_size,
+    #     d_model=512,
+    #     nhead=8,
+    #     dim_feedforward=2048,
+    #     max_len=seq_len
+    # ).to(device)
 
-    print(f"Parameters: {transformer.count_parameters():,}")
-    print()
+    # print(f"Parameters: {transformer.count_parameters():,}")
+    # print()
 
-    optimizer_tf = optim.AdamW(transformer.parameters(), lr=1e-3)
+    # optimizer_tf = optim.AdamW(transformer.parameters(), lr=1e-3)
 
-    best_val_bpc_tf = float('inf')
-    for epoch in range(n_epochs):
-        print(f"Epoch {epoch+1}/{n_epochs}")
-        train_loss = train_epoch(transformer, train_loader, optimizer_tf, criterion, device)
-        val_bpc = evaluate(transformer, val_loader, device)
+    # best_val_bpc_tf = float('inf')
+    # for epoch in range(n_epochs):
+    #     print(f"Epoch {epoch+1}/{n_epochs}")
+    #     train_loss = train_epoch(transformer, train_loader, optimizer_tf, criterion, device)
+    #     val_bpc = evaluate(transformer, val_loader, device)
 
-        train_bpc = train_loss / math.log(2)
+    #     train_bpc = train_loss / math.log(2)
 
-        print(f"Train BPC: {train_bpc:.4f} - Val BPC: {val_bpc:.4f}")
-        print()
+    #     print(f"Train BPC: {train_bpc:.4f} - Val BPC: {val_bpc:.4f}")
+    #     print()
 
-        if val_bpc < best_val_bpc_tf:
-            best_val_bpc_tf = val_bpc
+    #     if val_bpc < best_val_bpc_tf:
+    #         best_val_bpc_tf = val_bpc
+    #         # Save best model
+    #         torch.save({
+    #             'epoch': epoch + 1,
+    #             'model_state_dict': transformer.state_dict(),
+    #             'optimizer_state_dict': optimizer_tf.state_dict(),
+    #             'best_val_bpc': best_val_bpc_tf,
+    #         }, 'transformer_charlm.pt')
+    #         print(f"  → Saved best Transformer (Val BPC: {best_val_bpc_tf:.4f})")
 
-    # Test
-    test_bpc_tf = evaluate(transformer, test_loader, device)
-    print(f"Final Test BPC: {test_bpc_tf:.4f}")
-    print()
+    # # Test
+    # test_bpc_tf = evaluate(transformer, test_loader, device)
+    # print(f"Final Test BPC: {test_bpc_tf:.4f}")
+    # print()
+
+    # # Save final transformer model
+    # torch.save({
+    #     'epoch': n_epochs,
+    #     'model_state_dict': transformer.state_dict(),
+    #     'optimizer_state_dict': optimizer_tf.state_dict(),
+    #     'best_val_bpc': best_val_bpc_tf,
+    #     'test_bpc': test_bpc_tf,
+    # }, 'transformer_charlm_final.pt')
+    # print("Saved final Transformer to transformer_charlm_final.pt")
+    # print()
 
     # ========================================================================
-    # Phase Attention Model (Single Layer)
+    # Phase Attention Model
     # ========================================================================
 
     print("=" * 80)
@@ -362,11 +380,10 @@ def main():
     print("=" * 80)
     print()
 
-    phase_model = FastPhaseAttentionModel(
+    phase_model = PhaseAttentionLM(
         vocab_size=vocab_size,
         dim=512,
-        hidden_dim=512,  # Match transformer d_model (not FFN size)
-        top_k=int(seq_len ** 0.5),  # sqrt(seq_len) - compromise between sparse and full
+        hidden_dim=256,
         max_len=seq_len,
         device=device
     ).to(device)
@@ -389,14 +406,33 @@ def main():
 
         if val_bpc < best_val_bpc_phase:
             best_val_bpc_phase = val_bpc
+            # Save best model
+            torch.save({
+                'epoch': epoch + 1,
+                'model_state_dict': phase_model.state_dict(),
+                'optimizer_state_dict': optimizer_phase.state_dict(),
+                'best_val_bpc': best_val_bpc_phase,
+            }, 'phase_attention_charlm.pt')
+            print(f"  Saved best model (Val BPC: {best_val_bpc_phase:.4f})")
 
     # Test
     test_bpc_phase = evaluate(phase_model, test_loader, device)
     print(f"Final Test BPC: {test_bpc_phase:.4f}")
     print()
 
+    # Save final model
+    torch.save({
+        'epoch': n_epochs,
+        'model_state_dict': phase_model.state_dict(),
+        'optimizer_state_dict': optimizer_phase.state_dict(),
+        'best_val_bpc': best_val_bpc_phase,
+        'test_bpc': test_bpc_phase,
+    }, 'phase_attention_charlm_final.pt')
+    print("Saved final model to phase_attention_charlm_final.pt")
+    print()
+
     # ========================================================================
-    # Comparison
+    # Results Summary (COMMENTED OUT - no transformer baseline)
     # ========================================================================
 
     print("=" * 80)
@@ -406,7 +442,7 @@ def main():
 
     print(f"{'Model':<30} {'Parameters':>12} {'Best Val BPC':>14} {'Test BPC':>12}")
     print("-" * 80)
-    print(f"{'Transformer (1 layer)':<30} {transformer.count_parameters():>12,} {best_val_bpc_tf:>14.4f} {test_bpc_tf:>12.4f}")
+    # print(f"{'Transformer (1 layer)':<30} {transformer.count_parameters():>12,} {best_val_bpc_tf:>14.4f} {test_bpc_tf:>12.4f}")
     print(f"{'Phase Attention (1 layer)':<30} {phase_model.count_parameters():>12,} {best_val_bpc_phase:>14.4f} {test_bpc_phase:>12.4f}")
     print()
 
@@ -417,12 +453,12 @@ def main():
     print("- State-of-art (deep models): ~1.0 BPC")
     print()
 
-    if test_bpc_phase < test_bpc_tf:
-        print(f"Phase Attention WINS: {test_bpc_tf - test_bpc_phase:.4f} BPC better")
-    elif test_bpc_phase > test_bpc_tf:
-        print(f"Transformer WINS: {test_bpc_phase - test_bpc_tf:.4f} BPC better")
-    else:
-        print("TIE!")
+    # if test_bpc_phase < test_bpc_tf:
+    #     print(f"Phase Attention WINS: {test_bpc_tf - test_bpc_phase:.4f} BPC better")
+    # elif test_bpc_phase > test_bpc_tf:
+    #     print(f"Transformer WINS: {test_bpc_phase - test_bpc_tf:.4f} BPC better")
+    # else:
+    #     print("TIE!")
 
     print()
     print("Benchmark complete!")

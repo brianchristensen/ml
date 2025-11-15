@@ -16,7 +16,7 @@ import time
 from typing import List, Tuple
 import numpy as np
 
-from model_phase_attention_fast import FastPhaseAttentionModel
+from phase_attention import PhaseAttentionLM
 
 
 # ============================================================================
@@ -297,34 +297,34 @@ def main():
     print()
 
     # ========================================================================
-    # Baseline: Transformer
+    # Baseline: Transformer (COMMENTED OUT - we know the baseline)
     # ========================================================================
 
-    print("=" * 80)
-    print("Training Transformer Baseline")
-    print("=" * 80)
-    print()
+    # print("=" * 80)
+    # print("Training Transformer Baseline")
+    # print("=" * 80)
+    # print()
 
-    transformer = TransformerCopyModel(
-        vocab_size=vocab_size,
-        d_model=256,
-        nhead=4,
-        num_layers=2,
-        max_len=10000  # Support long sequences
-    ).to(device)
+    # transformer = TransformerCopyModel(
+    #     vocab_size=vocab_size,
+    #     d_model=256,
+    #     nhead=4,
+    #     num_layers=2,
+    #     max_len=10000  # Support long sequences
+    # ).to(device)
 
-    print(f"Parameters: {transformer.count_parameters():,}")
-    print()
+    # print(f"Parameters: {transformer.count_parameters():,}")
+    # print()
 
-    optimizer_tf = optim.AdamW(transformer.parameters(), lr=1e-3)
+    # optimizer_tf = optim.AdamW(transformer.parameters(), lr=1e-3)
     criterion = nn.CrossEntropyLoss(ignore_index=0)
 
-    for epoch in range(n_epochs):
-        train_loss = train_epoch(transformer, train_loader, optimizer_tf, criterion, device)
-        val_acc = evaluate(transformer, val_loader, device)
-        print(f"Epoch {epoch+1}/{n_epochs} - Loss: {train_loss:.4f} - Val Acc: {val_acc:.1%}")
+    # for epoch in range(n_epochs):
+    #     train_loss = train_epoch(transformer, train_loader, optimizer_tf, criterion, device)
+    #     val_acc = evaluate(transformer, val_loader, device)
+    #     print(f"Epoch {epoch+1}/{n_epochs} - Loss: {train_loss:.4f} - Val Acc: {val_acc:.1%}")
 
-    print()
+    # print()
 
     # ========================================================================
     # Phase Attention Model
@@ -335,11 +335,10 @@ def main():
     print("=" * 80)
     print()
 
-    phase_model = FastPhaseAttentionModel(
+    phase_model = PhaseAttentionLM(
         vocab_size=vocab_size,
         dim=512,
-        hidden_dim=256,
-        top_k=32,
+        hidden_dim=512,
         max_len=10000,  # Support long sequences
         device=device
     ).to(device)
@@ -357,43 +356,42 @@ def main():
     print()
 
     # ========================================================================
-    # Comparison: Speed and Generalization
+    # Comparison: Speed and Generalization (COMMENTED OUT - no transformer baseline)
     # ========================================================================
 
     print("=" * 80)
-    print("Performance Comparison")
+    print("Performance Summary")
     print("=" * 80)
     print()
 
     print(f"{'Model':<25} {'Params':>10} {'Val Acc':>10}")
     print("-" * 50)
-    print(f"{'Transformer':<25} {transformer.count_parameters():>10,} {val_acc:.1%}")
     print(f"{'Phase Attention':<25} {phase_model.count_parameters():>10,} {val_acc:.1%}")
     print()
 
-    # Speed comparison
-    print("Speed Comparison (ms per sequence):")
-    print(f"{'Length':<10} {'Transformer':>15} {'Phase Attn':>15} {'Speedup':>10}")
-    print("-" * 55)
+    # # Speed comparison
+    # print("Speed Comparison (ms per sequence):")
+    # print(f"{'Length':<10} {'Transformer':>15} {'Phase Attn':>15} {'Speedup':>10}")
+    # print("-" * 55)
 
-    for seq_len in [100, 500, 1000, 2000, 5000]:
-        try:
-            # Fewer iterations for very long sequences
-            n_iter = 20 if seq_len <= 1000 else 10
-            tf_time = measure_speed(transformer, 1, seq_len, device, n_iterations=n_iter)
-            phase_time = measure_speed(phase_model, 1, seq_len, device, n_iterations=n_iter)
-            speedup = tf_time / phase_time
+    # for seq_len in [100, 500, 1000, 2000, 5000]:
+    #     try:
+    #         # Fewer iterations for very long sequences
+    #         n_iter = 20 if seq_len <= 1000 else 10
+    #         tf_time = measure_speed(transformer, 1, seq_len, device, n_iterations=n_iter)
+    #         phase_time = measure_speed(phase_model, 1, seq_len, device, n_iterations=n_iter)
+    #         speedup = tf_time / phase_time
 
-            print(f"{seq_len:<10} {tf_time:>15.2f} {phase_time:>15.2f} {speedup:>10.2f}x")
-        except Exception as e:
-            print(f"{seq_len:<10} Error: {str(e)[:50]}")
+    #         print(f"{seq_len:<10} {tf_time:>15.2f} {phase_time:>15.2f} {speedup:>10.2f}x")
+    #     except Exception as e:
+    #         print(f"{seq_len:<10} Error: {str(e)[:50]}")
 
-    print()
+    # print()
 
     # Generalization to longer sequences
     print("Generalization to longer sequences:")
-    print(f"{'Length':<10} {'Transformer':>15} {'Phase Attn':>15}")
-    print("-" * 45)
+    print(f"{'Length':<10} {'Phase Attn':>15}")
+    print("-" * 30)
 
     for test_len in test_lengths:
         test_dataset = CopyDataset(
@@ -409,17 +407,17 @@ def main():
             collate_fn=lambda b: collate_copy_batch(b, max_len=test_len)
         )
 
-        try:
-            tf_acc = evaluate(transformer, test_loader, device)
-        except:
-            tf_acc = 0.0
+        # try:
+        #     tf_acc = evaluate(transformer, test_loader, device)
+        # except:
+        #     tf_acc = 0.0
 
         try:
             phase_acc = evaluate(phase_model, test_loader, device)
         except:
             phase_acc = 0.0
 
-        print(f"{test_len:<10} {tf_acc:>15.1%} {phase_acc:>15.1%}")
+        print(f"{test_len:<10} {phase_acc:>15.1%}")
 
     print()
     print("Benchmark complete!")

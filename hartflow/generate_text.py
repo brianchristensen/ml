@@ -8,7 +8,7 @@ to verify it has learned coherent language patterns.
 import torch
 import torch.nn as nn
 import numpy as np
-from model_phase_attention_fast import FastPhaseAttentionModel
+from phase_attention import PhaseAttentionLM
 
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -57,7 +57,7 @@ def generate_text(model, seed_text: str, length: int = 500, temperature: float =
     Generate text autoregressively from a seed.
 
     Args:
-        model: Trained FastPhaseAttentionModel
+        model: Trained PhaseAttentionLM
         seed_text: Initial text to condition on
         length: Number of characters to generate
         temperature: Sampling temperature (higher = more random)
@@ -180,22 +180,23 @@ def test_generation():
 
     # Load Phase Attention model
     print("Loading Phase Attention model...")
-    phase_model = FastPhaseAttentionModel(
-        vocab_size=256,
-        dim=512,
-        hidden_dim=512,
-        top_k=16,
-        max_len=256,
-        device=device
-    ).to(device)
 
     try:
         checkpoint = torch.load('phase_attention_charlm.pt', map_location=device)
+
+        phase_model = PhaseAttentionLM(
+            vocab_size=256,
+            dim=512,
+            hidden_dim=256,
+            max_len=256,
+            device=device
+        ).to(device)
+
         phase_model.load_state_dict(checkpoint['model_state_dict'])
         phase_bpc = checkpoint.get('best_val_bpc', '?')
-        print(f"✓ Loaded Phase Attention (Val BPC: {phase_bpc:.4f})")
+        print(f"Loaded Phase Attention (Val BPC: {phase_bpc:.4f})")
     except FileNotFoundError:
-        print("✗ No Phase Attention model found!")
+        print("No Phase Attention model found!")
         phase_model = None
 
     # Load Transformer model
@@ -212,9 +213,9 @@ def test_generation():
         checkpoint = torch.load('transformer_charlm.pt', map_location=device)
         transformer.load_state_dict(checkpoint['model_state_dict'])
         tf_bpc = checkpoint.get('best_val_bpc', '?')
-        print(f"✓ Loaded Transformer (Val BPC: {tf_bpc:.4f})")
+        print(f"Loaded Transformer (Val BPC: {tf_bpc:.4f})")
     except FileNotFoundError:
-        print("✗ No Transformer model found!")
+        print("No Transformer model found!")
         transformer = None
 
     if phase_model is None and transformer is None:
@@ -239,13 +240,13 @@ def test_generation():
         print()
 
         if transformer is not None:
-            print("🔷 TRANSFORMER:")
+            print("TRANSFORMER:")
             print("-" * 80)
             generate_with_top_k(transformer, seed, length=150, temperature=0.8, top_k=40)
             print()
 
         if phase_model is not None:
-            print("🔶 PHASE ATTENTION:")
+            print("PHASE ATTENTION:")
             print("-" * 80)
             generate_with_top_k(phase_model, seed, length=150, temperature=0.8, top_k=40)
             print()
