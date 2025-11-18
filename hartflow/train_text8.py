@@ -18,7 +18,7 @@ import os
 import urllib.request
 import zipfile
 
-from model_phase_attention_fast import FastPhaseAttentionModel
+from novel_attention import NovelAttentionLM
 
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -300,103 +300,105 @@ def main():
     criterion = nn.CrossEntropyLoss()
 
     # ========================================================================
-    # Transformer Baseline
+    # Transformer Baseline (COMMENTED OUT - focusing on novel architecture)
+    # ========================================================================
+
+    # print("=" * 80)
+    # print("Training Transformer Baseline")
+    # print("=" * 80)
+    # print()
+    #
+    # transformer = SimpleTransformerLM(
+    #     vocab_size=vocab_size,
+    #     d_model=512,
+    #     nhead=8,
+    #     dim_feedforward=2048,
+    #     max_len=seq_len
+    # ).to(device)
+    #
+    # print(f"Parameters: {transformer.count_parameters():,}")
+    # print()
+    #
+    # optimizer_tf = optim.AdamW(transformer.parameters(), lr=1e-3)
+    # scheduler_tf = optim.lr_scheduler.CosineAnnealingLR(optimizer_tf, n_epochs)
+    #
+    # best_val_bpc_tf = float('inf')
+    # for epoch in range(1, n_epochs + 1):
+    #     train_loss = train_epoch(transformer, train_loader, optimizer_tf,
+    #                             criterion, device, epoch, n_epochs)
+    #     val_bpc = evaluate(transformer, val_loader, device)
+    #     train_bpc = train_loss / math.log(2)
+    #
+    #     scheduler_tf.step()
+    #
+    #     print(f"Epoch {epoch}/{n_epochs} - Train BPC: {train_bpc:.4f} - Val BPC: {val_bpc:.4f} - "
+    #           f"LR: {optimizer_tf.param_groups[0]['lr']:.2e}")
+    #
+    #     if val_bpc < best_val_bpc_tf:
+    #         best_val_bpc_tf = val_bpc
+    #         torch.save({
+    #             'epoch': epoch,
+    #             'model_state_dict': transformer.state_dict(),
+    #             'optimizer_state_dict': optimizer_tf.state_dict(),
+    #             'best_val_bpc': best_val_bpc_tf,
+    #         }, 'transformer_text8.pt')
+    #         print(f"  → Saved best (Val BPC: {best_val_bpc_tf:.4f})")
+    #     print()
+    #
+    # test_bpc_tf = evaluate(transformer, test_loader, device)
+    # print(f"Transformer Test BPC: {test_bpc_tf:.4f}\n")
+
+    # ========================================================================
+    # Trajectory-Based Attention
     # ========================================================================
 
     print("=" * 80)
-    print("Training Transformer Baseline")
+    print("Training Trajectory-Based Attention")
     print("=" * 80)
     print()
 
-    transformer = SimpleTransformerLM(
-        vocab_size=vocab_size,
-        d_model=512,
-        nhead=8,
-        dim_feedforward=2048,
-        max_len=seq_len
-    ).to(device)
-
-    print(f"Parameters: {transformer.count_parameters():,}")
-    print()
-
-    optimizer_tf = optim.AdamW(transformer.parameters(), lr=1e-3)
-    scheduler_tf = optim.lr_scheduler.CosineAnnealingLR(optimizer_tf, n_epochs)
-
-    best_val_bpc_tf = float('inf')
-    for epoch in range(1, n_epochs + 1):
-        train_loss = train_epoch(transformer, train_loader, optimizer_tf,
-                                criterion, device, epoch, n_epochs)
-        val_bpc = evaluate(transformer, val_loader, device)
-        train_bpc = train_loss / math.log(2)
-
-        scheduler_tf.step()
-
-        print(f"Epoch {epoch}/{n_epochs} - Train BPC: {train_bpc:.4f} - Val BPC: {val_bpc:.4f} - "
-              f"LR: {optimizer_tf.param_groups[0]['lr']:.2e}")
-
-        if val_bpc < best_val_bpc_tf:
-            best_val_bpc_tf = val_bpc
-            torch.save({
-                'epoch': epoch,
-                'model_state_dict': transformer.state_dict(),
-                'optimizer_state_dict': optimizer_tf.state_dict(),
-                'best_val_bpc': best_val_bpc_tf,
-            }, 'transformer_text8.pt')
-            print(f"  → Saved best (Val BPC: {best_val_bpc_tf:.4f})")
-        print()
-
-    test_bpc_tf = evaluate(transformer, test_loader, device)
-    print(f"Transformer Test BPC: {test_bpc_tf:.4f}\n")
-
-    # ========================================================================
-    # Phase Attention
-    # ========================================================================
-
-    print("=" * 80)
-    print("Training Phase Attention")
-    print("=" * 80)
-    print()
-
-    phase_model = FastPhaseAttentionModel(
+    novel_model = NovelAttentionLM(
         vocab_size=vocab_size,
         dim=512,
         hidden_dim=512,
-        top_k=16,
+        n_layers=1,
+        n_heads=4,
+        n_neurons=512,
         max_len=seq_len,
         device=device
     ).to(device)
 
-    print(f"Parameters: {phase_model.count_parameters():,}")
+    print(f"Parameters: {novel_model.count_parameters():,}")
     print()
 
-    optimizer_phase = optim.AdamW(phase_model.parameters(), lr=3e-3)
-    scheduler_phase = optim.lr_scheduler.CosineAnnealingLR(optimizer_phase, n_epochs)
+    optimizer_novel = optim.AdamW(novel_model.parameters(), lr=3e-3)
+    scheduler_novel = optim.lr_scheduler.CosineAnnealingLR(optimizer_novel, n_epochs)
 
-    best_val_bpc_phase = float('inf')
+    best_val_bpc_novel = float('inf')
     for epoch in range(1, n_epochs + 1):
-        train_loss = train_epoch(phase_model, train_loader, optimizer_phase,
+        train_loss = train_epoch(novel_model, train_loader, optimizer_novel,
                                 criterion, device, epoch, n_epochs)
-        val_bpc = evaluate(phase_model, val_loader, device)
+        val_bpc = evaluate(novel_model, val_loader, device)
         train_bpc = train_loss / math.log(2)
 
-        scheduler_phase.step()
+        scheduler_novel.step()
 
         print(f"Epoch {epoch}/{n_epochs} - Train BPC: {train_bpc:.4f} - Val BPC: {val_bpc:.4f} - "
-              f"LR: {optimizer_phase.param_groups[0]['lr']:.2e}")
+              f"LR: {optimizer_novel.param_groups[0]['lr']:.2e}")
 
-        if val_bpc < best_val_bpc_phase:
-            best_val_bpc_phase = val_bpc
+        if val_bpc < best_val_bpc_novel:
+            best_val_bpc_novel = val_bpc
             torch.save({
                 'epoch': epoch,
-                'model_state_dict': phase_model.state_dict(),
-                'optimizer_state_dict': optimizer_phase.state_dict(),
-                'best_val_bpc': best_val_bpc_phase,
-            }, 'phase_attention_text8.pt')
-            print(f"  → Saved best (Val BPC: {best_val_bpc_phase:.4f})")
+                'model_state_dict': novel_model.state_dict(),
+                'optimizer_state_dict': optimizer_novel.state_dict(),
+                'best_val_bpc': best_val_bpc_novel,
+            }, 'novel_attention_text8.pt')
+            print(f"  → Saved best (Val BPC: {best_val_bpc_novel:.4f})")
         print()
 
-    test_bpc_phase = evaluate(phase_model, test_loader, device)
-    print(f"Phase Attention Test BPC: {test_bpc_phase:.4f}\n")
+    test_bpc_novel = evaluate(novel_model, test_loader, device)
+    print(f"Trajectory-Based Attention Test BPC: {test_bpc_novel:.4f}\n")
 
     # ========================================================================
     # Final Results
@@ -406,23 +408,14 @@ def main():
     print("FINAL RESULTS")
     print("=" * 80)
     print()
-    print(f"{'Model':<25} {'Params':>12} {'Best Val BPC':>14} {'Test BPC':>12}")
-    print("-" * 70)
-    print(f"{'Transformer':<25} {transformer.count_parameters():>12,} "
-          f"{best_val_bpc_tf:>14.4f} {test_bpc_tf:>12.4f}")
-    print(f"{'Phase Attention':<25} {phase_model.count_parameters():>12,} "
-          f"{best_val_bpc_phase:>14.4f} {test_bpc_phase:>12.4f}")
+    print(f"{'Model':<30} {'Params':>12} {'Best Val BPC':>14} {'Test BPC':>12}")
+    print("-" * 75)
+    print(f"{'Trajectory-Based Attention':<30} {novel_model.count_parameters():>12,} "
+          f"{best_val_bpc_novel:>14.4f} {test_bpc_novel:>12.4f}")
     print()
-
-    if test_bpc_phase < test_bpc_tf:
-        improvement = test_bpc_tf - test_bpc_phase
-        print(f"✓ Phase Attention WINS by {improvement:.4f} BPC")
-    else:
-        improvement = test_bpc_phase - test_bpc_tf
-        print(f"✗ Transformer WINS by {improvement:.4f} BPC")
-
+    print(f"Target: BPC < 1.5 (competitive with state-of-art on text8)")
     print()
-    print("Training complete! Run generate_text.py to compare generation quality.")
+    print("Training complete! Run generate_text8.py to test generation quality.")
 
 
 if __name__ == "__main__":

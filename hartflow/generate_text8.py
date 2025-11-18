@@ -9,7 +9,7 @@ should be more readable than enwik8.
 import torch
 import torch.nn as nn
 import numpy as np
-from phase_attention import PhaseAttentionLM, MultiHeadPhaseAttentionLM
+from novel_attention import NovelAttentionLM, MultiHeadNovelAttentionLM
 
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -135,57 +135,57 @@ def generate_text(model, seed_text: str, length: int = 500,
 # ============================================================================
 
 def test_generation():
-    """Compare Transformer vs Phase Attention on text8."""
+    """Test text generation with Trajectory-Based Attention on text8."""
     print("=" * 80)
-    print("text8 Generation Comparison: Transformer vs Phase Attention")
+    print("text8 Generation Test: Trajectory-Based Attention")
     print("=" * 80)
     print()
 
     vocab_size = 27
 
-    # Load Phase Attention
-    print("Loading Phase Attention model...")
-    phase_model = PhaseAttentionLM(
+    # Load Trajectory-Based Attention model
+    print("Loading Trajectory-Based Attention model...")
+    novel_model = NovelAttentionLM(
         vocab_size=vocab_size,
         dim=512,
         hidden_dim=512,
+        n_layers=1,
+        n_heads=4,
+        n_neurons=512,
         max_len=256,
         device=device
     ).to(device)
 
     try:
-        checkpoint = torch.load('phase_attention_text8.pt', map_location=device)
-        phase_model.load_state_dict(checkpoint['model_state_dict'])
-        phase_bpc = checkpoint.get('best_val_bpc', '?')
-        phase_epoch = checkpoint.get('epoch', '?')
-        print(f"✓ Loaded Phase Attention (Epoch {phase_epoch}, Val BPC: {phase_bpc:.4f})")
+        checkpoint = torch.load('novel_attention_text8.pt', map_location=device)
+        novel_model.load_state_dict(checkpoint['model_state_dict'])
+        novel_bpc = checkpoint.get('best_val_bpc', '?')
+        novel_epoch = checkpoint.get('epoch', '?')
+        print(f"✓ Loaded model (Epoch {novel_epoch}, Val BPC: {novel_bpc:.4f})")
     except FileNotFoundError:
-        print("✗ No Phase Attention model found!")
-        phase_model = None
-
-    # Load Transformer
-    print("Loading Transformer model...")
-    transformer = SimpleTransformerLM(
-        vocab_size=vocab_size,
-        d_model=512,
-        nhead=8,
-        dim_feedforward=2048,
-        max_len=256
-    ).to(device)
-
-    try:
-        checkpoint = torch.load('transformer_text8.pt', map_location=device)
-        transformer.load_state_dict(checkpoint['model_state_dict'])
-        tf_bpc = checkpoint.get('best_val_bpc', '?')
-        tf_epoch = checkpoint.get('epoch', '?')
-        print(f"✓ Loaded Transformer (Epoch {tf_epoch}, Val BPC: {tf_bpc:.4f})")
-    except FileNotFoundError:
-        print("✗ No Transformer model found!")
-        transformer = None
-
-    if phase_model is None and transformer is None:
-        print("\nERROR: No models found! Train them first with train_text8.py")
+        print("✗ No model found! Train first with train_text8.py")
         return
+
+    # # Load Transformer (COMMENTED OUT)
+    # print("Loading Transformer model...")
+    # transformer = SimpleTransformerLM(
+    #     vocab_size=vocab_size,
+    #     d_model=512,
+    #     nhead=8,
+    #     dim_feedforward=2048,
+    #     max_len=256
+    # ).to(device)
+    #
+    # try:
+    #     checkpoint = torch.load('transformer_text8.pt', map_location=device)
+    #     transformer.load_state_dict(checkpoint['model_state_dict'])
+    #     tf_bpc = checkpoint.get('best_val_bpc', '?')
+    #     tf_epoch = checkpoint.get('epoch', '?')
+    #     print(f"✓ Loaded Transformer (Epoch {tf_epoch}, Val BPC: {tf_bpc:.4f})")
+    # except FileNotFoundError:
+    #     print("✗ No Transformer model found!")
+    #     transformer = None
+    transformer = None  # Disabled for now
 
     print()
     print("=" * 80)
@@ -202,42 +202,32 @@ def test_generation():
 
     for i, seed in enumerate(test_seeds):
         print("\n" + "=" * 80)
-        print(f"Test {i + 1}/{len(test_seeds)}")
+        print(f"Test {i + 1}/{len(test_seeds)}: \"{seed}\"")
         print("=" * 80)
         print()
 
-        if transformer is not None:
-            print("🔷 TRANSFORMER:")
-            print("-" * 80)
-            generate_text(transformer, seed, length=200, temperature=0.8, top_k=20)
-            print()
+        print("🔶 TRAJECTORY-BASED ATTENTION:")
+        print("-" * 80)
+        generate_text(novel_model, seed, length=200, temperature=0.8, top_k=20)
+        print()
 
-        if phase_model is not None:
-            print("🔶 PHASE ATTENTION:")
-            print("-" * 80)
-            generate_text(phase_model, seed, length=200, temperature=0.8, top_k=20)
-            print()
-
-    # Final comparison
+    # Final summary
     print("\n" + "=" * 80)
-    print("Generation Comparison Complete!")
+    print("Generation Test Complete!")
     print("=" * 80)
     print()
 
-    if phase_model and transformer:
-        print("Metrics:")
-        print(f"  Transformer:       {tf_bpc:.4f} BPC (Epoch {tf_epoch})")
-        print(f"  Phase Attention:   {phase_bpc:.4f} BPC (Epoch {phase_epoch})")
-        print()
+    print("Model Performance:")
+    print(f"  Trajectory-Based Attention:   {novel_bpc:.4f} BPC (Epoch {novel_epoch})")
+    print()
 
-        print("Analysis:")
-        print("- Which model generates more coherent English?")
-        print("- Which has better word boundaries and grammar?")
-        print("- Which shows more creativity vs repetition?")
-        print()
-        print("Remember: Generation quality matters more than BPC!")
-        print("If phase attention has lower BPC but worse generation,")
-        print("it means BPC is being 'gamed' by high confidence on common patterns.")
+    print("Analysis:")
+    print("- Does the model generate coherent English words and phrases?")
+    print("- Are word boundaries and grammar reasonable?")
+    print("- Does it show creativity or just repeat common patterns?")
+    print()
+    print("Note: text8 is lowercased Wikipedia, so generated text should")
+    print("resemble encyclopedia-style English without punctuation or caps.")
 
 
 if __name__ == "__main__":

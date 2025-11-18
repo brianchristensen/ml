@@ -22,7 +22,7 @@ from torch.utils.data import Dataset, DataLoader
 import time
 import numpy as np
 
-from phase_attention import PhaseAttentionLM
+from novel_attention import NovelAttentionLM
 
 
 # Special tokens
@@ -242,8 +242,8 @@ def evaluate(model, dataloader, device):
             inputs = batch['input'].to(device)
             targets = batch['target'].to(device)
 
-            # Forward
-            logits = model(inputs, targets)
+            # Forward WITHOUT teacher forcing during eval!
+            logits = model(inputs)  # Don't pass targets!
             predictions = logits.argmax(dim=-1)
 
             # Check accuracy only at query positions (non-PAD targets)
@@ -326,7 +326,7 @@ def main():
     n_pairs = 20  # Number of key-value pairs to store
     n_queries = 5  # Number of queries per sequence
     batch_size = 32
-    n_epochs = 40  # Train longer since it's still improving
+    n_epochs = 60  # Train even longer for this challenging task
 
     seq_len = n_pairs * 2 + n_queries * 2  # keys + values + queries
 
@@ -406,10 +406,14 @@ def main():
     print("=" * 80)
     print()
 
-    phase_model = PhaseAttentionLM(
+    phase_model = NovelAttentionLM(
         vocab_size=vocab_size,
         dim=512,
-        hidden_dim=512,
+        hidden_dim=1024,
+        num_heads=8,
+        num_channels=512,  # Very high capacity - one channel per possible unique binding
+        num_layers=6,      # Deep stack for expressiveness
+        top_k_routing=4,   # Ultra-sparse routing for sharp selectivity
         max_len=1000,
         device=device
     ).to(device)

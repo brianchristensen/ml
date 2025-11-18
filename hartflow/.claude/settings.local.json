@@ -21,7 +21,12 @@
       "Bash(python model_hrr_trm_agi.py:*)",
       "Bash(python:*)",
       "Bash(timeout 300 python -c:*)",
-      "Bash(timeout 30 python:*)"
+      "Bash(timeout 30 python:*)",
+      "Bash(timeout 300 python:*)",
+      "Bash(cat:*)",
+      "Bash(timeout 600 python:*)",
+      "Bash(pkill:*)",
+      "Bash(timeout:*)"
     ],
     "deny": [],
     "ask": []

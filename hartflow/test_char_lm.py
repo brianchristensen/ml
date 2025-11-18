@@ -1,11 +1,11 @@
 """
-Character-Level Language Modeling: Phase Attention vs Transformer
+Character-Level Language Modeling: Novel Attention vs Transformer
 
 Dataset: enwik8 (Wikipedia dump, first 100M characters)
 Task: Predict next character given previous context
 Metric: Bits per character (BPC) - lower is better
 
-Tests whether phase attention can model real language structure.
+Tests whether novel attention can model real language structure.
 """
 
 import torch
@@ -19,7 +19,7 @@ import os
 import urllib.request
 import zipfile
 
-from phase_attention import PhaseAttentionLM
+from novel_attention import NovelAttentionLM
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
@@ -266,7 +266,7 @@ def evaluate(model, dataloader, device):
 
 def main():
     print("=" * 80)
-    print("Character-Level Language Modeling: Phase Attention vs Transformer")
+    print("Character-Level Language Modeling: Novel Attention vs Transformer")
     print("=" * 80)
     print()
 
@@ -279,7 +279,7 @@ def main():
     vocab_size = 256  # All possible bytes
     seq_len = 256     # Context length
     batch_size = 32
-    n_epochs = 10
+    n_epochs = 10     # Train longer
     n_chars = 10_000_000  # Use 10M chars for quick testing (full enwik8 = 100M)
 
     # Download and load data
@@ -372,63 +372,67 @@ def main():
     # print()
 
     # ========================================================================
-    # Phase Attention Model
+    # Novel Attention Model
     # ========================================================================
 
     print("=" * 80)
-    print("Training Single-Layer Phase Attention")
+    print("Training Single-Layer Novel Attention")
     print("=" * 80)
     print()
 
-    phase_model = PhaseAttentionLM(
+    novel_model = NovelAttentionLM(
         vocab_size=vocab_size,
         dim=512,
-        hidden_dim=256,
+        hidden_dim=1024,      # Increased FFN capacity
+        num_heads=8,
+        num_channels=128,     # More channels for better capacity
+        num_layers=4,         # More layers for depth
+        top_k_routing=32,     # Sparse routing
         max_len=seq_len,
         device=device
     ).to(device)
 
-    print(f"Parameters: {phase_model.count_parameters():,}")
+    print(f"Parameters: {novel_model.count_parameters():,}")
     print()
 
-    optimizer_phase = optim.AdamW(phase_model.parameters(), lr=3e-3)
+    optimizer_novel = optim.AdamW(novel_model.parameters(), lr=3e-3)
 
-    best_val_bpc_phase = float('inf')
+    best_val_bpc_novel = float('inf')
     for epoch in range(n_epochs):
         print(f"Epoch {epoch+1}/{n_epochs}")
-        train_loss = train_epoch(phase_model, train_loader, optimizer_phase, criterion, device)
-        val_bpc = evaluate(phase_model, val_loader, device)
+        train_loss = train_epoch(novel_model, train_loader, optimizer_novel, criterion, device)
+        val_bpc = evaluate(novel_model, val_loader, device)
 
         train_bpc = train_loss / math.log(2)
 
         print(f"Train BPC: {train_bpc:.4f} - Val BPC: {val_bpc:.4f}")
         print()
 
-        if val_bpc < best_val_bpc_phase:
-            best_val_bpc_phase = val_bpc
+        if val_bpc < best_val_bpc_novel:
+            best_val_bpc_novel = val_bpc
             # Save best model
             torch.save({
                 'epoch': epoch + 1,
-                'model_state_dict': phase_model.state_dict(),
-                'optimizer_state_dict': optimizer_phase.state_dict(),
-                'best_val_bpc': best_val_bpc_phase,
-            }, 'phase_attention_charlm.pt')
-            print(f"  Saved best model (Val BPC: {best_val_bpc_phase:.4f})")
+                'model_state_dict': novel_model.state_dict(),
+                'optimizer_state_dict': optimizer_novel.state_dict(),
+                'best_val_bpc': best_val_bpc_novel,
+            }, 'novel_attention_charlm.pt')
+            print(f"  Saved best model (Val BPC: {best_val_bpc_novel:.4f})")
 
     # Test
-    test_bpc_phase = evaluate(phase_model, test_loader, device)
-    print(f"Final Test BPC: {test_bpc_phase:.4f}")
+    test_bpc_novel = evaluate(novel_model, test_loader, device)
+    print(f"Final Test BPC: {test_bpc_novel:.4f}")
     print()
 
     # Save final model
     torch.save({
         'epoch': n_epochs,
-        'model_state_dict': phase_model.state_dict(),
-        'optimizer_state_dict': optimizer_phase.state_dict(),
-        'best_val_bpc': best_val_bpc_phase,
-        'test_bpc': test_bpc_phase,
-    }, 'phase_attention_charlm_final.pt')
-    print("Saved final model to phase_attention_charlm_final.pt")
+        'model_state_dict': novel_model.state_dict(),
+        'optimizer_state_dict': optimizer_novel.state_dict(),
+        'best_val_bpc': best_val_bpc_novel,
+        'test_bpc': test_bpc_novel,
+    }, 'novel_attention_charlm_final.pt')
+    print("Saved final model to novel_attention_charlm_final.pt")
     print()
 
     # ========================================================================
@@ -443,7 +447,7 @@ def main():
     print(f"{'Model':<30} {'Parameters':>12} {'Best Val BPC':>14} {'Test BPC':>12}")
     print("-" * 80)
     # print(f"{'Transformer (1 layer)':<30} {transformer.count_parameters():>12,} {best_val_bpc_tf:>14.4f} {test_bpc_tf:>12.4f}")
-    print(f"{'Phase Attention (1 layer)':<30} {phase_model.count_parameters():>12,} {best_val_bpc_phase:>14.4f} {test_bpc_phase:>12.4f}")
+    print(f"{'Novel Attention (1 layer)':<30} {novel_model.count_parameters():>12,} {best_val_bpc_novel:>14.4f} {test_bpc_novel:>12.4f}")
     print()
 
     print("Notes:")
@@ -453,10 +457,10 @@ def main():
     print("- State-of-art (deep models): ~1.0 BPC")
     print()
 
-    # if test_bpc_phase < test_bpc_tf:
-    #     print(f"Phase Attention WINS: {test_bpc_tf - test_bpc_phase:.4f} BPC better")
-    # elif test_bpc_phase > test_bpc_tf:
-    #     print(f"Transformer WINS: {test_bpc_phase - test_bpc_tf:.4f} BPC better")
+    # if test_bpc_novel < test_bpc_tf:
+    #     print(f"Novel Attention WINS: {test_bpc_tf - test_bpc_novel:.4f} BPC better")
+    # elif test_bpc_novel > test_bpc_tf:
+    #     print(f"Transformer WINS: {test_bpc_novel - test_bpc_tf:.4f} BPC better")
     # else:
     #     print("TIE!")
 

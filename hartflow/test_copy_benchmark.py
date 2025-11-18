@@ -16,7 +16,7 @@ import time
 from typing import List, Tuple
 import numpy as np
 
-from phase_attention import PhaseAttentionLM
+from novel_attention import NovelAttentionLM
 
 
 # ============================================================================
@@ -335,7 +335,7 @@ def main():
     print("=" * 80)
     print()
 
-    phase_model = PhaseAttentionLM(
+    phase_model = NovelAttentionLM(
         vocab_size=vocab_size,
         dim=512,
         hidden_dim=512,

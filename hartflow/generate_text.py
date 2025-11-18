@@ -1,14 +1,14 @@
 """
-Autoregressive Text Generation with Phase Attention
+Autoregressive Text Generation with Novel Attention
 
-Loads a trained phase attention model and generates text character-by-character
+Loads a trained novel attention model and generates text character-by-character
 to verify it has learned coherent language patterns.
 """
 
 import torch
 import torch.nn as nn
 import numpy as np
-from phase_attention import PhaseAttentionLM
+from novel_attention import NovelAttentionLM
 
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -57,7 +57,7 @@ def generate_text(model, seed_text: str, length: int = 500, temperature: float =
     Generate text autoregressively from a seed.
 
     Args:
-        model: Trained PhaseAttentionLM
+        model: Trained NovelAttentionLM
         seed_text: Initial text to condition on
         length: Number of characters to generate
         temperature: Sampling temperature (higher = more random)
@@ -172,32 +172,36 @@ def generate_with_top_k(model, seed_text: str, length: int = 500,
 
 
 def test_generation():
-    """Test generation with various seeds, comparing Transformer vs Phase Attention."""
+    """Test generation with various seeds, comparing Transformer vs Novel Attention."""
     print("=" * 80)
-    print("Side-by-Side Generation Comparison: Transformer vs Phase Attention")
+    print("Side-by-Side Generation Comparison: Transformer vs Novel Attention")
     print("=" * 80)
     print()
 
-    # Load Phase Attention model
-    print("Loading Phase Attention model...")
+    # Load Novel Attention model
+    print("Loading Novel Attention model...")
 
     try:
-        checkpoint = torch.load('phase_attention_charlm.pt', map_location=device)
+        checkpoint = torch.load('novel_attention_charlm_final.pt', map_location=device)
 
-        phase_model = PhaseAttentionLM(
+        novel_model = NovelAttentionLM(
             vocab_size=256,
             dim=512,
-            hidden_dim=256,
+            hidden_dim=1024,      # Match saved model from test_char_lm.py
+            num_heads=8,
+            num_channels=128,     # Match saved model
+            num_layers=4,         # Match saved model
+            top_k_routing=32,     # Match saved model
             max_len=256,
             device=device
         ).to(device)
 
-        phase_model.load_state_dict(checkpoint['model_state_dict'])
-        phase_bpc = checkpoint.get('best_val_bpc', '?')
-        print(f"Loaded Phase Attention (Val BPC: {phase_bpc:.4f})")
+        novel_model.load_state_dict(checkpoint['model_state_dict'])
+        novel_bpc = checkpoint.get('best_val_bpc', '?')
+        print(f"Loaded Novel Attention (Val BPC: {novel_bpc:.4f})")
     except FileNotFoundError:
-        print("No Phase Attention model found!")
-        phase_model = None
+        print("No Novel Attention model found!")
+        novel_model = None
 
     # Load Transformer model
     print("Loading Transformer model...")
@@ -218,7 +222,7 @@ def test_generation():
         print("No Transformer model found!")
         transformer = None
 
-    if phase_model is None and transformer is None:
+    if novel_model is None and transformer is None:
         print("\nERROR: No models found! Train them first with test_char_lm.py")
         return
 
@@ -245,10 +249,10 @@ def test_generation():
             generate_with_top_k(transformer, seed, length=150, temperature=0.8, top_k=40)
             print()
 
-        if phase_model is not None:
+        if novel_model is not None:
             print("PHASE ATTENTION:")
             print("-" * 80)
-            generate_with_top_k(phase_model, seed, length=150, temperature=0.8, top_k=40)
+            generate_with_top_k(novel_model, seed, length=150, temperature=0.8, top_k=40)
             print()
 
     print("\n" + "=" * 80)
@@ -260,11 +264,11 @@ def test_generation():
     print("- Compare patterns: Which learned better letter/word combinations?")
     print("- Compare creativity: Which has more variety vs repetition?")
     print()
-    if phase_model and transformer:
-        print(f"Phase Attention BPC: {phase_bpc:.4f}")
+    if novel_model and transformer:
+        print(f"Novel Attention BPC: {novel_bpc:.4f}")
         print(f"Transformer BPC: {tf_bpc:.4f}")
-        if isinstance(phase_bpc, float) and isinstance(tf_bpc, float):
-            ratio = tf_bpc / phase_bpc
+        if isinstance(novel_bpc, float) and isinstance(tf_bpc, float):
+            ratio = tf_bpc / novel_bpc
             print(f"BPC Ratio: {ratio:.1f}× (does generation quality match?)")
 
 
