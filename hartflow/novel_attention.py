@@ -474,9 +474,7 @@ if __name__ == "__main__":
     # Create tiny model
     model = NovelAttentionLM(
         vocab_size=100,
-        dim=64,
-        hidden_dim=256,
-        num_heads=4,
+        dim=32,
         num_layers=2,
         device='cpu'
     )
