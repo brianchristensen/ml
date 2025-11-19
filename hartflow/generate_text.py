@@ -186,13 +186,8 @@ def test_generation():
 
         novel_model = NovelAttentionLM(
             vocab_size=256,
-            dim=512,
-            hidden_dim=1024,      # Match saved model from test_char_lm.py
-            num_heads=8,
-            num_channels=128,     # Match saved model
-            num_layers=4,         # Match saved model
-            top_k_routing=32,     # Match saved model
-            max_len=256,
+            dim=128,
+            num_layers=8,
             device=device
         ).to(device)
 

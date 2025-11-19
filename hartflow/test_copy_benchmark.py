@@ -337,9 +337,9 @@ def main():
 
     phase_model = NovelAttentionLM(
         vocab_size=vocab_size,
-        dim=512,
-        hidden_dim=512,
-        max_len=10000,  # Support long sequences
+        dim=256,
+        hidden_dim=256,
+        num_layers=1,  # Single layer to match baseline
         device=device
     ).to(device)
 

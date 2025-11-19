@@ -408,13 +408,9 @@ def main():
 
     phase_model = NovelAttentionLM(
         vocab_size=vocab_size,
-        dim=512,
-        hidden_dim=1024,
-        num_heads=8,
-        num_channels=512,  # Very high capacity - one channel per possible unique binding
-        num_layers=6,      # Deep stack for expressiveness
-        top_k_routing=4,   # Ultra-sparse routing for sharp selectivity
-        max_len=1000,
+        dim=256,
+        hidden_dim=256,
+        num_layers=1,      # Single layer to match baseline
         device=device
     ).to(device)
 

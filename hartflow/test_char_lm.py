@@ -279,7 +279,7 @@ def main():
     vocab_size = 256  # All possible bytes
     seq_len = 256     # Context length
     batch_size = 32
-    n_epochs = 10     # Train longer
+    n_epochs = 5     # Train longer
     n_chars = 10_000_000  # Use 10M chars for quick testing (full enwik8 = 100M)
 
     # Download and load data
@@ -382,13 +382,8 @@ def main():
 
     novel_model = NovelAttentionLM(
         vocab_size=vocab_size,
-        dim=512,
-        hidden_dim=1024,      # Increased FFN capacity
-        num_heads=8,
-        num_channels=128,     # More channels for better capacity
-        num_layers=4,         # More layers for depth
-        top_k_routing=32,     # Sparse routing
-        max_len=seq_len,
+        dim=128,
+        num_layers=20,
         device=device
     ).to(device)
 
@@ -446,8 +441,8 @@ def main():
 
     print(f"{'Model':<30} {'Parameters':>12} {'Best Val BPC':>14} {'Test BPC':>12}")
     print("-" * 80)
-    # print(f"{'Transformer (1 layer)':<30} {transformer.count_parameters():>12,} {best_val_bpc_tf:>14.4f} {test_bpc_tf:>12.4f}")
-    print(f"{'Novel Attention (1 layer)':<30} {novel_model.count_parameters():>12,} {best_val_bpc_novel:>14.4f} {test_bpc_novel:>12.4f}")
+    # print(f"{'Transformer':<30} {transformer.count_parameters():>12,} {best_val_bpc_tf:>14.4f} {test_bpc_tf:>12.4f}")
+    print(f"{'Novel Attention':<30} {novel_model.count_parameters():>12,} {best_val_bpc_novel:>14.4f} {test_bpc_novel:>12.4f}")
     print()
 
     print("Notes:")
