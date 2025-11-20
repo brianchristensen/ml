@@ -90,11 +90,8 @@ class TemporalPhaseIntegration(nn.Module):
 
         self.dim = dim
 
-        # SEMANTIC TRAJECTORY + QUERY OFFSET (associative recall!)
-        # Single coherent semantic trajectory + learned content-based query offset
-        # Store at phi, retrieve from phi + learned_offset(content)
+        # SEMANTIC TRAJECTORY + PHASE INIT
         self.to_omega = nn.Linear(dim, dim)           # Semantic trajectory
-        self.to_query_offset = nn.Linear(dim, dim)    # Content-based query offset
         self.to_phase_init = nn.Linear(dim, dim)      # Content-based phase initialization
 
         # Learnable integration scale per dimension
@@ -132,10 +129,8 @@ class TemporalPhaseIntegration(nn.Module):
         """
         batch_size, seq_len, dim = x.shape
 
-        # SEMANTIC TRAJECTORY + QUERY OFFSET
+        # SEMANTIC TRAJECTORY
         # =====================================================================
-        # omega: semantic trajectory (where content naturally lives)
-        # query_offset: content-based offset to seek relevant content
         omega = self.to_omega(x)  # [batch, seq, dim]
 
         # Content-dependent MAGNITUDE (importance weighting)
@@ -143,25 +138,17 @@ class TemporalPhaseIntegration(nn.Module):
         magnitude_scale = 5.0  # Make memory contributions strong enough to matter
         magnitude = torch.sigmoid(self.to_magnitude(x)) * magnitude_scale
 
-        # No multi-head reshaping - keep as [batch, seq_len, dim]
-
-        # Content-based phase initialization (maps content to phase regions)
+        # PHASE INTEGRATION (with init, no query offset)
+        # =====================================================================
+        # Content-based phase initialization
         phi_init = self.to_phase_init(x)  # [batch, seq, dim]
 
-        # PHASE INTEGRATION with CONTENT-BASED QUERY
-        # =====================================================================
-        # phi: content-based location + semantic trajectory (storage)
-        # phi_query: phi + learned offset (retrieval)
         omega_scaled = omega * self.integration_scale.abs()
         phi = phi_init + torch.cumsum(omega_scaled, dim=1)  # [batch, seq_len, dim]
 
-        # Content-based query offset enables associative recall
-        query_offset = self.to_query_offset(x)  # [batch, seq, dim]
-        phi_query = phi + query_offset  # Query from offset position
-
-        # Convert query phase to complex trajectory
-        trajectory_real = torch.cos(phi_query)
-        trajectory_imag = torch.sin(phi_query)
+        # Convert phase to complex trajectory
+        trajectory_real = torch.cos(phi)
+        trajectory_imag = torch.sin(phi)
 
         # PHASE-COHERENT MEMORY: Holographic storage via complex interference
         # Store using semantic phase (where content naturally lives)
@@ -183,16 +170,14 @@ class TemporalPhaseIntegration(nn.Module):
         memory_real = memory_real / (accumulated_magnitude + 1e-8)
         memory_imag = memory_imag / (accumulated_magnitude + 1e-8)
 
-        # ASSOCIATIVE RETRIEVAL: Query with learned offset!
-        # Multiply memory by conjugate of query phase (phi + offset)
-        # Model learns offset to retrieve from elsewhere in phase space
-        # This enables: "capital of France" → offset seeks Paris
-        cos_phi_query = torch.cos(phi_query)
-        sin_phi_query = torch.sin(phi_query)
+        # RETRIEVAL: Query using same phase (with init, no offset)
+        # Multiply memory by conjugate of phase
+        cos_phi = torch.cos(phi)
+        sin_phi = torch.sin(phi)
 
-        # Complex multiplication: memory * conj(exp(i*phi_query)) = memory * exp(-i*phi_query)
-        retrieved_real = memory_real * cos_phi_query + memory_imag * sin_phi_query
-        retrieved_imag = memory_imag * cos_phi_query - memory_real * sin_phi_query
+        # Complex multiplication: memory * conj(exp(i*phi)) = memory * exp(-i*phi)
+        retrieved_real = memory_real * cos_phi + memory_imag * sin_phi
+        retrieved_imag = memory_imag * cos_phi - memory_real * sin_phi
 
         # No reshaping needed - already [batch, seq_len, dim]
 
@@ -215,13 +200,11 @@ class TemporalPhaseIntegration(nn.Module):
         phase_contribution = self.to_out(context)
 
         # RESIDUAL CONNECTION: Add phase modifications to original content
-        # This is the correct pattern: x + f(x)
         # - Can't bypass phase mechanism (no shortcut)
         # - But preserves information through residual
         # - Phase mechanism must learn USEFUL modifications
         output = x + phase_contribution
 
-        # Bare bones - no diversity tracking
         return output
 
 
@@ -247,7 +230,7 @@ class TPIBlock(nn.Module):
         Returns:
             x: [batch, seq_len, dim]
         """
-        # Temporal phase integration only
+        # Temporal phase integration
         x = x + self.integration(self.norm(x))
 
         return x
@@ -281,7 +264,7 @@ class NovelAttentionLM(nn.Module):
         vocab_size,
         dim=512,
         num_layers=4,
-        max_len=2048,  # Reasonable default for sinusoidal
+        max_len=2048,  # default for sinusoidal position embedding
         device='cuda'
     ):
         super().__init__()
