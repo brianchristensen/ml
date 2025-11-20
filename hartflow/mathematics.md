@@ -55,6 +55,8 @@ M_real,t = [Σᵢ₌₁ᵗ (m_i · xᵢ · cos(φᵢ))] / [Σᵢ₌₁ᵗ m_i]
 M_imag,t = [Σᵢ₌₁ᵗ (m_i · xᵢ · sin(φᵢ))] / [Σᵢ₌₁ᵗ m_i]
 ```
 
+#### Accumulated Memories per Position
+
 Each token position stores the accumulated sum of all previous tokens
 
 Token-by-Token Breakdown
@@ -64,6 +66,15 @@ Position 2: memory₂ = m₁·x₁·e^(iφ₁) + m₂·x₂·e^(iφ₂)
 Position 3: memory₃ = m₁·x₁·e^(iφ₁) + m₂·x₂·e^(iφ₂) + m₃·x₃·e^(iφ₃)
 ...
 Position t: memory_t = Σᵢ₌₁ᵗ mᵢ·xᵢ·e^(iφᵢ)
+
+When we query at position t:
+retrieved_t = memory_t * e^(-iφ_t)
+
+We're querying the entire accumulated memory up to position t, and interference picks out the relevant content based on phase alignment
+
+TPI doesn't store individual token memories
+
+It stores a single evolving holographic trace that continuously accumulates all previous tokens, weighted by their phases.
 
 **Key Features:**
 - **Normalization by Σm_i:** Prevents unbounded memory growth
