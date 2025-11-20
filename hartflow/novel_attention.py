@@ -85,12 +85,10 @@ class TemporalPhaseIntegration(nn.Module):
     This is the TRUE paradigm shift: Complex interference for semantic binding!
     """
 
-    def __init__(self, dim, num_heads=4):
+    def __init__(self, dim):
         super().__init__()
 
         self.dim = dim
-        self.num_heads = num_heads
-        self.head_dim = dim // num_heads
 
         # SEMANTIC-TO-FREQUENCY MAPPING (Geometric Approach)
         # Project to 2D semantic space, then compute angle as frequency
@@ -159,10 +157,7 @@ class TemporalPhaseIntegration(nn.Module):
         magnitude_scale = 5.0  # Make memory contributions strong enough to matter
         magnitude = torch.sigmoid(self.to_magnitude(x)) * magnitude_scale
 
-        # Reshape for multi-head: [batch, seq_len, num_heads, head_dim]
-        # Each head can learn different semantic frequency patterns
-        omega = omega.view(batch_size, seq_len, self.num_heads, self.head_dim)
-        magnitude = magnitude.view(batch_size, seq_len, self.num_heads, self.head_dim)
+        # No multi-head reshaping - keep as [batch, seq_len, dim]
 
         # PHASE INTEGRATION: Integrate frequency over time
         # =====================================================================
@@ -184,8 +179,7 @@ class TemporalPhaseIntegration(nn.Module):
 
         # PHASE-COHERENT MEMORY: Holographic storage via complex interference
         # Weight content by learned magnitude (importance)
-        x_heads = x.view(batch_size, seq_len, self.num_heads, self.head_dim)
-        weighted_content = magnitude * x_heads
+        weighted_content = magnitude * x
 
         # Accumulate weighted content in complex space with phase encoding
         # This creates distributed holographic memory where phase determines retrieval
@@ -214,11 +208,7 @@ class TemporalPhaseIntegration(nn.Module):
         retrieved_real = memory_real * cos_phi + memory_imag * sin_phi
         retrieved_imag = memory_imag * cos_phi - memory_real * sin_phi
 
-        # Reshape everything back: [batch, seq_len, dim]
-        trajectory_real = trajectory_real.reshape(batch_size, seq_len, dim)
-        trajectory_imag = trajectory_imag.reshape(batch_size, seq_len, dim)
-        retrieved_real = retrieved_real.reshape(batch_size, seq_len, dim)
-        retrieved_imag = retrieved_imag.reshape(batch_size, seq_len, dim)
+        # No reshaping needed - already [batch, seq_len, dim]
 
         # CONTENT-CONTEXT BINDING: Multiplicative interaction with trajectory
         # This preserves semantic content while modulating it with phase context
@@ -282,11 +272,11 @@ class TPIBlock(nn.Module):
     With:     LayerNorm -> TPI -> LayerNorm -> FFN
     """
 
-    def __init__(self, dim, num_heads=4, hidden_dim=2048, dropout=0.1):
+    def __init__(self, dim, hidden_dim=2048, dropout=0.1):
         super().__init__()
 
         self.norm1 = nn.LayerNorm(dim)
-        self.integration = TemporalPhaseIntegration(dim, num_heads=num_heads)
+        self.integration = TemporalPhaseIntegration(dim)
 
         self.norm2 = nn.LayerNorm(dim)
         self.ffn = FeedForward(dim, hidden_dim, dropout)
@@ -334,7 +324,6 @@ class NovelAttentionLM(nn.Module):
         self,
         vocab_size,
         dim=512,
-        num_heads=4,
         num_layers=4,
         max_len=2048,  # Reasonable default for sinusoidal
         device='cuda',
@@ -354,12 +343,11 @@ class NovelAttentionLM(nn.Module):
         # Sinusoidal positional encoding (no parameters!)
         self.register_buffer('pos_encoding', self._create_sinusoidal_encoding(max_len, dim))
 
-        # Stack of TPI blocks
+        # Stack of TPI blocks - single head only
         # No FFN expansion - hidden_dim = dim (network is already non-linear)
         self.blocks = nn.ModuleList([
             TPIBlock(
                 dim=dim,
-                num_heads=num_heads,
                 hidden_dim=dim,  # Same as dim - no expansion
                 dropout=dropout
             )

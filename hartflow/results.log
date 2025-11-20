@@ -1,237 +1,36 @@
-#8L/256D Learned positional encoding (same as transformer):
-================================================================================
-Results Summary
-================================================================================
+=== Phase Statistics (seq_len=2000) ===
+omega: mean=-0.0258, std=1.8526, max=3.1416
+phi_raw: mean=-15.61, std=582.31, max=2643.74
+phi_bounded: mean=0.10, std=9.82, max=10.00
+Saturation: 93.5% of positions have |phi| > 9.5
+phi by position: [0]=0.33, [250]=10.00, [500]=10.00, [-1]=-10.00
 
-Model                            Parameters   Best Val BPC     Test BPC
---------------------------------------------------------------------------------
-Novel Attention                   9,675,520         2.0640       2.1306
-================================================================================
-Test 1/3: The capital of France is
-================================================================================
+=== Phase Statistics (seq_len=2000) ===
+omega: mean=-0.0510, std=1.7918, max=3.1416
+phi_raw: mean=-43.08, std=558.39, max=2408.39
+phi_bounded: mean=-0.50, std=9.78, max=10.00
+Saturation: 92.8% of positions have |phi| > 9.5
+phi by position: [0]=0.16, [250]=-9.86, [500]=10.00, [-1]=10.00
 
-TRANSFORMER:
---------------------------------------------------------------------------------
-Seed: The capital of France is
-Generating 150 characters (top-k=40)...
+=== Phase Statistics (seq_len=2000) ===
+omega: mean=0.0317, std=1.7905, max=3.1416
+phi_raw: mean=37.58, std=537.87, max=2585.16
+phi_bounded: mean=0.34, std=9.74, max=10.00
+Saturation: 91.4% of positions have |phi| > 9.5
+phi by position: [0]=0.45, [250]=-10.00, [500]=-10.00, [-1]=-10.00
 
-================================================================================
- the [[Mescal of Nhe Natural Philip]] of the [[Mount (LITS N-0,400 (2002)|School College in A.C. Carolina Battle,&quot;, and scription of the Island H
-================================================================================
+=== Phase Statistics (seq_len=2000) ===
+omega: mean=-0.0574, std=1.8172, max=3.1416
+phi_raw: mean=-31.67, std=487.77, max=2662.44
+phi_bounded: mean=-0.67, std=9.73, max=10.00
+Saturation: 91.3% of positions have |phi| > 9.5
+phi by position: [0]=0.06, [250]=-9.97, [500]=-9.97, [-1]=-10.00
 
-PHASE ATTENTION:
---------------------------------------------------------------------------------
-Seed: The capital of France is
-Generating 150 characters (top-k=40)...
-
-================================================================================
-loanchancheanced eano urlveavedlliphestcaseseedirgas nsceanzewoapppesirgaweewlleogaph, and aveschist occapals thempetrers and strike [[Drestlessis]] a
-================================================================================
-
-
-================================================================================
-Test 2/3: In the year 1776
-================================================================================
-
-TRANSFORMER:
---------------------------------------------------------------------------------
-Seed: In the year 1776
-Generating 150 characters (top-k=40)...
-
-================================================================================
-f cast of exuscious of the name, central can exception to be about composition of symptoms largest equires required.
-
-A
-
-[[Ca
-================================================================================
-
-PHASE ATTENTION:
---------------------------------------------------------------------------------
-Seed: In the year 1776
-Generating 150 characters (top-k=40)...
-
-================================================================================
-]]]]]]]]]]]]]]]]
-|y -chththththtchted isead ppeveasilched ndotces jirrnces ay Coy_eglincarcafo igrcan.nvetscriptus|335 Panterowler]
-* [[http://www.tau
-================================================================================
-
-
-================================================================================
-Test 3/3: Albert Einstein was
-================================================================================
-
-TRANSFORMER:
---------------------------------------------------------------------------------
-Seed: Albert Einstein was
-Generating 150 characters (top-k=40)...
-
-================================================================================
- only after of the [[Arabs ten]] is 111, 1998 arm and the was are made action of [[Mad Lest Salat Joe and Australia]].  Constant none discontinued and
-================================================================================
-
-PHASE ATTENTION:
---------------------------------------------------------------------------------
-Seed: Albert Einstein was
-Generating 150 characters (top-k=40)...
-
-================================================================================
-hthtchthththth ais athatrad ans adochenowasevesthemirrsippheastcraseaseafoastalllishes.oocosth.cedy.st]]]
-&amp;nbasles Absume of Alliein characteris o
-
-#8L/128D No positional encoding at all:
-================================================================================
-Results Summary
-================================================================================
-
-Model                            Parameters   Best Val BPC     Test BPC
---------------------------------------------------------------------------------
-Novel Attention                   1,255,936         2.4154       2.4716
-================================================================================
-Test 1/3: The capital of France is
-================================================================================
-
-TRANSFORMER:
---------------------------------------------------------------------------------
-Seed: The capital of France is
-Generating 150 characters (top-k=40)...
-
-================================================================================
- of the sources the [[French (combine of Regions in Parament]]), became of an [[Battle of George (contral presidential and Hebrewor's [[Erie War I]])
-================================================================================
-
-PHASE ATTENTION:
---------------------------------------------------------------------------------
-Seed: The capital of France is
-Generating 150 characters (top-k=40)...
-
-================================================================================
- revertery.]] It anccommpanied to reseserment anand art lurganish for a exammion, with by the Houngas land twer conlummsition of the e [[Commber North
-================================================================================
-
-
-================================================================================
-Test 2/3: In the year 1776
-================================================================================
-
-TRANSFORMER:
---------------------------------------------------------------------------------
-Seed: In the year 1776
-Generating 150 characters (top-k=40)...
-
-================================================================================
- hids]], alphabet associate and that it is not consult to debated by source was to his protect the attempted the [[Mediteral Article dalliance]].
-
-==B
-================================================================================
-
-PHASE ATTENTION:
---------------------------------------------------------------------------------
-Seed: In the year 1776
-Generating 150 characters (top-k=40)...
-
-================================================================================
- f and cotaniew|fict ordeverticing ruseries]], withe oppeates andicredy spaierd addossiting to orde that to under inffeicilng and battriogies.  It who
-================================================================================
-
-
-================================================================================
-Test 3/3: Albert Einstein was
-================================================================================
-
-TRANSFORMER:
---------------------------------------------------------------------------------
-Seed: Albert Einstein was
-Generating 150 characters (top-k=40)...
-
-================================================================================
- train icent to Helless of polities in a rand.''&quot; however, began meand goes are square though as requille of the praction with his translations a
-================================================================================
-
-PHASE ATTENTION:
---------------------------------------------------------------------------------
-Seed: Albert Einstein was
-Generating 150 characters (top-k=40)...
-
-================================================================================
- Alexanderded Buesstideiain]] andrt, and as a feampsion an of [[[Arascarian (Atorts)|IRP]]. Priver at reverated as a commmunits of other preaters of A
-
-#8L/128D Sinusoidal Positioning
-================================================================================
-Results Summary
-================================================================================
-
-Model                            Parameters   Best Val BPC     Test BPC
---------------------------------------------------------------------------------
-Novel Attention                   1,255,936         2.3586       2.4190
-================================================================================
-Test 1/3: The capital of France is
-================================================================================
-
-TRANSFORMER:
---------------------------------------------------------------------------------
-Seed: The capital of France is
-Generating 150 characters (top-k=40)...
-
-================================================================================
- specific languages for the 1970s are and some to any language, in never to the [[Greek Lysts]]'' milles involved by Chilena major describes water and
-================================================================================
-
-PHASE ATTENTION:
---------------------------------------------------------------------------------
-Seed: The capital of France is
-Generating 150 characters (top-k=40)...
-
-================================================================================
- partned to he soilanm&quot;.  Ancifiant charactic in the couropal persance of the rapproviewate and peumpter and the led reful in this courd at [[Tro
-================================================================================
-
-
-================================================================================
-Test 2/3: In the year 1776
-================================================================================
-
-TRANSFORMER:
---------------------------------------------------------------------------------
-Seed: In the year 1776
-Generating 150 characters (top-k=40)...
-
-================================================================================
- in Argent Stucious had the &quot;inducts no product and have in a person and to be a seven emple of [[computer|film]], [[aphsala]] was the Edeland th
-================================================================================
-
-PHASE ATTENTION:
---------------------------------------------------------------------------------
-Seed: In the year 1776
-Generating 150 characters (top-k=40)...
-
-================================================================================
--1116-1675 (1193)
-* ''Andaderbroasterion''
-::* [[Canro Kiens]]
-*''[[Tagdograes (Rome]]'')
-* ''Alanian'' (engarce, ''Algusinn Alexer'') (Boughtian like
-================================================================================
-
-
-================================================================================
-Test 3/3: Albert Einstein was
-================================================================================
-
-TRANSFORMER:
---------------------------------------------------------------------------------
-Seed: Albert Einstein was
-Generating 150 characters (top-k=40)...
-
-================================================================================
- complete (Hystory of Australia and [[Mettery Secretary (formate of planer of the States).]] (pascered a startered in [[Roman Embranch the Medience]])
-================================================================================
-
-PHASE ATTENTION:
---------------------------------------------------------------------------------
-Seed: Albert Einstein was
-Generating 150 characters (top-k=40)...
-
-================================================================================
- a north rival and where in the stative experious in the Parlian Prox 1262. The ATV is used resege addomay for distory, the distorional sphiger low ea
+=== Phase Statistics (seq_len=2000) ===
+omega: mean=0.0110, std=1.8307, max=3.1416
+phi_raw: mean=-3.44, std=469.65, max=2456.63
+phi_bounded: mean=-0.51, std=9.70, max=10.00
+Saturation: 90.2% of positions have |phi| > 9.5
+phi by position: [0]=-0.69, [250]=-10.00, [500]=-10.00, [-1]=10.00
+2000                  0.0%
+5000                  0.0%
