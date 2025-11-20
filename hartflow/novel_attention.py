@@ -240,46 +240,19 @@ class TemporalPhaseIntegration(nn.Module):
 
 
 # ============================================================================
-# Feed-Forward Network
-# ============================================================================
-
-class FeedForward(nn.Module):
-    """Standard feed-forward network."""
-
-    def __init__(self, dim, hidden_dim, dropout=0.1):
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(dim, hidden_dim),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, dim),
-            nn.Dropout(dropout)
-        )
-
-    def forward(self, x):
-        return self.net(x)
-
-
-# ============================================================================
 # ATPI Block (replaces Transformer block)
 # ============================================================================
 
 class TPIBlock(nn.Module):
     """
     Temporal Phase Integration block.
-
-    Replaces: LayerNorm -> Attention -> LayerNorm -> FFN
-    With:     LayerNorm -> TPI -> LayerNorm -> FFN
     """
 
-    def __init__(self, dim, hidden_dim=2048, dropout=0.1):
+    def __init__(self, dim):
         super().__init__()
 
-        self.norm1 = nn.LayerNorm(dim)
+        self.norm = nn.LayerNorm(dim)
         self.integration = TemporalPhaseIntegration(dim)
-
-        self.norm2 = nn.LayerNorm(dim)
-        self.ffn = FeedForward(dim, hidden_dim, dropout)
 
     def forward(self, x):
         """
@@ -288,11 +261,8 @@ class TPIBlock(nn.Module):
         Returns:
             x: [batch, seq_len, dim]
         """
-        # Temporal phase integration (replaces attention!)
-        x = x + self.integration(self.norm1(x))
-
-        # Feed-forward
-        x = x + self.ffn(self.norm2(x))
+        # Temporal phase integration only
+        x = x + self.integration(self.norm(x))
 
         return x
 
@@ -326,8 +296,7 @@ class NovelAttentionLM(nn.Module):
         dim=512,
         num_layers=4,
         max_len=2048,  # Reasonable default for sinusoidal
-        device='cuda',
-        dropout=0.1
+        device='cuda'
     ):
         super().__init__()
 
@@ -343,14 +312,9 @@ class NovelAttentionLM(nn.Module):
         # Sinusoidal positional encoding (no parameters!)
         self.register_buffer('pos_encoding', self._create_sinusoidal_encoding(max_len, dim))
 
-        # Stack of TPI blocks - single head only
-        # No FFN expansion - hidden_dim = dim (network is already non-linear)
+        # Stack of TPI blocks
         self.blocks = nn.ModuleList([
-            TPIBlock(
-                dim=dim,
-                hidden_dim=dim,  # Same as dim - no expansion
-                dropout=dropout
-            )
+            TPIBlock(dim=dim)
             for _ in range(num_layers)
         ])
 

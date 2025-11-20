@@ -1,36 +1,160 @@
-=== Phase Statistics (seq_len=2000) ===
-omega: mean=-0.0258, std=1.8526, max=3.1416
-phi_raw: mean=-15.61, std=582.31, max=2643.74
-phi_bounded: mean=0.10, std=9.82, max=10.00
-Saturation: 93.5% of positions have |phi| > 9.5
-phi by position: [0]=0.33, [250]=10.00, [500]=10.00, [-1]=-10.00
+#20L/128D
+================================================================================
+Training Single-Layer Novel Attention
+================================================================================
 
-=== Phase Statistics (seq_len=2000) ===
-omega: mean=-0.0510, std=1.7918, max=3.1416
-phi_raw: mean=-43.08, std=558.39, max=2408.39
-phi_bounded: mean=-0.50, std=9.78, max=10.00
-Saturation: 92.8% of positions have |phi| > 9.5
-phi by position: [0]=0.16, [250]=-9.86, [500]=10.00, [-1]=10.00
+Parameters: 2,375,168
 
-=== Phase Statistics (seq_len=2000) ===
-omega: mean=0.0317, std=1.7905, max=3.1416
-phi_raw: mean=37.58, std=537.87, max=2585.16
-phi_bounded: mean=0.34, std=9.74, max=10.00
-Saturation: 91.4% of positions have |phi| > 9.5
-phi by position: [0]=0.45, [250]=-10.00, [500]=-10.00, [-1]=-10.00
+Epoch 1/5
+  Batch 100/1099 - Loss: 3.5771 - BPC: 5.1606
+  Batch 200/1099 - Loss: 3.2494 - BPC: 4.6879
+  Batch 300/1099 - Loss: 3.0651 - BPC: 4.4219
+  Batch 400/1099 - Loss: 2.9516 - BPC: 4.2582
+  Batch 500/1099 - Loss: 2.8694 - BPC: 4.1397
+  Batch 600/1099 - Loss: 2.8040 - BPC: 4.0453
+  Batch 700/1099 - Loss: 2.7508 - BPC: 3.9686
+  Batch 800/1099 - Loss: 2.7055 - BPC: 3.9033
+  Batch 900/1099 - Loss: 2.6653 - BPC: 3.8452
+  Batch 1000/1099 - Loss: 2.6285 - BPC: 3.7921
+Train BPC: 3.7463 - Val BPC: 3.3060
 
-=== Phase Statistics (seq_len=2000) ===
-omega: mean=-0.0574, std=1.8172, max=3.1416
-phi_raw: mean=-31.67, std=487.77, max=2662.44
-phi_bounded: mean=-0.67, std=9.73, max=10.00
-Saturation: 91.3% of positions have |phi| > 9.5
-phi by position: [0]=0.06, [250]=-9.97, [500]=-9.97, [-1]=-10.00
+  Saved best model (Val BPC: 3.3060)
+Epoch 2/5
+  Batch 100/1099 - Loss: 2.2394 - BPC: 3.2307
+  Batch 200/1099 - Loss: 2.2279 - BPC: 3.2142
+  Batch 300/1099 - Loss: 2.2159 - BPC: 3.1969
+  Batch 400/1099 - Loss: 2.2008 - BPC: 3.1750
+  Batch 500/1099 - Loss: 2.1892 - BPC: 3.1584
+  Batch 600/1099 - Loss: 2.1781 - BPC: 3.1424
+  Batch 700/1099 - Loss: 2.1676 - BPC: 3.1271
+  Batch 800/1099 - Loss: 2.1568 - BPC: 3.1116
+  Batch 900/1099 - Loss: 2.1481 - BPC: 3.0990
+  Batch 1000/1099 - Loss: 2.1393 - BPC: 3.0863
+Train BPC: 3.0726 - Val BPC: 2.9905
 
-=== Phase Statistics (seq_len=2000) ===
-omega: mean=0.0110, std=1.8307, max=3.1416
-phi_raw: mean=-3.44, std=469.65, max=2456.63
-phi_bounded: mean=-0.51, std=9.70, max=10.00
-Saturation: 90.2% of positions have |phi| > 9.5
-phi by position: [0]=-0.69, [250]=-10.00, [500]=-10.00, [-1]=10.00
-2000                  0.0%
-5000                  0.0%
+  Saved best model (Val BPC: 2.9905)
+Epoch 3/5
+  Batch 100/1099 - Loss: 2.0126 - BPC: 2.9035
+  Batch 200/1099 - Loss: 2.0095 - BPC: 2.8990
+  Batch 300/1099 - Loss: 2.0044 - BPC: 2.8918
+  Batch 400/1099 - Loss: 1.9980 - BPC: 2.8825
+  Batch 500/1099 - Loss: 1.9923 - BPC: 2.8743
+  Batch 600/1099 - Loss: 1.9874 - BPC: 2.8671
+  Batch 700/1099 - Loss: 1.9797 - BPC: 2.8561
+  Batch 800/1099 - Loss: 1.9736 - BPC: 2.8473
+  Batch 900/1099 - Loss: 1.9691 - BPC: 2.8408
+  Batch 1000/1099 - Loss: 1.9639 - BPC: 2.8333
+Train BPC: 2.8254 - Val BPC: 2.8132
+
+  Saved best model (Val BPC: 2.8132)
+Epoch 4/5
+  Batch 100/1099 - Loss: 1.8921 - BPC: 2.7297
+  Batch 200/1099 - Loss: 1.8777 - BPC: 2.7089
+  Batch 300/1099 - Loss: 1.8762 - BPC: 2.7068
+  Batch 400/1099 - Loss: 1.8746 - BPC: 2.7045
+  Batch 500/1099 - Loss: 1.8743 - BPC: 2.7040
+  Batch 600/1099 - Loss: 1.8688 - BPC: 2.6961
+  Batch 700/1099 - Loss: 1.8628 - BPC: 2.6874
+  Batch 800/1099 - Loss: 1.8588 - BPC: 2.6817
+  Batch 900/1099 - Loss: 1.8550 - BPC: 2.6762
+  Batch 1000/1099 - Loss: 1.8525 - BPC: 2.6726
+Train BPC: 2.6667 - Val BPC: 2.6911
+
+  Saved best model (Val BPC: 2.6911)
+Epoch 5/5
+  Batch 100/1099 - Loss: 1.7836 - BPC: 2.5732
+  Batch 200/1099 - Loss: 1.7875 - BPC: 2.5788
+  Batch 300/1099 - Loss: 1.7876 - BPC: 2.5789
+  Batch 400/1099 - Loss: 1.7854 - BPC: 2.5759
+  Batch 500/1099 - Loss: 1.7853 - BPC: 2.5757
+  Batch 600/1099 - Loss: 1.7830 - BPC: 2.5723
+  Batch 700/1099 - Loss: 1.7823 - BPC: 2.5713
+  Batch 800/1099 - Loss: 1.7789 - BPC: 2.5664
+  Batch 900/1099 - Loss: 1.7762 - BPC: 2.5625
+  Batch 1000/1099 - Loss: 1.7737 - BPC: 2.5590
+Train BPC: 2.5570 - Val BPC: 2.6090
+
+  Saved best model (Val BPC: 2.6090)
+Final Test BPC: 2.6663
+
+Saved final model to novel_attention_charlm_final.pt
+
+================================================================================
+Results Summary
+================================================================================
+
+Model                            Parameters   Best Val BPC     Test BPC
+--------------------------------------------------------------------------------
+Novel Attention                   2,375,168         2.6090       2.6663
+
+================================================================================
+Test 1/3: The capital of France is
+================================================================================
+
+TRANSFORMER:
+--------------------------------------------------------------------------------
+Seed: The capital of France is
+Generating 150 characters (top-k=40)...
+
+================================================================================
+ the sender Also, Alexander human was to exploiting the became is a particle been as a god with high philosopher Arthur in continued the state of alm
+================================================================================
+
+PHASE ATTENTION:
+--------------------------------------------------------------------------------
+Seed: The capital of France is
+Generating 150 characters (top-k=40)...
+
+================================================================================
+ine are contlicus. The mady a threat of hemive resping thads in the with the learce of at some date bady motted that collos do [[flanarsity]] on latta
+================================================================================
+
+
+================================================================================
+Test 2/3: In the year 1776
+================================================================================
+
+TRANSFORMER:
+--------------------------------------------------------------------------------
+Seed: In the year 1776
+Generating 150 characters (top-k=40)...
+
+================================================================================
+. Aphrodividualists dangerous romred many of the many other the roral adventure is intelligence the as a poming the most was the ropes of coloniest at
+================================================================================
+
+PHASE ATTENTION:
+--------------------------------------------------------------------------------
+Seed: In the year 1776
+Generating 150 characters (top-k=40)...
+
+================================================================================
+0 mmaetal (3006 307). This comptition alcomed begrious and this [[soltist]] role of subjects.
+* [[Commoter]] a bought to time to mitale and and anbish
+================================================================================
+
+
+================================================================================
+Test 3/3: Albert Einstein was
+================================================================================
+
+TRANSFORMER:
+--------------------------------------------------------------------------------
+Seed: Albert Einstein was
+Generating 150 characters (top-k=40)...
+
+================================================================================
+ in were he long the [[Cuman]] the faclaim the sources it in can discoversy.
+
+After family the Rational Although the same classical to kill plant arou
+================================================================================
+
+PHASE ATTENTION:
+--------------------------------------------------------------------------------
+Seed: Albert Einstein was
+Generating 150 characters (top-k=40)...
+
+================================================================================
+t the state of the US. Can
+* [http:/www.talfac.ort/c.ag/100805.aptles]
+The rigling using the Ordice tomer instroten Afre sty from the theock, pepparat
