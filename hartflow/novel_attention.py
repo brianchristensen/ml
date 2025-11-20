@@ -90,14 +90,13 @@ class TemporalPhaseIntegration(nn.Module):
 
         self.dim = dim
 
-        # SEMANTIC-TO-FREQUENCY MAPPING (Geometric Approach)
-        # Project to 2D semantic space, then compute angle as frequency
-        # Similar semantics → similar 2D coordinates → similar angles → similar frequencies!
-        # Each dimension gets its own 2D semantic space
-        self.to_semantic_2d = nn.Linear(dim, dim * 2)  # Real and imaginary components
+        # DIRECT OMEGA PREDICTION
+        # Simpler approach: directly predict frequency from content
+        self.to_omega = nn.Linear(dim, dim)
 
-        # All heads use same frequency scale (bare bones - no multi-scale)
-        # Simplicity and speed over complexity
+        # Learnable integration scale per dimension
+        # Small initial values to prevent rapid phase accumulation
+        self.integration_scale = nn.Parameter(torch.ones(dim) * 0.001)
 
         # Content-dependent magnitude (importance weighting for memory)
         self.to_magnitude = nn.Linear(dim, dim)
@@ -109,7 +108,7 @@ class TemporalPhaseIntegration(nn.Module):
 
     def forward(self, x, return_theta=False):
         """
-        Temporal phase integration with phase-coherent memory.
+        Adaptive Temporal phase integration with phase-coherent memory.
 
         Args:
             x: [batch, seq_len, dim] token embeddings
@@ -121,36 +120,11 @@ class TemporalPhaseIntegration(nn.Module):
         """
         batch_size, seq_len, dim = x.shape
 
-        # SEMANTIC-TO-FREQUENCY MAPPING (Geometric Approach)
+        # DIRECT OMEGA PREDICTION
         # =====================================================================
-        # Key idea: Map semantic content to 2D space, use angle as frequency
-        # Similar semantics → similar 2D coordinates → similar angles → similar frequencies!
-        #
-        # Why atan2 works:
-        # 1. Preserves semantic similarity (close in embedding space → close in 2D → close angles)
-        # 2. Natural periodicity (angles wrap around circle)
-        # 3. Differentiable (atan2 has well-defined gradients)
-        # 4. Automatic clustering (similar semantics → similar angles)
-
-        # Project to 2D semantic space for each dimension
-        semantic_2d = self.to_semantic_2d(x)  # [batch, seq, dim * 2]
-        semantic_2d = semantic_2d.view(batch_size, seq_len, self.dim, 2)
-
-        # CRITICAL FIX: Normalize to unit circle to ensure full [-π, π] range utilization
-        # Without this, linear layer outputs cluster near origin → narrow angle range
-        # With normalization, every point lies on unit circle → full angular diversity!
-        semantic_2d = F.normalize(semantic_2d, p=2, dim=-1, eps=1e-8)  # [batch, seq, dim, 2]
-
-        # Extract real and imaginary components (now on unit circle)
-        real_component = semantic_2d[..., 0]  # [batch, seq, dim]
-        imag_component = semantic_2d[..., 1]  # [batch, seq, dim]
-
-        # Compute frequency as angle in 2D semantic space
-        # atan2 returns angle in [-π, π] - now utilizing FULL range!
-        omega = torch.atan2(imag_component, real_component)  # [batch, seq, dim]
-
-        # omega now encodes semantic direction in 2D space
-        # Similar semantics → similar (real, imag) → similar angles → AUTOMATIC CLUSTERING!
+        # Directly predict frequency from content (simpler than atan2 approach)
+        # Model learns what frequency patterns are useful for language
+        omega = self.to_omega(x)  # [batch, seq, dim]
 
         # Content-dependent MAGNITUDE (importance weighting)
         # Determines how strongly each token is stored in memory
@@ -159,23 +133,18 @@ class TemporalPhaseIntegration(nn.Module):
 
         # No multi-head reshaping - keep as [batch, seq_len, dim]
 
-        # PHASE INTEGRATION: Integrate frequency over time
+        # PHASE INTEGRATION: Integrate frequency over time with learnable scale
         # =====================================================================
-        # phi_t = integral(omega) = omega_0 + omega_1 + ... + omega_t
-        # This is where oscillations accumulate into phase trajectories
-        # cumsum = parallel integration (O(n) on GPU)
-        phi_raw = torch.cumsum(omega, dim=1)
-
-        # CRITICAL: Bound integrated phase to prevent unbounded growth
-        # While frequencies are bounded, their integral can grow without limit
-        # Solution: Apply smooth saturation to keep phase meaningful at long sequences
-        scale = 10.0  # Allow ~3 full rotations before saturation
-        phi_bounded = torch.tanh(phi_raw / scale) * scale
+        # phi_t = integral(omega * scale) - path integral with learned integration rate
+        # Small scale → slow accumulation → long-range position preservation
+        # No saturation - let cos/sin handle natural periodicity
+        omega_scaled = omega * self.integration_scale.abs()  # Ensure positive scale
+        phi = torch.cumsum(omega_scaled, dim=1)
 
         # Convert cumulative phase to complex trajectory
         # trajectory_t = exp(i * phi_t) - always on unit circle!
-        trajectory_real = torch.cos(phi_bounded)
-        trajectory_imag = torch.sin(phi_bounded)
+        trajectory_real = torch.cos(phi)
+        trajectory_imag = torch.sin(phi)
 
         # PHASE-COHERENT MEMORY: Holographic storage via complex interference
         # Weight content by learned magnitude (importance)
@@ -183,8 +152,8 @@ class TemporalPhaseIntegration(nn.Module):
 
         # Accumulate weighted content in complex space with phase encoding
         # This creates distributed holographic memory where phase determines retrieval
-        memory_real = torch.cumsum(weighted_content * torch.cos(phi_bounded), dim=1)
-        memory_imag = torch.cumsum(weighted_content * torch.sin(phi_bounded), dim=1)
+        memory_real = torch.cumsum(weighted_content * torch.cos(phi), dim=1)
+        memory_imag = torch.cumsum(weighted_content * torch.sin(phi), dim=1)
 
         # HOLOGRAPHIC NORMALIZATION: Prevent unbounded memory growth!
         # Track total accumulated magnitude (how many patterns stored)
@@ -201,8 +170,8 @@ class TemporalPhaseIntegration(nn.Module):
         # Multiply memory by conjugate of current phase
         # Tokens stored at similar phase → constructive interference (retrieved!)
         # Tokens at different phase → destructive interference (filtered out!)
-        cos_phi = torch.cos(phi_bounded)
-        sin_phi = torch.sin(phi_bounded)
+        cos_phi = torch.cos(phi)
+        sin_phi = torch.sin(phi)
 
         # Complex multiplication: memory * conj(exp(i*phi)) = memory * exp(-i*phi)
         retrieved_real = memory_real * cos_phi + memory_imag * sin_phi
@@ -229,7 +198,7 @@ class TemporalPhaseIntegration(nn.Module):
         phase_contribution = self.to_out(context)
 
         # RESIDUAL CONNECTION: Add phase modifications to original content
-        # This is the correct transformer pattern: x + f(x)
+        # This is the correct pattern: x + f(x)
         # - Can't bypass phase mechanism (no shortcut)
         # - But preserves information through residual
         # - Phase mechanism must learn USEFUL modifications
@@ -240,7 +209,7 @@ class TemporalPhaseIntegration(nn.Module):
 
 
 # ============================================================================
-# ATPI Block (replaces Transformer block)
+# TPI Block
 # ============================================================================
 
 class TPIBlock(nn.Module):

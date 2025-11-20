@@ -187,7 +187,7 @@ def test_generation():
         novel_model = NovelAttentionLM(
             vocab_size=256,
             dim=128,
-            num_layers=20,
+            num_layers=8,
             device=device
         ).to(device)
 
