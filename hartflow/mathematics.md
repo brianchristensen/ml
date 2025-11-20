@@ -286,7 +286,7 @@ phi_dog = phi_init(x_dog) + cumsum(omega_dog)
 # Even if x_cat ≈ x_dog, the model learns:
 phi_init(x_cat) ≠ phi_init(x_dog)  # Separation in phase space!
 
-How TPI Achieves Separation
+## How TPI Achieves Separation
 
 1. Content-Based Phase Init (phi_init):
 phi_init = W_init · x
