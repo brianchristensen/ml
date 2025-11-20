@@ -1,81 +1,80 @@
-#20L/128D
+8L/128D
 ================================================================================
 Training Single-Layer Novel Attention
 ================================================================================
 
-Parameters: 2,375,168
+Parameters: 2,959,880
 
 Epoch 1/5
-  Batch 100/1099 - Loss: 3.5771 - BPC: 5.1606
-  Batch 200/1099 - Loss: 3.2494 - BPC: 4.6879
-  Batch 300/1099 - Loss: 3.0651 - BPC: 4.4219
-  Batch 400/1099 - Loss: 2.9516 - BPC: 4.2582
-  Batch 500/1099 - Loss: 2.8694 - BPC: 4.1397
-  Batch 600/1099 - Loss: 2.8040 - BPC: 4.0453
-  Batch 700/1099 - Loss: 2.7508 - BPC: 3.9686
-  Batch 800/1099 - Loss: 2.7055 - BPC: 3.9033
-  Batch 900/1099 - Loss: 2.6653 - BPC: 3.8452
-  Batch 1000/1099 - Loss: 2.6285 - BPC: 3.7921
-Train BPC: 3.7463 - Val BPC: 3.3060
+  Batch 100/1099 - Loss: 3.2769 - BPC: 4.7276
+  Batch 200/1099 - Loss: 2.9654 - BPC: 4.2782
+  Batch 300/1099 - Loss: 2.7704 - BPC: 3.9969
+  Batch 400/1099 - Loss: 2.6283 - BPC: 3.7918
+  Batch 500/1099 - Loss: 2.5234 - BPC: 3.6405
+  Batch 600/1099 - Loss: 2.4406 - BPC: 3.5210
+  Batch 700/1099 - Loss: 2.3732 - BPC: 3.4238
+  Batch 800/1099 - Loss: 2.3176 - BPC: 3.3436
+  Batch 900/1099 - Loss: 2.2711 - BPC: 3.2764
+  Batch 1000/1099 - Loss: 2.2325 - BPC: 3.2208
+Train BPC: 3.1720 - Val BPC: 2.7217
 
-  Saved best model (Val BPC: 3.3060)
+  Saved best model (Val BPC: 2.7217)
 Epoch 2/5
-  Batch 100/1099 - Loss: 2.2394 - BPC: 3.2307
-  Batch 200/1099 - Loss: 2.2279 - BPC: 3.2142
-  Batch 300/1099 - Loss: 2.2159 - BPC: 3.1969
-  Batch 400/1099 - Loss: 2.2008 - BPC: 3.1750
-  Batch 500/1099 - Loss: 2.1892 - BPC: 3.1584
-  Batch 600/1099 - Loss: 2.1781 - BPC: 3.1424
-  Batch 700/1099 - Loss: 2.1676 - BPC: 3.1271
-  Batch 800/1099 - Loss: 2.1568 - BPC: 3.1116
-  Batch 900/1099 - Loss: 2.1481 - BPC: 3.0990
-  Batch 1000/1099 - Loss: 2.1393 - BPC: 3.0863
-Train BPC: 3.0726 - Val BPC: 2.9905
+  Batch 100/1099 - Loss: 1.8231 - BPC: 2.6302
+  Batch 200/1099 - Loss: 1.8086 - BPC: 2.6092
+  Batch 300/1099 - Loss: 1.8077 - BPC: 2.6080
+  Batch 400/1099 - Loss: 1.7986 - BPC: 2.5948
+  Batch 500/1099 - Loss: 1.7938 - BPC: 2.5879
+  Batch 600/1099 - Loss: 1.7888 - BPC: 2.5807
+  Batch 700/1099 - Loss: 1.7862 - BPC: 2.5769
+  Batch 800/1099 - Loss: 1.7801 - BPC: 2.5681
+  Batch 900/1099 - Loss: 1.7735 - BPC: 2.5587
+  Batch 1000/1099 - Loss: 1.7692 - BPC: 2.5525
+Train BPC: 2.5471 - Val BPC: 2.5423
 
-  Saved best model (Val BPC: 2.9905)
+  Saved best model (Val BPC: 2.5423)
 Epoch 3/5
-  Batch 100/1099 - Loss: 2.0126 - BPC: 2.9035
-  Batch 200/1099 - Loss: 2.0095 - BPC: 2.8990
-  Batch 300/1099 - Loss: 2.0044 - BPC: 2.8918
-  Batch 400/1099 - Loss: 1.9980 - BPC: 2.8825
-  Batch 500/1099 - Loss: 1.9923 - BPC: 2.8743
-  Batch 600/1099 - Loss: 1.9874 - BPC: 2.8671
-  Batch 700/1099 - Loss: 1.9797 - BPC: 2.8561
-  Batch 800/1099 - Loss: 1.9736 - BPC: 2.8473
-  Batch 900/1099 - Loss: 1.9691 - BPC: 2.8408
-  Batch 1000/1099 - Loss: 1.9639 - BPC: 2.8333
-Train BPC: 2.8254 - Val BPC: 2.8132
+  Batch 100/1099 - Loss: 1.7366 - BPC: 2.5053
+  Batch 200/1099 - Loss: 1.7320 - BPC: 2.4987
+  Batch 300/1099 - Loss: 1.7251 - BPC: 2.4888
+  Batch 400/1099 - Loss: 1.7148 - BPC: 2.4740
+  Batch 500/1099 - Loss: 1.7074 - BPC: 2.4633
+  Batch 600/1099 - Loss: 1.7015 - BPC: 2.4547
+  Batch 700/1099 - Loss: 1.6955 - BPC: 2.4462
+  Batch 800/1099 - Loss: 1.6906 - BPC: 2.4391
+  Batch 900/1099 - Loss: 1.6860 - BPC: 2.4324
+  Batch 1000/1099 - Loss: 1.6806 - BPC: 2.4246
+Train BPC: 2.4188 - Val BPC: 2.4681
 
-  Saved best model (Val BPC: 2.8132)
+  Saved best model (Val BPC: 2.4681)
 Epoch 4/5
-  Batch 100/1099 - Loss: 1.8921 - BPC: 2.7297
-  Batch 200/1099 - Loss: 1.8777 - BPC: 2.7089
-  Batch 300/1099 - Loss: 1.8762 - BPC: 2.7068
-  Batch 400/1099 - Loss: 1.8746 - BPC: 2.7045
-  Batch 500/1099 - Loss: 1.8743 - BPC: 2.7040
-  Batch 600/1099 - Loss: 1.8688 - BPC: 2.6961
-  Batch 700/1099 - Loss: 1.8628 - BPC: 2.6874
-  Batch 800/1099 - Loss: 1.8588 - BPC: 2.6817
-  Batch 900/1099 - Loss: 1.8550 - BPC: 2.6762
-  Batch 1000/1099 - Loss: 1.8525 - BPC: 2.6726
-Train BPC: 2.6667 - Val BPC: 2.6911
+  Batch 100/1099 - Loss: 1.6213 - BPC: 2.3390
+  Batch 200/1099 - Loss: 1.6227 - BPC: 2.3411
+  Batch 300/1099 - Loss: 1.6229 - BPC: 2.3413
+  Batch 400/1099 - Loss: 1.6185 - BPC: 2.3351
+  Batch 500/1099 - Loss: 1.6251 - BPC: 2.3446
+  Batch 600/1099 - Loss: 1.7277 - BPC: 2.4926
+  Batch 700/1099 - Loss: 1.7271 - BPC: 2.4916
+  Batch 800/1099 - Loss: 1.7172 - BPC: 2.4773
+  Batch 900/1099 - Loss: 1.7048 - BPC: 2.4596
+  Batch 1000/1099 - Loss: 1.6956 - BPC: 2.4463
+Train BPC: 2.4348 - Val BPC: 2.3929
 
-  Saved best model (Val BPC: 2.6911)
+  Saved best model (Val BPC: 2.3929)
 Epoch 5/5
-  Batch 100/1099 - Loss: 1.7836 - BPC: 2.5732
-  Batch 200/1099 - Loss: 1.7875 - BPC: 2.5788
-  Batch 300/1099 - Loss: 1.7876 - BPC: 2.5789
-  Batch 400/1099 - Loss: 1.7854 - BPC: 2.5759
-  Batch 500/1099 - Loss: 1.7853 - BPC: 2.5757
-  Batch 600/1099 - Loss: 1.7830 - BPC: 2.5723
-  Batch 700/1099 - Loss: 1.7823 - BPC: 2.5713
-  Batch 800/1099 - Loss: 1.7789 - BPC: 2.5664
-  Batch 900/1099 - Loss: 1.7762 - BPC: 2.5625
-  Batch 1000/1099 - Loss: 1.7737 - BPC: 2.5590
-Train BPC: 2.5570 - Val BPC: 2.6090
+  Batch 100/1099 - Loss: 1.5843 - BPC: 2.2856
+  Batch 200/1099 - Loss: 1.5940 - BPC: 2.2997
+  Batch 300/1099 - Loss: 1.5894 - BPC: 2.2930
+  Batch 400/1099 - Loss: 1.5867 - BPC: 2.2891
+  Batch 500/1099 - Loss: 1.5843 - BPC: 2.2856
+  Batch 600/1099 - Loss: 1.5887 - BPC: 2.2920
+  Batch 700/1099 - Loss: 1.5884 - BPC: 2.2915
+  Batch 800/1099 - Loss: 1.5889 - BPC: 2.2923
+  Batch 900/1099 - Loss: 1.5887 - BPC: 2.2920
+  Batch 1000/1099 - Loss: 1.5882 - BPC: 2.2914
+Train BPC: 2.3169 - Val BPC: 2.9667
 
-  Saved best model (Val BPC: 2.6090)
-Final Test BPC: 2.6663
+Final Test BPC: 3.0099
 
 Saved final model to novel_attention_charlm_final.pt
 
@@ -85,9 +84,8 @@ Results Summary
 
 Model                            Parameters   Best Val BPC     Test BPC
 --------------------------------------------------------------------------------
-Novel Attention                   2,375,168         2.6090       2.6663
+Novel Attention                   2,959,880         2.3929       3.0099
 
-================================================================================
 Test 1/3: The capital of France is
 ================================================================================
 
@@ -97,7 +95,7 @@ Seed: The capital of France is
 Generating 150 characters (top-k=40)...
 
 ================================================================================
- the sender Also, Alexander human was to exploiting the became is a particle been as a god with high philosopher Arthur in continued the state of alm
+ president current to the about the small the considered on the state, but slaves on and the operation centerious of a that he connections for the tri
 ================================================================================
 
 PHASE ATTENTION:
@@ -106,7 +104,7 @@ Seed: The capital of France is
 Generating 150 characters (top-k=40)...
 
 ================================================================================
-ine are contlicus. The mady a threat of hemive resping thads in the with the learce of at some date bady motted that collos do [[flanarsity]] on latta
+ Prote]] and [[Pacristory|Astaritice]]. He websth seckened haved merelost sovestionably mechil and [[is laving cone]]. [[[doporty|descition]], [[notse
 ================================================================================
 
 
@@ -120,7 +118,15 @@ Seed: In the year 1776
 Generating 150 characters (top-k=40)...
 
 ================================================================================
-. Aphrodividualists dangerous romred many of the many other the roral adventure is intelligence the as a poming the most was the ropes of coloniest at
+.
+
+==See also==
+
+In 1965, because ==
+* [[United States|struction]]
+[[Category:1966
+* [[Berlin World Miran American actor]] rather [[George Stather]]
+*
 ================================================================================
 
 PHASE ATTENTION:
@@ -129,32 +135,4 @@ Seed: In the year 1776
 Generating 150 characters (top-k=40)...
 
 ================================================================================
-0 mmaetal (3006 307). This comptition alcomed begrious and this [[soltist]] role of subjects.
-* [[Commoter]] a bought to time to mitale and and anbish
-================================================================================
-
-
-================================================================================
-Test 3/3: Albert Einstein was
-================================================================================
-
-TRANSFORMER:
---------------------------------------------------------------------------------
-Seed: Albert Einstein was
-Generating 150 characters (top-k=40)...
-
-================================================================================
- in were he long the [[Cuman]] the faclaim the sources it in can discoversy.
-
-After family the Rational Although the same classical to kill plant arou
-================================================================================
-
-PHASE ATTENTION:
---------------------------------------------------------------------------------
-Seed: Albert Einstein was
-Generating 150 characters (top-k=40)...
-
-================================================================================
-t the state of the US. Can
-* [http:/www.talfac.ort/c.ag/100805.aptles]
-The rigling using the Ordice tomer instroten Afre sty from the theock, pepparat
+ Alenor Autaras]]} Anotheic the Itries of the tere had meentary.  The [[Mas Aleks]]] is world as necertlyd is knotly. E.T1999]] the preface the [[sema

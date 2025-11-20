@@ -90,29 +90,41 @@ class TemporalPhaseIntegration(nn.Module):
 
         self.dim = dim
 
-        # DIRECT OMEGA PREDICTION
-        # Simpler approach: directly predict frequency from content
-        self.to_omega = nn.Linear(dim, dim)
+        # SEMANTIC TRAJECTORY + QUERY OFFSET (associative recall!)
+        # Single coherent semantic trajectory + learned content-based query offset
+        # Store at phi, retrieve from phi + learned_offset(content)
+        self.to_omega = nn.Linear(dim, dim)           # Semantic trajectory
+        self.to_query_offset = nn.Linear(dim, dim)    # Content-based query offset
+        self.to_phase_init = nn.Linear(dim, dim)      # Content-based phase initialization
 
         # Learnable integration scale per dimension
         # Small initial values to prevent rapid phase accumulation
-        self.integration_scale = nn.Parameter(torch.ones(dim) * 0.001)
+        self.integration_scale = nn.Parameter(torch.ones(dim) * 0.01)
 
         # Content-dependent magnitude (importance weighting for memory)
         self.to_magnitude = nn.Linear(dim, dim)
 
-        # Output projection - ONLY phase-based binding and retrieval
-        # Input: [x*cos, x*sin, retrieved_real, retrieved_imag]
-        # NO SHORTCUT - model must use phase mechanism!
-        self.to_out = nn.Linear(dim * 4, dim)
+        # Output projection with expansion
+        # Input: [x*cos, x*sin, retrieved_real, retrieved_imag] - dim*4 features
+        # Expand to higher-dimensional space to learn complex interactions
+        # Then gradually project back to dim for residual connection
+        self.to_out = nn.Sequential(
+            nn.LayerNorm(dim * 4),
+            nn.Linear(dim * 4, dim * 4),
+            nn.GELU(),
+            nn.LayerNorm(dim * 4),
+            nn.Linear(dim * 4, dim * 2),
+            nn.GELU(),
+            nn.Dropout(0.1),
+            nn.Linear(dim * 2, dim)
+        )
 
-    def forward(self, x, return_theta=False):
+    def forward(self, x):
         """
         Adaptive Temporal phase integration with phase-coherent memory.
 
         Args:
             x: [batch, seq_len, dim] token embeddings
-            return_theta: if True, return theta_delta for diversity loss
 
         Returns:
             output: [batch, seq_len, dim] contextualized via phase trajectory + coherent retrieval
@@ -120,10 +132,10 @@ class TemporalPhaseIntegration(nn.Module):
         """
         batch_size, seq_len, dim = x.shape
 
-        # DIRECT OMEGA PREDICTION
+        # SEMANTIC TRAJECTORY + QUERY OFFSET
         # =====================================================================
-        # Directly predict frequency from content (simpler than atan2 approach)
-        # Model learns what frequency patterns are useful for language
+        # omega: semantic trajectory (where content naturally lives)
+        # query_offset: content-based offset to seek relevant content
         omega = self.to_omega(x)  # [batch, seq, dim]
 
         # Content-dependent MAGNITUDE (importance weighting)
@@ -133,25 +145,30 @@ class TemporalPhaseIntegration(nn.Module):
 
         # No multi-head reshaping - keep as [batch, seq_len, dim]
 
-        # PHASE INTEGRATION: Integrate frequency over time with learnable scale
-        # =====================================================================
-        # phi_t = integral(omega * scale) - path integral with learned integration rate
-        # Small scale → slow accumulation → long-range position preservation
-        # No saturation - let cos/sin handle natural periodicity
-        omega_scaled = omega * self.integration_scale.abs()  # Ensure positive scale
-        phi = torch.cumsum(omega_scaled, dim=1)
+        # Content-based phase initialization (maps content to phase regions)
+        phi_init = self.to_phase_init(x)  # [batch, seq, dim]
 
-        # Convert cumulative phase to complex trajectory
-        # trajectory_t = exp(i * phi_t) - always on unit circle!
-        trajectory_real = torch.cos(phi)
-        trajectory_imag = torch.sin(phi)
+        # PHASE INTEGRATION with CONTENT-BASED QUERY
+        # =====================================================================
+        # phi: content-based location + semantic trajectory (storage)
+        # phi_query: phi + learned offset (retrieval)
+        omega_scaled = omega * self.integration_scale.abs()
+        phi = phi_init + torch.cumsum(omega_scaled, dim=1)  # [batch, seq_len, dim]
+
+        # Content-based query offset enables associative recall
+        query_offset = self.to_query_offset(x)  # [batch, seq, dim]
+        phi_query = phi + query_offset  # Query from offset position
+
+        # Convert query phase to complex trajectory
+        trajectory_real = torch.cos(phi_query)
+        trajectory_imag = torch.sin(phi_query)
 
         # PHASE-COHERENT MEMORY: Holographic storage via complex interference
-        # Weight content by learned magnitude (importance)
+        # Store using semantic phase (where content naturally lives)
         weighted_content = magnitude * x
 
         # Accumulate weighted content in complex space with phase encoding
-        # This creates distributed holographic memory where phase determines retrieval
+        # This creates distributed holographic memory indexed by semantic phases
         memory_real = torch.cumsum(weighted_content * torch.cos(phi), dim=1)
         memory_imag = torch.cumsum(weighted_content * torch.sin(phi), dim=1)
 
@@ -166,16 +183,16 @@ class TemporalPhaseIntegration(nn.Module):
         memory_real = memory_real / (accumulated_magnitude + 1e-8)
         memory_imag = memory_imag / (accumulated_magnitude + 1e-8)
 
-        # PHASE-COHERENT RETRIEVAL: Complex multiplication for selective binding
-        # Multiply memory by conjugate of current phase
-        # Tokens stored at similar phase → constructive interference (retrieved!)
-        # Tokens at different phase → destructive interference (filtered out!)
-        cos_phi = torch.cos(phi)
-        sin_phi = torch.sin(phi)
+        # ASSOCIATIVE RETRIEVAL: Query with learned offset!
+        # Multiply memory by conjugate of query phase (phi + offset)
+        # Model learns offset to retrieve from elsewhere in phase space
+        # This enables: "capital of France" → offset seeks Paris
+        cos_phi_query = torch.cos(phi_query)
+        sin_phi_query = torch.sin(phi_query)
 
-        # Complex multiplication: memory * conj(exp(i*phi)) = memory * exp(-i*phi)
-        retrieved_real = memory_real * cos_phi + memory_imag * sin_phi
-        retrieved_imag = memory_imag * cos_phi - memory_real * sin_phi
+        # Complex multiplication: memory * conj(exp(i*phi_query)) = memory * exp(-i*phi_query)
+        retrieved_real = memory_real * cos_phi_query + memory_imag * sin_phi_query
+        retrieved_imag = memory_imag * cos_phi_query - memory_real * sin_phi_query
 
         # No reshaping needed - already [batch, seq_len, dim]
 
