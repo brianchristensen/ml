@@ -74,7 +74,7 @@ We're querying the entire accumulated memory up to position t, and interference 
 
 TPI doesn't store individual token memories
 
-It stores a single evolving holographic trace that continuously accumulates all previous tokens, weighted by their phases.
+It stores a single evolving holographic trace that continuously accumulates all previous tokens, weighted by their phases
 
 **Key Features:**
 - **Normalization by Σm_i:** Prevents unbounded memory growth
