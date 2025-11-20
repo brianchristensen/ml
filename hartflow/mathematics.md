@@ -72,9 +72,7 @@ retrieved_t = memory_t * e^(-iφ_t)
 
 We're querying the entire accumulated memory up to position t, and interference picks out the relevant content based on phase alignment
 
-TPI doesn't store individual token memories
-
-It stores a single evolving holographic trace that continuously accumulates all previous tokens, weighted by their phases
+TPI doesn't store individual token memories, it stores a single evolving holographic trace that continuously accumulates all previous tokens, weighted by their phases
 
 **Key Features:**
 - **Normalization by Σm_i:** Prevents unbounded memory growth
