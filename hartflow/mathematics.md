@@ -171,6 +171,23 @@ Given input sequence **x** ∈ ℝⁿˣᵈ:
    - output = MLP(context)
    - y = x + output
 
+#### Dimensionality
+
+Each dimension in TPI evolves independently:
+
+omega = self.to_omega(x)  # [batch, seq, dim]
+phi = phi_init + cumsum(omega * self.integration_scale.abs())
+
+- integration_scale is per-dimension: torch.ones(dim) * 0.01
+- Each dimension i has its own trajectory: phi[:, :, i]
+- Each dimension stores/retrieves independently in its own phase subspace
+
+So with dim=512, you effectively have 512 independent channels, each with its own:
+- Phase velocity (omega)
+- Integration rate (scale)
+- Phase trajectory (phi)
+- Storage/retrieval dynamic
+
 ## Why This Works
 
 ### Content-Based Phase Initialization

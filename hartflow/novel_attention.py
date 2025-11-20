@@ -262,7 +262,7 @@ class NovelAttentionLM(nn.Module):
     def __init__(
         self,
         vocab_size,
-        dim=512,
+        dim=128,
         num_layers=4,
         max_len=2048,  # default for sinusoidal position embedding
         device='cuda'
