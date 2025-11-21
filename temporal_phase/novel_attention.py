@@ -46,14 +46,20 @@ class TemporalPhaseIntegration(nn.Module):
 
     Core mechanism (inspired by neural oscillations):
     1. Semantic content → oscillation frequency: omega_t = f(token_t)
-    2. Integrate frequency → phase trajectory: phi_t = sum(omega_0...omega_t)
-    3. Similar semantics → similar frequencies → periodic synchronization!
-    4. Phase trajectory = exp(i * phi_t) - oscillation on unit circle
-    5. HOLOGRAPHIC STORAGE: memory = cumsum(magnitude * value * exp(i*phi))
-    6. QUERY OFFSET: Content-dependent retrieval offset for generation quality
-    7. PHASE-COHERENT RETRIEVAL: retrieved = memory * exp(-i*(phi + offset))
+    2. GATED UPDATE: gate_t = sigmoid(g(token_t)) filters noisy omega
+    3. Integrate frequency → phase trajectory: phi_t = sum(gate * omega)
+    4. Similar semantics → similar frequencies → periodic synchronization!
+    5. Phase trajectory = exp(i * phi_t) - oscillation on unit circle
+    6. HOLOGRAPHIC STORAGE: memory = cumsum(magnitude * value * exp(i*phi))
+    7. QUERY OFFSET: Content-dependent retrieval offset for generation quality
+    8. PHASE-COHERENT RETRIEVAL: retrieved = memory * exp(-i*(phi + offset))
        → Tokens with matching frequencies synchronize → CONSTRUCTIVE interference!
        → Tokens with different frequencies → DESTRUCTIVE interference!
+
+    Gating mechanism (like GRU/LSTM but for phase):
+    - Prevents error accumulation: bad token at position n doesn't cascade
+    - Model learns which semantic shifts matter (gate≈1) vs noise (gate≈0)
+    - Still O(n) parallel via cumsum, but more robust to individual errors
 
     Phase-Coherent Memory (inspired by holography + Communication Through Coherence):
     - Store: Each token weighted by learned magnitude, encoded with phase
@@ -99,9 +105,15 @@ class TemporalPhaseIntegration(nn.Module):
             nn.Linear(dim, dim)
         )
 
+        # GATED PHASE UPDATES: Prevent error accumulation (inspired by GRU/LSTM)
+        # Gates filter noisy omega values before they cascade through cumsum
+        # Important semantic shifts → high gate → accumulate
+        # Noisy tokens → low gate → filtered out
+        self.to_gate = nn.Linear(dim, dim)
+
         # Learnable integration scale per dimension
         # Small initial values to prevent rapid phase accumulation
-        self.integration_scale = nn.Parameter(torch.ones(dim) * 0.01)
+        self.integration_scale = nn.Parameter(torch.ones(dim) * 0.001)
 
         # Content-dependent magnitude (importance weighting for memory)
         self.to_magnitude = nn.Linear(dim, dim)
@@ -117,22 +129,29 @@ class TemporalPhaseIntegration(nn.Module):
             nn.LayerNorm(dim * 4),
             nn.Linear(dim * 4, dim * 2),
             nn.GELU(),
-            nn.Dropout(0.2),
+            nn.Dropout(0.1),
             nn.Linear(dim * 2, dim)
         )
 
-    def forward(self, x):
+    def forward(self, x, cache=None):
         """
         Adaptive Temporal phase integration with phase-coherent memory.
 
         Args:
             x: [batch, seq_len, dim] token embeddings
+            cache: Optional dict with cached states for O(n) generation
+                   - 'phi': [batch, 1, dim] previous phase trajectory
+                   - 'memory_real': [batch, 1, dim] previous memory real
+                   - 'memory_imag': [batch, 1, dim] previous memory imag
+                   - 'accumulated_magnitude': [batch, 1, dim] previous magnitude
 
         Returns:
             output: [batch, seq_len, dim] contextualized via phase trajectory + coherent retrieval
-            theta_delta: (optional) phase rotations for diversity loss
+            new_cache: Updated cache for next token (if cache provided)
         """
         batch_size, seq_len, dim = x.shape
+        use_cache = cache is not None
+        is_prefill = use_cache and cache.get('prefill', False)
 
         # SEMANTIC TRAJECTORY
         # =====================================================================
@@ -143,13 +162,27 @@ class TemporalPhaseIntegration(nn.Module):
         magnitude_scale = 5.0  # Make memory contributions strong enough to matter
         magnitude = torch.sigmoid(self.to_magnitude(x)) * magnitude_scale
 
-        # PHASE INTEGRATION (with init, no query offset)
+        # GATED PHASE INTEGRATION: Prevents error accumulation
         # =====================================================================
         # Content-based phase initialization
         phi_init = self.to_phase_init(x)  # [batch, seq, dim]
 
+        # GATING: Filter noisy omega updates before they cascade through cumsum
+        # High gate (→1): Important semantic shift, accumulate it
+        # Low gate (→0): Noisy token, filter it out
+        gate = torch.sigmoid(self.to_gate(x))  # [batch, seq, dim] in (0, 1)
+
+        # Apply gating BEFORE cumsum to prevent error propagation
         omega_scaled = omega * self.integration_scale.abs()
-        phi = phi_init + torch.cumsum(omega_scaled, dim=1)  # [batch, seq_len, dim]
+        gated_omega = gate * omega_scaled  # Filter based on importance
+
+        if use_cache and not is_prefill:
+            # GENERATION MODE: O(n) incremental update
+            # phi_t = phi_{t-1} + omega_t (no cumsum needed!)
+            phi = cache['phi'] + gated_omega
+        else:
+            # TRAINING/PREFILL MODE: O(n) parallel cumsum
+            phi = phi_init + torch.cumsum(gated_omega, dim=1)
 
         # Convert phase to complex trajectory
         trajectory_real = torch.cos(phi)
@@ -159,21 +192,28 @@ class TemporalPhaseIntegration(nn.Module):
         # Store using semantic phase (where content naturally lives)
         weighted_content = magnitude * x
 
-        # Accumulate weighted content in complex space with phase encoding
-        # This creates distributed holographic memory indexed by semantic phases
-        memory_real = torch.cumsum(weighted_content * torch.cos(phi), dim=1)
-        memory_imag = torch.cumsum(weighted_content * torch.sin(phi), dim=1)
+        if use_cache and not is_prefill:
+            # GENERATION MODE: O(n) incremental update
+            # memory_t = memory_{t-1} + weighted_content_t * exp(i*phi_t)
+            memory_real = cache['memory_real'] + weighted_content * torch.cos(phi)
+            memory_imag = cache['memory_imag'] + weighted_content * torch.sin(phi)
+            accumulated_magnitude = cache['accumulated_magnitude'] + magnitude
+        else:
+            # TRAINING/PREFILL MODE: O(n) parallel cumsum
+            # Accumulate weighted content in complex space with phase encoding
+            # This creates distributed holographic memory indexed by semantic phases
+            memory_real = torch.cumsum(weighted_content * torch.cos(phi), dim=1)
+            memory_imag = torch.cumsum(weighted_content * torch.sin(phi), dim=1)
+            # Track total accumulated magnitude (how many patterns stored)
+            accumulated_magnitude = torch.cumsum(magnitude, dim=1)
 
-        # HOLOGRAPHIC NORMALIZATION: Prevent unbounded memory growth!
-        # Track total accumulated magnitude (how many patterns stored)
-        accumulated_magnitude = torch.cumsum(magnitude, dim=1)
-
-        # Normalize memory by accumulated magnitude (graceful degradation)
-        # As more patterns stored, each pattern is diluted (like real holographic storage)
-        # This prevents: memory magnitude growing to ~2000 at t=2000 → numerical explosion
-        # Instead: memory magnitude stays ~1 regardless of sequence length!
-        memory_real = memory_real / (accumulated_magnitude + 1e-8)
-        memory_imag = memory_imag / (accumulated_magnitude + 1e-8)
+        # SQRT NORMALIZATION: Preserves early context much better than linear
+        # Linear (÷magnitude): Early token at pos 1 diluted by 512x at end → topic drift
+        # SQRT (÷sqrt(magnitude)): Early token diluted by √512 ≈ 22.6x → preserved!
+        # Still prevents unbounded growth while maintaining early context
+        sqrt_magnitude = torch.sqrt(accumulated_magnitude + 1e-8)
+        memory_real_normalized = memory_real / sqrt_magnitude
+        memory_imag_normalized = memory_imag / sqrt_magnitude
 
         # RETRIEVAL: Query with content-dependent offset
         # This allows each token to query at different phase based on context
@@ -186,8 +226,8 @@ class TemporalPhaseIntegration(nn.Module):
         sin_phi_q = torch.sin(phi_query)
 
         # Complex multiplication: memory * conj(exp(i*phi_query)) = memory * exp(-i*phi_query)
-        retrieved_real = memory_real * cos_phi_q + memory_imag * sin_phi_q
-        retrieved_imag = memory_imag * cos_phi_q - memory_real * sin_phi_q
+        retrieved_real = memory_real_normalized * cos_phi_q + memory_imag_normalized * sin_phi_q
+        retrieved_imag = memory_imag_normalized * cos_phi_q - memory_real_normalized * sin_phi_q
 
         # No reshaping needed - already [batch, seq_len, dim]
 
@@ -215,7 +255,17 @@ class TemporalPhaseIntegration(nn.Module):
         # - Phase mechanism must learn USEFUL modifications
         output = x + phase_contribution
 
-        return output
+        # Return cache for O(n) generation (if using cache)
+        if use_cache:
+            new_cache = {
+                'phi': phi[:, -1:, :],  # Only keep last position for next token
+                'memory_real': memory_real[:, -1:, :],  # Unnormalized for accumulation
+                'memory_imag': memory_imag[:, -1:, :],
+                'accumulated_magnitude': accumulated_magnitude[:, -1:, :]
+            }
+            return output, new_cache
+        else:
+            return output
 
 
 # ============================================================================
@@ -233,17 +283,23 @@ class TPIBlock(nn.Module):
         self.norm = nn.LayerNorm(dim)
         self.integration = TemporalPhaseIntegration(dim)
 
-    def forward(self, x):
+    def forward(self, x, cache=None):
         """
         Args:
             x: [batch, seq_len, dim]
+            cache: Optional cache for O(n) generation
         Returns:
             x: [batch, seq_len, dim]
+            new_cache: Updated cache (if cache provided)
         """
         # Temporal phase integration
-        x = x + self.integration(self.norm(x))
-
-        return x
+        if cache is not None:
+            integration_out, new_cache = self.integration(self.norm(x), cache=cache)
+            x = x + integration_out
+            return x, new_cache
+        else:
+            x = x + self.integration(self.norm(x))
+            return x
 
 
 # ============================================================================
@@ -369,14 +425,39 @@ class NovelAttentionLM(nn.Module):
     # Diversity loss removed - bare bones approach
 
     def generate(self, prompt, max_length=100, temperature=1.0, top_k=50):
-        """Generate text autoregressively."""
-        self.eval()
+        """
+        Generate text autoregressively with O(n) complexity via caching.
 
-        generated = prompt
+        Uses two-phase generation:
+        1. PREFILL: Process prompt with parallel cumsum, extract final states
+        2. DECODE: Generate tokens incrementally using cached states (O(1) per token)
+
+        Previously O(n²), now O(n)!
+        """
+        self.eval()
+        batch_size, prompt_len = prompt.shape
 
         with torch.no_grad():
-            for _ in range(max_length - prompt.shape[1]):
-                logits = self.forward(generated)
+            # PHASE 1: PREFILL - Process prompt and build cache
+            token_emb = self.token_embedding(prompt)
+            pos_emb = self.pos_encoding[:prompt_len, :].unsqueeze(0).expand(batch_size, -1, -1)
+            x_emb = token_emb + pos_emb
+
+            # Pass through blocks with prefill flag to build cache
+            caches = []
+            for block in self.blocks:
+                x_emb, layer_cache = block(x_emb, cache={'prefill': True})
+                caches.append(layer_cache)
+
+            # Get initial logits
+            x_emb = self.norm(x_emb)
+            logits = self.output_head(x_emb)
+
+            generated = prompt
+
+            # PHASE 2: DECODE - Generate tokens one at a time using cache
+            for _ in range(max_length - prompt_len):
+                # Sample next token
                 next_token_logits = logits[:, -1, :] / temperature
 
                 if top_k > 0:
@@ -388,6 +469,21 @@ class NovelAttentionLM(nn.Module):
                     next_token = next_token_logits.argmax(dim=-1, keepdim=True)
 
                 generated = torch.cat([generated, next_token], dim=1)
+
+                # Process ONLY the new token with cache (O(1) operation!)
+                current_pos = generated.shape[1] - 1
+                token_emb = self.token_embedding(next_token)
+                pos_emb = self.pos_encoding[current_pos:current_pos+1, :].unsqueeze(0).expand(batch_size, -1, -1)
+                x_emb = token_emb + pos_emb
+
+                # Pass through blocks with cache (incremental updates)
+                for layer_idx, block in enumerate(self.blocks):
+                    x_emb, layer_cache = block(x_emb, cache=caches[layer_idx])
+                    caches[layer_idx] = layer_cache
+
+                # Get logits for next token
+                x_emb = self.norm(x_emb)
+                logits = self.output_head(x_emb)
 
         return generated
 

@@ -235,9 +235,6 @@ def main():
     print(f"Train batches: {len(train_loader):,}")
     print(f"Val batches: {len(val_loader):,}")
     print()
-    print(f"Expected time per epoch: ~6 minutes")
-    print(f"Expected total time: ~{n_epochs * 6} minutes ({n_epochs * 6 / 60:.1f} hours)")
-    print()
 
     # Create model
     print("Creating model...")
