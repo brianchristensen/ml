@@ -382,8 +382,8 @@ def main():
 
     novel_model = NovelAttentionLM(
         vocab_size=vocab_size,
-        dim=128,
-        num_layers=4,
+        dim=1024,
+        num_layers=2,
         device=device
     ).to(device)
 

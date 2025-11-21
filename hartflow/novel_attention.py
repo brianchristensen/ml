@@ -50,7 +50,8 @@ class TemporalPhaseIntegration(nn.Module):
     3. Similar semantics → similar frequencies → periodic synchronization!
     4. Phase trajectory = exp(i * phi_t) - oscillation on unit circle
     5. HOLOGRAPHIC STORAGE: memory = cumsum(magnitude * value * exp(i*phi))
-    6. PHASE-COHERENT RETRIEVAL: retrieved = memory * exp(-i*phi)
+    6. QUERY OFFSET: Content-dependent retrieval offset for generation quality
+    7. PHASE-COHERENT RETRIEVAL: retrieved = memory * exp(-i*(phi + offset))
        → Tokens with matching frequencies synchronize → CONSTRUCTIVE interference!
        → Tokens with different frequencies → DESTRUCTIVE interference!
 
@@ -90,9 +91,13 @@ class TemporalPhaseIntegration(nn.Module):
 
         self.dim = dim
 
-        # SEMANTIC TRAJECTORY + PHASE INIT
-        self.to_omega = nn.Linear(dim, dim)           # Semantic trajectory
-        self.to_phase_init = nn.Linear(dim, dim)      # Content-based phase initialization
+        # Semantic oscillation + phase trajectory
+        self.to_omega = nn.Linear(dim, dim) # Semantic trajectory
+        self.to_phase_init = nn.Sequential(
+            nn.Linear(dim, dim),
+            nn.GELU(),
+            nn.Linear(dim, dim)
+        )
 
         # Learnable integration scale per dimension
         # Small initial values to prevent rapid phase accumulation
@@ -100,6 +105,9 @@ class TemporalPhaseIntegration(nn.Module):
 
         # Content-dependent magnitude (importance weighting for memory)
         self.to_magnitude = nn.Linear(dim, dim)
+
+        # Content-dependent query offset
+        self.to_query_offset = nn.Linear(dim, dim)
 
         # Output projection with expansion
         # Input: [x*cos, x*sin, retrieved_real, retrieved_imag] - dim*4 features
@@ -109,11 +117,8 @@ class TemporalPhaseIntegration(nn.Module):
             nn.LayerNorm(dim * 4),
             nn.Linear(dim * 4, dim * 4),
             nn.GELU(),
-            nn.LayerNorm(dim * 4),
-            nn.Linear(dim * 4, dim * 2),
-            nn.GELU(),
-            nn.Dropout(0.1),
-            nn.Linear(dim * 2, dim)
+            nn.Dropout(0.2),
+            nn.Linear(dim * 4, dim)
         )
 
     def forward(self, x):
@@ -170,14 +175,19 @@ class TemporalPhaseIntegration(nn.Module):
         memory_real = memory_real / (accumulated_magnitude + 1e-8)
         memory_imag = memory_imag / (accumulated_magnitude + 1e-8)
 
-        # RETRIEVAL: Query using same phase (with init, no offset)
-        # Multiply memory by conjugate of phase
-        cos_phi = torch.cos(phi)
-        sin_phi = torch.sin(phi)
+        # RETRIEVAL: Query with content-dependent offset
+        # This allows each token to query at different phase based on context
+        # Improves generation quality (better diversity/coherence tradeoff)
+        query_offset = self.to_query_offset(x)  # [batch, seq, dim]
+        phi_query = phi + query_offset
 
-        # Complex multiplication: memory * conj(exp(i*phi)) = memory * exp(-i*phi)
-        retrieved_real = memory_real * cos_phi + memory_imag * sin_phi
-        retrieved_imag = memory_imag * cos_phi - memory_real * sin_phi
+        # Multiply memory by conjugate of query phase
+        cos_phi_q = torch.cos(phi_query)
+        sin_phi_q = torch.sin(phi_query)
+
+        # Complex multiplication: memory * conj(exp(i*phi_query)) = memory * exp(-i*phi_query)
+        retrieved_real = memory_real * cos_phi_q + memory_imag * sin_phi_q
+        retrieved_imag = memory_imag * cos_phi_q - memory_real * sin_phi_q
 
         # No reshaping needed - already [batch, seq_len, dim]
 
