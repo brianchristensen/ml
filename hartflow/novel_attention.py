@@ -115,10 +115,10 @@ class TemporalPhaseIntegration(nn.Module):
         # Then gradually project back to dim for residual connection
         self.to_out = nn.Sequential(
             nn.LayerNorm(dim * 4),
-            nn.Linear(dim * 4, dim * 4),
+            nn.Linear(dim * 4, dim * 2),
             nn.GELU(),
             nn.Dropout(0.2),
-            nn.Linear(dim * 4, dim)
+            nn.Linear(dim * 2, dim)
         )
 
     def forward(self, x):

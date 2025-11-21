@@ -279,7 +279,7 @@ def main():
     vocab_size = 256  # All possible bytes
     seq_len = 256     # Context length
     batch_size = 32
-    n_epochs = 5     # Train longer
+    n_epochs = 10     # Train longer
     n_chars = 10_000_000  # Use 10M chars for quick testing (full enwik8 = 100M)
 
     # Download and load data
@@ -382,8 +382,8 @@ def main():
 
     novel_model = NovelAttentionLM(
         vocab_size=vocab_size,
-        dim=1024,
-        num_layers=2,
+        dim=128,
+        num_layers=6,
         device=device
     ).to(device)
 
