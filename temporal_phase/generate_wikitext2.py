@@ -141,7 +141,7 @@ def interactive_generation(model, tokenizer, device='cuda'):
 
     while True:
         print("-" * 80)
-        print(f"Settings: temp={temperature}, max_length={max_length}, top_k={top_k}")
+        print(f"Settings: {temperature} (temp), {max_length} (len), {top_k} (topk)")
         prompt = input("\nPrompt: ").strip()
 
         if not prompt:

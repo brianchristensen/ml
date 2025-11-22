@@ -1,15 +1,31 @@
 """
-WikiText-103 Language Modeling with TPI
+WikiText-103 Language Modeling with TPI - CHARACTER LEVEL
 
-Dataset: WikiText-103 (word-level Wikipedia)
-Tokenization: BPE with ~50k vocab (GPT-2 tokenizer)
-Context: 512 tokens (can extend to 1024+)
-Metrics: Perplexity + generation quality
+Dataset: WikiText-103 (~103M BPE tokens → ~400M+ characters!)
+Tokenization: CHARACTER LEVEL (vocab=256)
+Context: 512 characters
+Metrics: Bits-per-character + generation quality
 
-This properly tests TPI's strengths:
-- Long-range dependencies (512+ token context)
-- Semantic content (word/subword level)
-- Clean text (no XML markup like enwik8)
+THE BIG TEST: Can TPI scale character-level to 400M+ characters?
+
+This tests TPI's unique strength:
+- Parallelizable (unlike RNNs)
+- Character-level efficient (O(n), unlike transformers' O(n²))
+- Sequential composition learning (characters → words → semantics)
+- 99.5% of params in computation (not embeddings)
+
+Expected advantages:
+- No embedding overhead (256 vocab vs 50K)
+- Better compositional generalization
+- More parameters for actual learning
+- Handles rare words via spelling
+
+WikiText-2 character-level success (12L/256D, 12.7M params):
+- Train: 3.16 PPL, Val: 3.62 PPL (1.66 BPC)
+- Learned proper spelling, grammar, semantics in 20 epochs
+- No train/val gap
+
+Now scaling to 50x more data!
 """
 
 import torch
@@ -22,9 +38,7 @@ import math
 import os
 from pathlib import Path
 
-# HuggingFace datasets and tokenizers
 from datasets import load_dataset
-import tiktoken  # OpenAI's BPE tokenizer (fast, robust)
 
 from novel_attention import NovelAttentionLM
 
@@ -32,34 +46,46 @@ device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 
 # ============================================================================
-# Tokenization
+# Character-Level Tokenization
 # ============================================================================
+
+class CharacterTokenizer:
+    """
+    Simple character-level tokenizer with vocab size 256.
+    Uses raw bytes (UTF-8 encoding).
+    """
+    def __init__(self):
+        self.vocab_size = 256
+
+    def encode(self, text):
+        """Convert text to list of byte values (0-255)."""
+        return list(text.encode('utf-8'))
+
+    def decode(self, tokens):
+        """Convert list of byte values back to text."""
+        return bytes(tokens).decode('utf-8', errors='replace')
+
+    @property
+    def n_vocab(self):
+        return self.vocab_size
+
 
 def get_tokenizer():
-    """
-    Get BPE tokenizer.
-
-    Using tiktoken (OpenAI's tokenizer) with GPT-2 encoding:
-    - 50,257 vocab size
-    - Robust BPE merges
-    - Fast encoding/decoding
-    """
-    # GPT-2 BPE tokenizer
-    tokenizer = tiktoken.get_encoding("gpt2")
-    return tokenizer
+    """Get character-level tokenizer."""
+    return CharacterTokenizer()
 
 
 # ============================================================================
-# WikiText-103 Dataset
+# WikiText-103 Dataset (Character-Level)
 # ============================================================================
 
 def load_wikitext103(cache_dir='./data/wikitext103_cache'):
     """
-    Load WikiText-103 dataset.
+    Load WikiText-103 dataset with character-level tokenization.
 
     Returns tokenized train/val/test splits.
     """
-    print("Loading WikiText-103 dataset...")
+    print("Loading WikiText-103 dataset (CHARACTER LEVEL)...")
 
     # Load from HuggingFace
     dataset = load_dataset("wikitext", "wikitext-103-raw-v1", cache_dir=cache_dir)
@@ -67,7 +93,7 @@ def load_wikitext103(cache_dir='./data/wikitext103_cache'):
     # Get tokenizer
     tokenizer = get_tokenizer()
 
-    print(f"Tokenizer vocab size: {tokenizer.n_vocab}")
+    print(f"Tokenizer vocab size: {tokenizer.n_vocab} (character-level)")
     print()
 
     # Tokenize all splits
@@ -81,10 +107,10 @@ def load_wikitext103(cache_dir='./data/wikitext103_cache'):
         # Remove empty lines and extra whitespace
         text = "\n".join(line for line in text.split("\n") if line.strip())
 
-        # Tokenize
+        # Tokenize (character-level = bytes)
         tokens = tokenizer.encode(text)
 
-        print(f"  {split_name}: {len(tokens):,} tokens")
+        print(f"  {split_name}: {len(tokens):,} characters")
         return np.array(tokens, dtype=np.int32)
 
     train_tokens = tokenize_split('train')
@@ -280,7 +306,7 @@ def generate_samples(model, tokenizer, prompts, max_length=100, temperature=0.8,
 
 def main():
     print("=" * 80)
-    print("WikiText-103 Language Modeling with TPI")
+    print("WikiText-103 Language Modeling with TPI - CHARACTER LEVEL")
     print("=" * 80)
     print()
 
@@ -289,27 +315,31 @@ def main():
         print(f"GPU: {torch.cuda.get_device_name(0)}")
     print()
 
-    # Hyperparameters
-    seq_len = 512          # Context length (can increase to 1024+)
-    batch_size = 16        # Increased for faster training
-    n_epochs = 10           # Reduced for quick testing
-    learning_rate = 1e-3   # Higher LR, no warmup initially
-    warmup_steps = 0       # Disabled warmup to test if model learns
+    # Hyperparameters (CHARACTER-LEVEL)
+    seq_len = 512          # 512 characters (not BPE tokens)
+    batch_size = 16        # Same batch size (sequences are longer but manageable)
+    n_epochs = 10          # Start with 10 epochs
+    learning_rate = 1e-3   # Same learning rate
+    warmup_steps = 0
 
-    # Model config
-    dim = 256              # Embedding dimension
-    num_layers = 8         # Number of TPI blocks
+    # Model config (CHARACTER-LEVEL needs more depth!)
+    # Character→word composition requires learning lower-level patterns
+    # TPI's cheap layers make deeper networks affordable
+    # WikiText-2 success: 12L/256D learned proper language
+    dim = 256              # Moderate width
+    num_layers = 12        # More depth for character-level (vs 8 for BPE)
 
     # Use subset of data for faster iteration
+    # Full WikiText-103 is ~400M+ characters (huge!)
     use_subset = True      # Set to False for full training
-    subset_size = 10_000_000  # 10M tokens instead of 100M+
+    subset_size = 10_000_000  # 10M characters for initial test
 
-    print("Hyperparameters:")
-    print(f"  Sequence length: {seq_len}")
+    print("Hyperparameters (CHARACTER-LEVEL):")
+    print(f"  Sequence length: {seq_len} characters")
     print(f"  Batch size: {batch_size}")
     print(f"  Epochs: {n_epochs}")
     print(f"  Learning rate: {learning_rate}")
-    print(f"  Model: {num_layers}L / {dim}D")
+    print(f"  Model: {num_layers}L / {dim}D (CHAR + TIED EMBEDDINGS)")
     print()
 
     # Load data
@@ -318,9 +348,9 @@ def main():
 
     # Use subset for faster iteration
     if use_subset:
-        print(f"Using subset of data: {subset_size:,} tokens")
+        print(f"Using subset of data: {subset_size:,} characters")
         train_tokens = train_tokens[:subset_size]
-        print(f"Train tokens (subset): {len(train_tokens):,}")
+        print(f"Train characters (subset): {len(train_tokens):,}")
         print()
 
     # Create datasets
