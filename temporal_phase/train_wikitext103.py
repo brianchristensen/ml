@@ -301,7 +301,7 @@ def main():
     num_layers = 8         # Number of TPI blocks
 
     # Use subset of data for faster iteration
-    use_subset = False      # Set to False for full training
+    use_subset = True      # Set to False for full training
     subset_size = 10_000_000  # 10M tokens instead of 100M+
 
     print("Hyperparameters:")

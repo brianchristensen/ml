@@ -1,18 +1,28 @@
 """
-WikiText-2 Language Modeling with TPI
+WikiText-2 Language Modeling with TPI - CHARACTER LEVEL + TIED EMBEDDINGS
 
-Dataset: WikiText-2 (~2M tokens - 50x smaller than WikiText-103!)
-Tokenization: BPE with GPT-2 tokenizer
-Context: 512 tokens
-Goal: FAST iteration for architecture testing
+Dataset: WikiText-2 (~2M BPE tokens → ~8M characters)
+Tokenization: CHARACTER LEVEL (vocab=256)
+Embeddings: TIED (input and output share weights)
+Context: 512 characters
+Goal: Test if character-level works with FIXED model (previous test had broken integration_scale)
 
-WikiText-2 is perfect for:
-- Ultra-fast iteration (~6 min per epoch)
-- Same format as WikiText-103 (easy comparison)
-- Testing architectural changes quickly
-- Then validate on WikiText-103 when ready
+Previous failure was due to:
+- integration_scale = 0.1 (phase collisions!)
+- Other architectural issues
 
-Expected training time: ~2 hours (20 epochs × ~6 min)
+Now testing with WORKING baseline:
+- integration_scale = 0.01 (works)
+- Omega gating (works)
+- Sqrt normalization (works)
+- Tied embeddings (testing)
+
+Character-level advantages:
+- Embedding params: 256 × dim (vs 50K × dim for BPE) = 200x smaller!
+- 99% of params in TPI layers
+- 4x longer sequences, but TPI scales O(n) so only 4x compute
+
+Expected training time: ~4x slower per epoch (longer sequences)
 """
 
 import torch
@@ -26,22 +36,41 @@ import os
 from pathlib import Path
 
 from datasets import load_dataset
-import tiktoken
 
 from novel_attention import NovelAttentionLM
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 
+class CharacterTokenizer:
+    """
+    Simple character-level tokenizer with vocab size 256.
+    Uses raw bytes (UTF-8 encoding).
+    """
+    def __init__(self):
+        self.vocab_size = 256
+
+    def encode(self, text):
+        """Convert text to list of byte values (0-255)."""
+        return list(text.encode('utf-8'))
+
+    def decode(self, tokens):
+        """Convert list of byte values back to text."""
+        return bytes(tokens).decode('utf-8', errors='replace')
+
+    @property
+    def n_vocab(self):
+        return self.vocab_size
+
+
 def get_tokenizer():
-    """Get BPE tokenizer."""
-    tokenizer = tiktoken.get_encoding("gpt2")
-    return tokenizer
+    """Get character-level tokenizer."""
+    return CharacterTokenizer()
 
 
 def load_wikitext2(cache_dir='./data/wikitext2_cache'):
-    """Load WikiText-2 dataset (~2M tokens)."""
-    print("Loading WikiText-2 dataset...")
+    """Load WikiText-2 dataset with character-level tokenization."""
+    print("Loading WikiText-2 dataset (CHARACTER LEVEL)...")
 
     # Load from HuggingFace
     dataset = load_dataset("wikitext", "wikitext-2-raw-v1", cache_dir=cache_dir)
@@ -49,7 +78,7 @@ def load_wikitext2(cache_dir='./data/wikitext2_cache'):
     # Get tokenizer
     tokenizer = get_tokenizer()
 
-    print(f"Tokenizer vocab size: {tokenizer.n_vocab}")
+    print(f"Tokenizer vocab size: {tokenizer.n_vocab} (character-level)")
     print()
 
     # Tokenize all splits
@@ -63,10 +92,10 @@ def load_wikitext2(cache_dir='./data/wikitext2_cache'):
         # Remove empty lines
         text = "\n".join(line for line in text.split("\n") if line.strip())
 
-        # Tokenize
+        # Tokenize (character-level = bytes)
         tokens = tokenizer.encode(text)
 
-        print(f"  {split_name}: {len(tokens):,} tokens")
+        print(f"  {split_name}: {len(tokens):,} characters")
         return np.array(tokens, dtype=np.int32)
 
     train_tokens = tokenize_split('train')
@@ -191,23 +220,25 @@ def main():
         print(f"GPU: {torch.cuda.get_device_name(0)}")
     print()
 
-    # Hyperparameters
-    seq_len = 512
-    batch_size = 16
-    n_epochs = 3
-    learning_rate = 1e-3
+    # Hyperparameters (CHARACTER-LEVEL)
+    seq_len = 512          # 512 characters (not BPE tokens)
+    batch_size = 16        # Same batch size (sequences are longer but still manageable)
+    n_epochs = 20          # Same
+    learning_rate = 1e-3   # Same
     warmup_steps = 0
 
-    # Model config
-    dim = 256
-    num_layers = 8
+    # Model config (CHARACTER-LEVEL needs more depth!)
+    # Character→word composition requires learning lower-level patterns
+    # TPI's cheap layers make deeper networks affordable
+    dim = 256              # Moderate width
+    num_layers = 12        # More depth for character-level (vs 8 for BPE)
 
-    print("Hyperparameters:")
-    print(f"  Sequence length: {seq_len}")
+    print("Hyperparameters (CHARACTER-LEVEL):")
+    print(f"  Sequence length: {seq_len} characters")
     print(f"  Batch size: {batch_size}")
     print(f"  Epochs: {n_epochs}")
     print(f"  Learning rate: {learning_rate}")
-    print(f"  Model: {num_layers}L / {dim}D")
+    print(f"  Model: {num_layers}L / {dim}D (CHAR + TIED EMBEDDINGS)")
     print()
 
     # Load data
