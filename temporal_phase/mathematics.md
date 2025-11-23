@@ -2,7 +2,7 @@
 
 ## Overview
 
-Temporal Phase Integration is a novel attention mechanism that uses **complex-valued phase trajectories** and **holographic memory** to process sequential data. Unlike transformer attention (O(n²)), TPI achieves O(n) complexity through parallel cumulative operations.
+Temporal Phase Integration is multi-scale differential equation learner that uses **complex-valued phase trajectories** and **holographic memory** to process sequential data. TPI achieves O(n) complexity through parallel cumulative operations.
 
 ## Core Principle
 

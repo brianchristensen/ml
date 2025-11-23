@@ -1,5 +1,5 @@
 """
-Text Generation from Trained WikiText-103 Model
+Text Generation from Trained WikiText-103 Model (CHARACTER-LEVEL)
 
 Usage:
     python generate_wikitext103.py
@@ -8,11 +8,31 @@ Usage:
 
 import torch
 import torch.nn.functional as F
-import tiktoken
 import argparse
 from pathlib import Path
 
 from novel_attention import NovelAttentionLM
+
+
+class CharacterTokenizer:
+    """
+    Simple character-level tokenizer with vocab size 256.
+    Uses raw bytes (UTF-8 encoding).
+    """
+    def __init__(self):
+        self.vocab_size = 256
+
+    def encode(self, text):
+        """Convert text to list of byte values (0-255)."""
+        return list(text.encode('utf-8'))
+
+    def decode(self, tokens):
+        """Convert list of byte values back to text."""
+        return bytes(tokens).decode('utf-8', errors='replace')
+
+    @property
+    def n_vocab(self):
+        return self.vocab_size
 
 
 def load_model(checkpoint_path, device='cuda'):
@@ -31,8 +51,8 @@ def load_model(checkpoint_path, device='cuda'):
     checkpoint = torch.load(checkpoint_path, map_location=device)
     config = checkpoint['config']
 
-    # Get tokenizer
-    tokenizer = tiktoken.get_encoding("gpt2")
+    # Get tokenizer (character-level)
+    tokenizer = CharacterTokenizer()
 
     # Create model
     model = NovelAttentionLM(

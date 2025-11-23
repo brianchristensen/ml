@@ -315,12 +315,20 @@ def main():
         print(f"GPU: {torch.cuda.get_device_name(0)}")
     print()
 
-    # Hyperparameters (CHARACTER-LEVEL)
-    seq_len = 512          # 512 characters (not BPE tokens)
-    batch_size = 16        # Same batch size (sequences are longer but manageable)
-    n_epochs = 10          # Start with 10 epochs
+    # Hyperparameters (CHARACTER-LEVEL WITH CURRICULUM LEARNING)
+    batch_size = 16        # Same batch size across all stages
     learning_rate = 1e-3   # Same learning rate
     warmup_steps = 0
+
+    # CURRICULUM LEARNING: Gradually increase sequence length
+    # Start short (learn basic patterns fast) → extend long (learn coherence)
+    # Each stage builds on the previous one's learned representations
+    curriculum_stages = [
+        {'name': 'Stage 1: Characters→Words', 'seq_len': 128, 'epochs': 5},
+        {'name': 'Stage 2: Words→Phrases', 'seq_len': 256, 'epochs': 5},
+        {'name': 'Stage 3: Phrases→Sentences', 'seq_len': 512, 'epochs': 5},
+        {'name': 'Stage 4: Sentences→Paragraphs', 'seq_len': 1024, 'epochs': 10},
+    ]
 
     # Model config (CHARACTER-LEVEL needs more depth!)
     # Character→word composition requires learning lower-level patterns
@@ -332,12 +340,22 @@ def main():
     # Use subset of data for faster iteration
     # Full WikiText-103 is ~400M+ characters (huge!)
     use_subset = True      # Set to False for full training
-    subset_size = 10_000_000  # 10M characters for initial test
+    subset_size = 40_000_000  # 10M characters for initial test
 
-    print("Hyperparameters (CHARACTER-LEVEL):")
-    print(f"  Sequence length: {seq_len} characters")
+    print("=" * 80)
+    print("CURRICULUM LEARNING SCHEDULE:")
+    print("=" * 80)
+    total_epochs = sum(stage['epochs'] for stage in curriculum_stages)
+    for i, stage in enumerate(curriculum_stages, 1):
+        print(f"{i}. {stage['name']}")
+        print(f"   - Sequence length: {stage['seq_len']} characters")
+        print(f"   - Epochs: {stage['epochs']}")
+    print(f"\nTotal epochs: {total_epochs}")
+    print("=" * 80)
+    print()
+
+    print("Hyperparameters:")
     print(f"  Batch size: {batch_size}")
-    print(f"  Epochs: {n_epochs}")
     print(f"  Learning rate: {learning_rate}")
     print(f"  Model: {num_layers}L / {dim}D (CHAR + TIED EMBEDDINGS)")
     print()
@@ -353,31 +371,178 @@ def main():
         print(f"Train characters (subset): {len(train_tokens):,}")
         print()
 
-    # Create datasets
-    train_dataset = TokenDataset(train_tokens, seq_len=seq_len)
-    val_dataset = TokenDataset(val_tokens, seq_len=seq_len)
-    test_dataset = TokenDataset(test_tokens, seq_len=seq_len)
+    # Create model with max_len = longest sequence in curriculum
+    max_seq_len = max(stage['seq_len'] for stage in curriculum_stages)
+    print("Creating model...")
+    model = NovelAttentionLM(
+        vocab_size=vocab_size,
+        dim=dim,
+        num_layers=num_layers,
+        max_len=max_seq_len,
+        device=device
+    ).to(device)
 
-    print(f"Train sequences: {len(train_dataset):,}")
-    print(f"Val sequences: {len(val_dataset):,}")
-    print(f"Test sequences: {len(test_dataset):,}")
+    print(f"Parameters: {model.count_parameters():,} ({model.count_parameters()/1e6:.2f}M)")
     print()
 
-    # Create dataloaders
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=batch_size,
-        shuffle=True,
-        collate_fn=collate_fn,
-        num_workers=0  # Set to 0 for Windows, 2-4 for Linux
-    )
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size=batch_size,
-        shuffle=False,
-        collate_fn=collate_fn,
-        num_workers=0
-    )
+    # Optimizer (reused across curriculum stages)
+    optimizer = optim.AdamW(model.parameters(), lr=learning_rate, betas=(0.9, 0.95))
+    criterion = nn.CrossEntropyLoss()
+
+    # Curriculum training loop
+    print("=" * 80)
+    print("CURRICULUM TRAINING")
+    print("=" * 80)
+    print()
+
+    best_val_ppl = float('inf')
+    total_epoch_counter = 0
+
+    for stage_idx, stage in enumerate(curriculum_stages, 1):
+        stage_name = stage['name']
+        seq_len = stage['seq_len']
+        n_epochs = stage['epochs']
+
+        print("=" * 80)
+        print(f"{stage_name}")
+        print(f"Sequence length: {seq_len}, Epochs: {n_epochs}")
+        print("=" * 80)
+        print()
+
+        # Create datasets for this stage
+        train_dataset = TokenDataset(train_tokens, seq_len=seq_len)
+        val_dataset = TokenDataset(val_tokens, seq_len=seq_len)
+
+        print(f"Train sequences: {len(train_dataset):,}")
+        print(f"Val sequences: {len(val_dataset):,}")
+        print()
+
+        # Create dataloaders for this stage
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=batch_size,
+            shuffle=True,
+            collate_fn=collate_fn,
+            num_workers=0
+        )
+        val_loader = DataLoader(
+            val_dataset,
+            batch_size=batch_size,
+            shuffle=False,
+            collate_fn=collate_fn,
+            num_workers=0
+        )
+
+        print(f"Train batches: {len(train_loader):,}")
+        print(f"Val batches: {len(val_loader):,}")
+        print()
+
+        # Learning rate scheduler for this stage
+        scheduler = optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=len(train_loader) * n_epochs, eta_min=learning_rate * 0.1
+        )
+
+        # Training loop for this stage
+        for epoch in range(n_epochs):
+            total_epoch_counter += 1
+            print(f"Stage {stage_idx}/{len(curriculum_stages)}, Epoch {epoch+1}/{n_epochs} (Total: {total_epoch_counter}/{total_epochs})")
+            print("-" * 80)
+
+            # Train
+            train_loss = train_epoch(model, train_loader, optimizer, scheduler, criterion, device)
+            train_ppl = math.exp(train_loss)
+
+            # Evaluate
+            val_ppl = evaluate(model, val_loader, device)
+
+            print()
+            print(f"Train PPL: {train_ppl:.2f} - Val PPL: {val_ppl:.2f}")
+            print(f"Learning rate: {optimizer.param_groups[0]['lr']:.6f}")
+            print()
+
+            # Save best model
+            if val_ppl < best_val_ppl:
+                best_val_ppl = val_ppl
+                torch.save({
+                    'total_epoch': total_epoch_counter,
+                    'stage': stage_idx,
+                    'stage_name': stage_name,
+                    'model_state_dict': model.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'val_ppl': val_ppl,
+                    'config': {
+                        'vocab_size': vocab_size,
+                        'dim': dim,
+                        'num_layers': num_layers,
+                        'seq_len': seq_len,
+                        'max_len': max_seq_len
+                    }
+                }, 'wikitext103_best.pt')
+                print(f"  → Saved best model (Val PPL: {val_ppl:.2f})")
+                print()
+
+            # Generate samples every epoch
+            if (epoch + 1) % 1 == 0:
+                print("-" * 80)
+                print("Generation Samples:")
+                print("-" * 80)
+
+                prompts = [
+                    "The history of",
+                    "In computer science,",
+                    "The theory of",
+                ]
+
+                samples = generate_samples(model, tokenizer, prompts, max_length=50, temperature=0.8)
+
+                for prompt, sample in zip(prompts, samples):
+                    print(f"\nPrompt: {prompt}")
+                    print(f"Generated: {sample}")
+
+                print()
+                print("=" * 80)
+                print()
+
+        print()
+        print(f"Stage {stage_idx} complete!")
+        print(f"Best validation PPL so far: {best_val_ppl:.2f}")
+        print()
+        print("=" * 80)
+        print()
+
+    # Final test evaluation
+    print("=" * 80)
+    print("Final Test Evaluation")
+    print("=" * 80)
+    print()
+
+    # Save final model state (after all curriculum stages complete)
+    torch.save({
+        'total_epoch': total_epoch_counter,
+        'stage': len(curriculum_stages),
+        'stage_name': 'Final (all stages complete)',
+        'model_state_dict': model.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+        'config': {
+            'vocab_size': vocab_size,
+            'dim': dim,
+            'num_layers': num_layers,
+            'max_len': max_seq_len
+        }
+    }, 'wikitext103_final.pt')
+
+    # Test with FINAL model (not "best" which might be from early stage!)
+    print("Testing FINAL model (after all curriculum stages)...")
+    final_seq_len = curriculum_stages[-1]['seq_len']
+
+    # DIAGNOSTIC: Print data sizes
+    print(f"Data sizes:")
+    print(f"  Train tokens: {len(train_tokens):,}")
+    print(f"  Val tokens: {len(val_tokens):,}")
+    print(f"  Test tokens: {len(test_tokens):,}")
+    print()
+
+    test_dataset = TokenDataset(test_tokens, seq_len=final_seq_len)
     test_loader = DataLoader(
         test_dataset,
         batch_size=batch_size,
@@ -386,125 +551,63 @@ def main():
         num_workers=0
     )
 
-    print(f"Train batches: {len(train_loader):,}")
-    print(f"Val batches: {len(val_loader):,}")
+    print(f"Test sequences ({final_seq_len} seq_len): {len(test_dataset):,}")
     print()
 
-    # Create model
-    print("Creating model...")
-    model = NovelAttentionLM(
-        vocab_size=vocab_size,
-        dim=dim,
-        num_layers=num_layers,
-        max_len=seq_len,
-        device=device
-    ).to(device)
-
-    print(f"Parameters: {model.count_parameters():,} ({model.count_parameters()/1e6:.2f}M)")
+    # DIAGNOSTIC: Also evaluate on validation set with test code
+    print("=" * 80)
+    print("DIAGNOSTIC: Re-evaluating validation set with test code...")
+    print("(Should match final stage validation PPL ~3.30 if code is correct)")
+    print("=" * 80)
+    val_dataset_test = TokenDataset(val_tokens, seq_len=final_seq_len)
+    val_loader_test = DataLoader(
+        val_dataset_test,
+        batch_size=batch_size,
+        shuffle=False,
+        collate_fn=collate_fn,
+        num_workers=0
+    )
+    val_ppl_test = evaluate(model, val_loader_test, device)
+    print(f"Validation PPL (re-evaluated): {val_ppl_test:.2f}")
     print()
 
-    # Optimizer and scheduler
-    optimizer = optim.AdamW(model.parameters(), lr=learning_rate, betas=(0.9, 0.95))
-
-    # Learning rate scheduler
-    if warmup_steps > 0:
-        # Cosine annealing with warmup
-        def lr_lambda(step):
-            if step < warmup_steps:
-                return step / warmup_steps
-            else:
-                progress = (step - warmup_steps) / (len(train_loader) * n_epochs - warmup_steps)
-                return 0.1 + 0.9 * (1 + math.cos(math.pi * progress)) / 2
-        scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
-    else:
-        # No warmup, just cosine decay
-        scheduler = optim.lr_scheduler.CosineAnnealingLR(
-            optimizer, T_max=len(train_loader) * n_epochs, eta_min=learning_rate * 0.1
-        )
-
-    criterion = nn.CrossEntropyLoss()
-
-    # Training loop
-    print("=" * 80)
-    print("Training")
-    print("=" * 80)
+    test_ppl_final = evaluate(model, test_loader, device)
+    print(f"Test Perplexity (FINAL model): {test_ppl_final:.2f}")
     print()
 
-    best_val_ppl = float('inf')
-
-    for epoch in range(n_epochs):
-        print(f"Epoch {epoch+1}/{n_epochs}")
-        print("-" * 80)
-
-        # Train
-        train_loss = train_epoch(model, train_loader, optimizer, scheduler, criterion, device)
-        train_ppl = math.exp(train_loss)
-
-        # Evaluate
-        val_ppl = evaluate(model, val_loader, device)
-
-        print()
-        print(f"Train PPL: {train_ppl:.2f} - Val PPL: {val_ppl:.2f}")
-        print(f"Learning rate: {optimizer.param_groups[0]['lr']:.6f}")
-        print()
-
-        # Save best model
-        if val_ppl < best_val_ppl:
-            best_val_ppl = val_ppl
-            torch.save({
-                'epoch': epoch + 1,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'val_ppl': val_ppl,
-                'config': {
-                    'vocab_size': vocab_size,
-                    'dim': dim,
-                    'num_layers': num_layers,
-                    'seq_len': seq_len
-                }
-            }, 'wikitext103_best.pt')
-            print(f"  → Saved best model (Val PPL: {val_ppl:.2f})")
-            print()
-
-        # Generate samples every epoch
-        if (epoch + 1) % 1 == 0:
-            print("-" * 80)
-            print("Generation Samples:")
-            print("-" * 80)
-
-            prompts = [
-                "The history of",
-                "In computer science,",
-                "The theory of",
-            ]
-
-            samples = generate_samples(model, tokenizer, prompts, max_length=50, temperature=0.8)
-
-            for prompt, sample in zip(prompts, samples):
-                print(f"\nPrompt: {prompt}")
-                print(f"Generated: {sample}")
-
-            print()
-            print("=" * 80)
-            print()
-
-    # Final test evaluation
-    print("=" * 80)
-    print("Final Test Evaluation")
-    print("=" * 80)
+    if abs(val_ppl_test - 3.30) > 0.5:
+        print("⚠️  WARNING: Val PPL re-evaluation doesn't match! Possible evaluation bug.")
+    if test_ppl_final > 10.0:
+        print("⚠️  WARNING: Test PPL is very high! Possible data distribution issue.")
     print()
 
-    # Load best model
+    # Also test "best" model for comparison
+    print("-" * 80)
+    print("Testing BEST validation model (for comparison)...")
     checkpoint = torch.load('wikitext103_best.pt')
+    print(f"  Best model from: {checkpoint.get('stage_name', 'unknown')}")
+    print(f"  Best model seq_len: {checkpoint['config'].get('seq_len', 'unknown')}")
+    print(f"  Best validation PPL: {best_val_ppl:.2f}")
     model.load_state_dict(checkpoint['model_state_dict'])
 
-    test_ppl = evaluate(model, test_loader, device)
-    print(f"Test Perplexity: {test_ppl:.2f}")
+    test_ppl_best = evaluate(model, test_loader, device)
+    print(f"Test Perplexity (BEST model on {final_seq_len} seq_len): {test_ppl_best:.2f}")
     print()
 
-    # Final generation samples
+    print("=" * 80)
+    print("IMPORTANT: If test PPL is much worse for 'BEST' model,")
+    print("it means best model was from early curriculum stage!")
+    print("Always use FINAL model for deployment.")
+    print("=" * 80)
+    print()
+
+    # Final generation samples (using FINAL model, which is currently loaded)
+    # Note: Currently loaded model is "best" from above, reload final
+    final_checkpoint = torch.load('wikitext103_final.pt')
+    model.load_state_dict(final_checkpoint['model_state_dict'])
+
     print("-" * 80)
-    print("Final Generation Samples (longer):")
+    print("Final Generation Samples (using FINAL model after all stages):")
     print("-" * 80)
 
     prompts = [
@@ -524,11 +627,17 @@ def main():
 
     print()
     print("=" * 80)
-    print("Training complete!")
+    print("CURRICULUM TRAINING COMPLETE!")
     print("=" * 80)
     print()
-    print(f"Best validation perplexity: {best_val_ppl:.2f}")
-    print(f"Test perplexity: {test_ppl:.2f}")
+    print(f"Best validation PPL (across all stages): {best_val_ppl:.2f}")
+    print(f"Final model test PPL: {test_ppl_final:.2f}")
+    print(f"Best model test PPL: {test_ppl_best:.2f}")
+    print()
+    print("=" * 80)
+    print("Use 'wikitext103_final.pt' for generation/deployment")
+    print("(not 'wikitext103_best.pt' which may be from early stage)")
+    print("=" * 80)
     print()
 
 
