@@ -2,7 +2,7 @@
 
 ## Overview
 
-Temporal Phase Integration is multi-scale differential equation learner that uses **complex-valued phase trajectories** and **holographic memory** to process sequential data. TPI achieves O(n) complexity through parallel cumulative operations.
+Temporal Phase Integration is a universal temporal dynamics learner that uses **complex-valued phase trajectories** and **holographic memory** to learn arbitrary differential equations from temporal data. TPI achieves O(n) complexity through parallel cumulative operations.
 
 ## Core Principle
 
