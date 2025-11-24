@@ -32,7 +32,7 @@ import time
 import math
 from pathlib import Path
 
-from tempo import Tempo
+from phi import ParallelHolographicIntegrator
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
@@ -201,9 +201,9 @@ class TPIDynamicsPredictor(nn.Module):
         self.register_buffer('pos_encoding', self._create_sinusoidal_encoding(max_len, dim))
 
         # TPI blocks (learn the dynamics!)
-        from tempo import TPIBlock
+        from phi import PHIBlock
         self.blocks = nn.ModuleList([
-            TPIBlock(dim=dim)
+            PHIBlock(dim=dim)
             for _ in range(num_layers)
         ])
 

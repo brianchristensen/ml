@@ -13,7 +13,7 @@ import tiktoken
 import argparse
 from pathlib import Path
 
-from tempo import Tempo
+from phi import ParallelHolographicIntegrator
 
 
 def load_model(checkpoint_path, device='cuda'):
@@ -36,7 +36,7 @@ def load_model(checkpoint_path, device='cuda'):
     tokenizer = tiktoken.get_encoding("gpt2")
 
     # Create model
-    model = Tempo(
+    model = ParallelHolographicIntegrator(
         vocab_size=config['vocab_size'],
         dim=config['dim'],
         num_layers=config['num_layers'],

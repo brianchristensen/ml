@@ -31,7 +31,7 @@ from pathlib import Path
 from datasets import load_dataset
 import tiktoken
 
-from tempo import Tempo
+from phi import ParallelHolographicIntegrator
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
@@ -318,7 +318,7 @@ def main():
 
     # Create model
     print("Creating model...")
-    model = Tempo(
+    model = ParallelHolographicIntegrator(
         vocab_size=vocab_size,
         dim=dim,
         num_layers=num_layers,

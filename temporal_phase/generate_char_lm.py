@@ -8,7 +8,7 @@ to verify it has learned coherent language patterns.
 import torch
 import torch.nn as nn
 import numpy as np
-from tempo import Tempo
+from phi import ParallelHolographicIntegrator
 
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -57,7 +57,7 @@ def generate_text(model, seed_text: str, length: int = 500, temperature: float =
     Generate text autoregressively from a seed.
 
     Args:
-        model: Trained Tempo
+        model: Trained ParallelHolographicIntegrator
         seed_text: Initial text to condition on
         length: Number of characters to generate
         temperature: Sampling temperature (higher = more random)
@@ -184,7 +184,7 @@ def test_generation():
     try:
         checkpoint = torch.load('tempo_charlm_final.pt', map_location=device)
 
-        novel_model = Tempo(
+        novel_model = ParallelHolographicIntegrator(
             vocab_size=256,
             dim=128,
             num_layers=8,

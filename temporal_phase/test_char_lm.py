@@ -19,7 +19,7 @@ import os
 import urllib.request
 import zipfile
 
-from tempo import Tempo
+from phi import ParallelHolographicIntegrator
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
@@ -380,7 +380,7 @@ def main():
     print("=" * 80)
     print()
 
-    novel_model = Tempo(
+    novel_model = ParallelHolographicIntegrator(
         vocab_size=vocab_size,
         dim=128,
         num_layers=8,

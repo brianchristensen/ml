@@ -16,7 +16,7 @@ import time
 from typing import List, Tuple
 import numpy as np
 
-from tempo import Tempo
+from phi import ParallelHolographicIntegrator
 
 
 # ============================================================================
@@ -335,7 +335,7 @@ def main():
     print("=" * 80)
     print()
 
-    phase_model = Tempo(
+    phase_model = ParallelHolographicIntegrator(
         vocab_size=vocab_size,
         dim=128,
         num_layers=8,

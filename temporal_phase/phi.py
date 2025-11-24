@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math
 
-class TPI(nn.Module):
+class PHI(nn.Module):
     def __init__(self, dim):
         super().__init__()
 
@@ -85,19 +85,19 @@ class TPI(nn.Module):
 
         return output
 
-class TPIBlock(nn.Module):
+class PHIBlock(nn.Module):
     def __init__(self, dim):
         super().__init__()
 
         self.norm = nn.LayerNorm(dim)
-        self.integration = TPI(dim)
+        self.integration = PHI(dim)
 
     def forward(self, x):
         x = x + self.integration(self.norm(x))
 
         return x
 
-class Tempo(nn.Module):
+class ParallelHolographicIntegrator(nn.Module):
     def __init__(
         self,
         vocab_size,
@@ -119,7 +119,7 @@ class Tempo(nn.Module):
         self.register_buffer('pos_encoding', self._create_sinusoidal_encoding(max_len, dim))
 
         self.blocks = nn.ModuleList([
-            TPIBlock(dim=dim)
+            PHIBlock(dim=dim)
             for _ in range(num_layers)
         ])
 
@@ -196,7 +196,7 @@ if __name__ == "__main__":
     print()
 
     # Create tiny model
-    model = Tempo(
+    model = ParallelHolographicIntegrator(
         vocab_size=100,
         dim=32,
         num_layers=2,

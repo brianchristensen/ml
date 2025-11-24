@@ -1,12 +1,16 @@
-# Temporal Phase Integration (TPI): Mathematical Formulation
+# Parallel Holographic Integration (PHI): Mathematical Formulation
 
 ## Overview
 
-Temporal Phase Integration is a universal temporal dynamics learner that uses **complex-valued phase trajectories** and **holographic state integration** to learn arbitrary differential equations from temporal data. TPI achieves O(n) complexity through parallel cumulative operations (Euler integration via cumsum).
+Parallel Holographic Integration is a universal temporal dynamics learner that uses **complex-valued phase trajectories** and **holographic state integration** to learn arbitrary differential equations from temporal data.
+- Integration learnable (ω is learned, not specified)
+- Parallelizable (cumsum, not sequential solver)
+- Holographic (distributed binding in complex phase space)
+- Multi-scale (per-dimension rates)
 
 ## Core Principle
 
-**Key Insight:** Each token induces a learned velocity in complex phase space. The model learns per-dimension differential equations ω(x) and integrates them via cumsum to compute evolving phase trajectories. TPI learns the **dynamics** of temporal sequences, not content-based retrieval.
+**Key Insight:** Each token induces a learned velocity in complex phase space. The model learns per-dimension differential equations ω(x) and integrates them via cumsum to compute evolving phase trajectories. PHI learns the **dynamics** of temporal sequences, not content-based retrieval.
 
 ## Mathematical Components
 
@@ -73,7 +77,7 @@ features_t = state_t * e^(-iφ_t)
 
 This integrates the accumulated phase-modulated state trajectory up to time t. The phase multiplication couples content evolution with learned temporal dynamics.
 
-TPI maintains a single evolving state trajectory that continuously integrates all previous inputs weighted by learned phase dynamics.
+PHI maintains a single evolving state trajectory that continuously integrates all previous inputs weighted by learned phase dynamics.
 
 **Key Features:**
 - **Holographic binding:** Complex multiplication e^(iφ) binds content to phase state
@@ -106,12 +110,12 @@ contribution ∝ e^(iφ_s) · e^(-iφ_t) = e^(i(φ_s - φ_t))
 - This couples the integrated state with the current trajectory position
 - Not retrieval: the model cannot recall arbitrary past content
 
-**What TPI Cannot Do:**
+**What PHI Cannot Do:**
 - No content-based retrieval (cannot look up arbitrary facts)
 - No associative recall (cannot bind arbitrary key-value pairs)
 - No episodic memory (will drift over long contexts)
 
-**What TPI Does:**
+**What PHI Does:**
 - Learns temporal dynamics (how sequences evolve over time)
 - Integrates state trajectories in phase space
 - Generates via learned flow fields, not memory lookup
@@ -184,7 +188,7 @@ Given input sequence **x** ∈ ℝⁿˣᵈ:
 
 #### Dimensionality
 
-Each dimension in TPI evolves independently:
+Each dimension in PHI evolves independently:
 
 omega = self.to_omega(x)  # [batch, seq, dim]
 phi = phi_init + cumsum(omega * self.integration_scale.abs())
@@ -231,30 +235,30 @@ So with dim=512, you effectively have 512 independent channels, each with its ow
 
 ### Communication Through Coherence (CTC)
 - Neural oscillations synchronize via phase alignment
-- TPI: learned phase trajectories couple content and temporal dynamics
+- PHI: learned phase trajectories couple content and temporal dynamics
 - Phase modulation creates temporal binding
 
 ### Holographic Memory / HRR (Holographic Reduced Representations)
 - Distributed storage via binding operations (complex multiplication)
 - Superposition of bound patterns in shared representation space
-- TPI: uses holographic binding (x · e^(iφ)) to accumulate state trajectories
+- PHI: uses holographic binding (x · e^(iφ)) to accumulate state trajectories
 - NOT for retrieval - used to integrate dynamics in distributed phase-space representation
 - Interference patterns drive state evolution, not content lookup
 
 ### Dynamical Systems Theory
 - State evolution governed by differential equations
-- TPI: learns dφ/dt = ω(x) per dimension
+- PHI: learns dφ/dt = ω(x) per dimension
 - Euler integration via cumsum (no solver needed)
 - Universal approximation of temporal dynamics
 
 ### State Space Models (S4, Mamba)
 - Recurrent dynamics via cumulative operations
-- TPI: cumsum(ω) provides implicit recurrence
+- PHI: cumsum(ω) provides implicit recurrence
 - O(n) parallel computation via associative scan
 
 ### Fourier Neural Operators
 - Frequency-based representations
-- TPI: ω as learned frequency, φ as accumulated phase
+- PHI: ω as learned frequency, φ as accumulated phase
 - Content-based frequency allocation
 
 ## Complexity Analysis
@@ -284,7 +288,7 @@ So with dim=512, you effectively have 512 independent channels, each with its ow
 4. **Lossy dynamics:** Finite state capacity causes information blending/forgetting
 
 ### Theoretical Questions
-1. What class of differential equations can TPI learn?
+1. What class of differential equations can PHI learn?
 2. What is the capacity of phase-space state integration?
 3. How does learnable α affect trajectory stability and information retention?
 4. What is the optimal balance between φ_init and cumsum(ω)?
@@ -292,7 +296,7 @@ So with dim=512, you effectively have 512 independent channels, each with its ow
 
 ## Comparison with Transformers
 
-| Property | Transformer | TPI |
+| Property | Transformer | PHI |
 |----------|------------|-----|
 | Complexity | O(n²) | O(n) |
 | Memory | O(n²) KV cache | O(n) |
@@ -309,13 +313,13 @@ Classic HRR:
 Random vectors → Guaranteed ~orthogonal (high probability)
 E[⟨v₁, v₂⟩] ≈ 0 for random v₁, v₂
 
-TPI:
+PHI:
 Learned embeddings → NO orthogonality guarantee!
 In fact, similar tokens SHOULD be close:
 x_cat ≈ x_dog  (semantically similar)
 x_king ≈ x_queen
 
-So why does TPI work without guaranteed orthogonality?
+So why does PHI work without guaranteed orthogonality?
 
 The Answer: Orthogonality is in PHASE Space, not Embedding Space!
 
@@ -331,7 +335,7 @@ phi_dog = phi_init(x_dog) + cumsum(omega_dog)
 # Even if x_cat ≈ x_dog, the model learns:
 phi_init(x_cat) ≠ phi_init(x_dog)  # Separation in phase space!
 
-## How TPI Achieves Separation
+## How PHI Achieves Separation
 
 1. Content-Based Phase Init (phi_init):
 phi_init = W_init · x
@@ -352,7 +356,7 @@ phi = phi_init + cumsum(omega * alpha)
 
 The Beautiful Difference
 
-| Property     | Classic HRR           | TPI                 |
+| Property     | Classic HRR           | PHI                 |
 |--------------|-----------------------|---------------------|
 | Vector Space | Random orthogonality  | Semantic similarity |
 | Phase Space  | N/A                   | Learned separation  |
@@ -362,7 +366,7 @@ The Beautiful Difference
 
 Classic HRR: "All symbols are equally different" (random)
 
-TPI: "Semantically related content can be close in embedding space but separated in phase space"
+PHI: "Semantically related content can be close in embedding space but separated in phase space"
 
 This allows:
 - ✅ Semantic similarity in embeddings (useful for generalization)
@@ -374,11 +378,11 @@ This allows:
 1. **Adaptive phase dynamics:** Learn when to advance phase vs. stay coherent
 2. **Multi-scale dynamics:** Different frequency bands for different timescales
 3. **Hierarchical integration:** Multi-level temporal dynamics
-4. **Hybrid architectures:** Combine dynamics (TPI) + episodic memory (attention/retrieval)
+4. **Hybrid architectures:** Combine dynamics (PHI) + episodic memory (attention/retrieval)
 5. **Higher-order integrators:** Beyond Euler (RK4, adaptive step size)
 6. **Symbolic dynamics:** Learn discrete state transitions in continuous phase space
 
 ---
 
-**Implementation:** See `tempo.py` for PyTorch implementation
+**Implementation:** See `phi.py` for PyTorch implementation
 **Ablation Study:** Content-based phase initialization is critical for generation quality
