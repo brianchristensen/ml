@@ -12,7 +12,7 @@ import torch.nn.functional as F
 import argparse
 from pathlib import Path
 
-from novel_attention import NovelAttentionLM
+from tempo import Tempo
 
 
 class CharacterTokenizer:
@@ -56,7 +56,7 @@ def load_model(checkpoint_path, device='cuda'):
     tokenizer = CharacterTokenizer()
 
     # Create model
-    model = NovelAttentionLM(
+    model = Tempo(
         vocab_size=config['vocab_size'],
         dim=config['dim'],
         num_layers=config['num_layers'],

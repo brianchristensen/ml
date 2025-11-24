@@ -22,7 +22,7 @@ from torch.utils.data import Dataset, DataLoader
 import time
 import numpy as np
 
-from novel_attention import NovelAttentionLM
+from tempo import Tempo
 
 
 # Special tokens
@@ -406,7 +406,7 @@ def main():
     print("=" * 80)
     print()
 
-    phase_model = NovelAttentionLM(
+    phase_model = Tempo(
         vocab_size=vocab_size,
         dim=128,
         num_layers=8,

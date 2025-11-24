@@ -40,7 +40,7 @@ from pathlib import Path
 
 from datasets import load_dataset
 
-from novel_attention import NovelAttentionLM
+from tempo import Tempo
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
@@ -374,7 +374,7 @@ def main():
     # Create model with max_len = longest sequence in curriculum
     max_seq_len = max(stage['seq_len'] for stage in curriculum_stages)
     print("Creating model...")
-    model = NovelAttentionLM(
+    model = Tempo(
         vocab_size=vocab_size,
         dim=dim,
         num_layers=num_layers,

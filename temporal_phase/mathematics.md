@@ -348,5 +348,5 @@ This allows:
 
 ---
 
-**Implementation:** See `novel_attention.py` for PyTorch implementation
+**Implementation:** See `tempo.py` for PyTorch implementation
 **Ablation Study:** Content-based phase initialization is critical for generation quality

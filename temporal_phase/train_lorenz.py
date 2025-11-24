@@ -32,7 +32,7 @@ import time
 import math
 from pathlib import Path
 
-from novel_attention import NovelAttentionLM
+from tempo import Tempo
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
@@ -201,7 +201,7 @@ class TPIDynamicsPredictor(nn.Module):
         self.register_buffer('pos_encoding', self._create_sinusoidal_encoding(max_len, dim))
 
         # TPI blocks (learn the dynamics!)
-        from novel_attention import TPIBlock
+        from tempo import TPIBlock
         self.blocks = nn.ModuleList([
             TPIBlock(dim=dim)
             for _ in range(num_layers)

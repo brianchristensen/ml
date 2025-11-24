@@ -76,7 +76,7 @@ Train BPC: 2.3169 - Val BPC: 2.9667
 
 Final Test BPC: 3.0099
 
-Saved final model to novel_attention_charlm_final.pt
+Saved final model to tempo_charlm_final.pt
 
 ================================================================================
 Results Summary

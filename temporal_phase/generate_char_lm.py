@@ -8,7 +8,7 @@ to verify it has learned coherent language patterns.
 import torch
 import torch.nn as nn
 import numpy as np
-from novel_attention import NovelAttentionLM
+from tempo import Tempo
 
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -57,7 +57,7 @@ def generate_text(model, seed_text: str, length: int = 500, temperature: float =
     Generate text autoregressively from a seed.
 
     Args:
-        model: Trained NovelAttentionLM
+        model: Trained Tempo
         seed_text: Initial text to condition on
         length: Number of characters to generate
         temperature: Sampling temperature (higher = more random)
@@ -182,9 +182,9 @@ def test_generation():
     print("Loading Novel Attention model...")
 
     try:
-        checkpoint = torch.load('novel_attention_charlm_final.pt', map_location=device)
+        checkpoint = torch.load('tempo_charlm_final.pt', map_location=device)
 
-        novel_model = NovelAttentionLM(
+        novel_model = Tempo(
             vocab_size=256,
             dim=128,
             num_layers=8,

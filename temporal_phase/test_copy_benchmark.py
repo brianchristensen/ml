@@ -16,7 +16,7 @@ import time
 from typing import List, Tuple
 import numpy as np
 
-from novel_attention import NovelAttentionLM
+from tempo import Tempo
 
 
 # ============================================================================
@@ -335,7 +335,7 @@ def main():
     print("=" * 80)
     print()
 
-    phase_model = NovelAttentionLM(
+    phase_model = Tempo(
         vocab_size=vocab_size,
         dim=128,
         num_layers=8,

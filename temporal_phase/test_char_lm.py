@@ -19,7 +19,7 @@ import os
 import urllib.request
 import zipfile
 
-from novel_attention import NovelAttentionLM
+from tempo import Tempo
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
@@ -380,7 +380,7 @@ def main():
     print("=" * 80)
     print()
 
-    novel_model = NovelAttentionLM(
+    novel_model = Tempo(
         vocab_size=vocab_size,
         dim=128,
         num_layers=8,
@@ -411,7 +411,7 @@ def main():
                 'model_state_dict': novel_model.state_dict(),
                 'optimizer_state_dict': optimizer_novel.state_dict(),
                 'best_val_bpc': best_val_bpc_novel,
-            }, 'novel_attention_charlm.pt')
+            }, 'tempo_charlm.pt')
             print(f"  Saved best model (Val BPC: {best_val_bpc_novel:.4f})")
 
     # Test
@@ -426,8 +426,8 @@ def main():
         'optimizer_state_dict': optimizer_novel.state_dict(),
         'best_val_bpc': best_val_bpc_novel,
         'test_bpc': test_bpc_novel,
-    }, 'novel_attention_charlm_final.pt')
-    print("Saved final model to novel_attention_charlm_final.pt")
+    }, 'tempo_charlm_final.pt')
+    print("Saved final model to tempo_charlm_final.pt")
     print()
 
     # ========================================================================

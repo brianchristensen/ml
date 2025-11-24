@@ -13,7 +13,7 @@ import tiktoken
 import argparse
 from pathlib import Path
 
-from novel_attention import NovelAttentionLM
+from tempo import Tempo
 
 
 def load_model(checkpoint_path, device='cuda'):
@@ -36,7 +36,7 @@ def load_model(checkpoint_path, device='cuda'):
     tokenizer = tiktoken.get_encoding("gpt2")
 
     # Create model
-    model = NovelAttentionLM(
+    model = Tempo(
         vocab_size=config['vocab_size'],
         dim=config['dim'],
         num_layers=config['num_layers'],
