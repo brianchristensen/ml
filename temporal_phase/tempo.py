@@ -42,18 +42,15 @@ class TPI(nn.Module):
 
         gate = torch.sigmoid(self.to_gate(x))
 
-
         omega_scaled = omega * self.integration_scale.abs()
         gated_omega = gate * omega_scaled
 
         phi = phi_init + torch.cumsum(gated_omega, dim=1)
 
-
         trajectory_real = torch.cos(phi)
         trajectory_imag = torch.sin(phi)
 
         weighted_content = magnitude * x
-
 
         memory_real = torch.cumsum(weighted_content * torch.cos(phi), dim=1)
         memory_imag = torch.cumsum(weighted_content * torch.sin(phi), dim=1)
@@ -81,7 +78,6 @@ class TPI(nn.Module):
             retrieved_real,
             retrieved_imag
         ], dim=-1)
-
 
         phase_contribution = self.to_out(context)
 
@@ -223,13 +219,3 @@ if __name__ == "__main__":
 
     print()
     print("[PASS] Sanity check passed!")
-    print()
-    print("Core novel mechanism: Temporal Phase Integration")
-    print("- NO pairwise computation (no Q@K^T)")
-    print("- NO sequential loops (parallel cumsum)")
-    print("- NO hard context limits (infinite context!)")
-    print("- Cumulative sum of phase rotations")
-    print("- Position in phase space = context")
-    print("- Graceful degradation across infinite sequences")
-    print()
-    print("The temporal SEQUENCE IS the representation!")
