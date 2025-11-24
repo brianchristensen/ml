@@ -2,11 +2,11 @@
 
 ## Overview
 
-Temporal Phase Integration is a universal temporal dynamics learner that uses **complex-valued phase trajectories** and **holographic memory** to learn arbitrary differential equations from temporal data. TPI achieves O(n) complexity through parallel cumulative operations.
+Temporal Phase Integration is a universal temporal dynamics learner that uses **complex-valued phase trajectories** and **holographic state integration** to learn arbitrary differential equations from temporal data. TPI achieves O(n) complexity through parallel cumulative operations (Euler integration via cumsum).
 
 ## Core Principle
 
-**Key Insight:** Each token induces a rotation in complex phase space. The accumulated phase trajectory encodes both content and temporal context, enabling information retrieval through constructive/destructive interference.
+**Key Insight:** Each token induces a learned velocity in complex phase space. The model learns per-dimension differential equations ω(x) and integrates them via cumsum to compute evolving phase trajectories. TPI learns the **dynamics** of temporal sequences, not content-based retrieval.
 
 ## Mathematical Components
 
@@ -20,90 +20,101 @@ For input sequence **x** = [x₁, x₂, ..., xₙ] where xᵢ ∈ ℝᵈ:
 ```
 where W_init ∈ ℝᵈˣᵈ maps content to initial phase regions
 
-#### Trajectory Integration
+#### Trajectory Integration (Learned Euler Integration)
 ```
-ω_t = W_ω · xᵗ                          (semantic rotation rate)
-φ_t = φ_init,t + Σᵢ₌₁ᵗ (α ⊙ ω_i)        (cumulative phase trajectory)
+ω_t = W_ω · xᵗ                          (learned phase velocity / dφ/dt)
+φ_t = φ_init,t + Σᵢ₌₁ᵗ (α ⊙ ω_i)        (Euler integration of phase ODE)
 ```
 where:
-- ω_t ∈ ℝᵈ is the learned phase increment
-- α ∈ ℝᵈ is a learnable integration scale (initialized to 0.01)
+- ω_t ∈ ℝᵈ is the learned phase velocity (differential equation: dφ/dt = ω(x))
+- α ∈ ℝᵈ is a learnable integration scale / step size (initialized to 0.01)
 - ⊙ denotes element-wise multiplication
-- Σ represents cumulative sum
+- Σ represents cumulative sum (parallel Euler integration)
 
 **Properties:**
-- φ_t encodes both content (via φ_init) and temporal position (via cumsum)
-- Each dimension can evolve at a different rate (learned α)
+- φ_t integrates a learned velocity field ω(x) over the sequence
+- Each dimension evolves according to its own learned differential equation
+- No solver needed: cumsum implements parallelizable Euler integration
 - Infinite context: φ_t can grow unbounded with sequence length
 
-### 2. Holographic Memory Storage
+### 2. Complex State Accumulation
 
 #### Magnitude Weighting
 ```
 m_t = σ(W_m · xᵗ) · scale_m
 ```
-where σ is sigmoid, scale_m = 5.0 (importance weighting)
+where σ is sigmoid, scale_m = 5.0 (learned importance scaling for state evolution)
 
-#### Complex Memory Accumulation
+#### Complex State Integration
 ```
-M_t = Σᵢ₌₁ᵗ (m_i · xᵢ · e^(iφᵢ)) / Σᵢ₌₁ᵗ m_i
+S_t = Σᵢ₌₁ᵗ (m_i · xᵢ · e^(iφᵢ)) / Σᵢ₌₁ᵗ m_i
 ```
 
 Expanding e^(iφ) = cos(φ) + i·sin(φ):
 ```
-M_real,t = [Σᵢ₌₁ᵗ (m_i · xᵢ · cos(φᵢ))] / [Σᵢ₌₁ᵗ m_i]
-M_imag,t = [Σᵢ₌₁ᵗ (m_i · xᵢ · sin(φᵢ))] / [Σᵢ₌₁ᵗ m_i]
+S_real,t = [Σᵢ₌₁ᵗ (m_i · xᵢ · cos(φᵢ))] / [Σᵢ₌₁ᵗ m_i]
+S_imag,t = [Σᵢ₌₁ᵗ (m_i · xᵢ · sin(φᵢ))] / [Σᵢ₌₁ᵗ m_i]
 ```
 
-#### Accumulated Memories per Position
+#### Accumulated State per Position
 
-Each token position stores the accumulated sum of all previous tokens
+Each position represents the integrated state trajectory up to time t
 
-Token-by-Token Breakdown
+Token-by-Token State Evolution
 
-Position 1: memory₁ = m₁·x₁·e^(iφ₁)
-Position 2: memory₂ = m₁·x₁·e^(iφ₁) + m₂·x₂·e^(iφ₂)
-Position 3: memory₃ = m₁·x₁·e^(iφ₁) + m₂·x₂·e^(iφ₂) + m₃·x₃·e^(iφ₃)
+Position 1: state₁ = m₁·x₁·e^(iφ₁)
+Position 2: state₂ = m₁·x₁·e^(iφ₁) + m₂·x₂·e^(iφ₂)
+Position 3: state₃ = m₁·x₁·e^(iφ₁) + m₂·x₂·e^(iφ₂) + m₃·x₃·e^(iφ₃)
 ...
-Position t: memory_t = Σᵢ₌₁ᵗ mᵢ·xᵢ·e^(iφᵢ)
+Position t: state_t = Σᵢ₌₁ᵗ mᵢ·xᵢ·e^(iφᵢ)
 
-When we query at position t:
-retrieved_t = memory_t * e^(-iφ_t)
+At position t, we compute trajectory-modulated features:
+features_t = state_t * e^(-iφ_t)
 
-We're querying the entire accumulated memory up to position t, and interference picks out the relevant content based on phase alignment
+This integrates the accumulated phase-modulated state trajectory up to time t. The phase multiplication couples content evolution with learned temporal dynamics.
 
-TPI doesn't store individual token memories, it stores a single evolving holographic trace that continuously accumulates all previous tokens, weighted by their phases
+TPI maintains a single evolving state trajectory that continuously integrates all previous inputs weighted by learned phase dynamics.
 
 **Key Features:**
-- **Normalization by Σm_i:** Prevents unbounded memory growth
-- **Graceful degradation:** As more patterns stored, each is diluted (holographic property)
-- **Magnitude weighting:** Important tokens contribute more to memory
-- **Phase encoding:** Each token is bound to its phase via complex multiplication
+- **Holographic binding:** Complex multiplication e^(iφ) binds content to phase state
+- **Distributed superposition:** All previous states accumulated in shared representation
+- **Normalization by Σm_i:** Prevents unbounded state growth (bounded dynamical system)
+- **Lossy integration:** Finite state capacity; older information naturally blends/fades
+- **Magnitude weighting:** Learned importance scaling for state contributions
 
-### 3. Phase-Coherent Retrieval
+### 3. Trajectory-Modulated Features
 
-Retrieve information by multiplying memory by conjugate of query phase:
+Compute features by modulating accumulated state with current phase:
 ```
-retrieved_t = M_t · e^(-iφ_t)
+features_t = S_t · e^(-iφ_t)
 ```
 
 Expanding:
 ```
-retrieved_real,t = M_real,t · cos(φ_t) + M_imag,t · sin(φ_t)
-retrieved_imag,t = M_imag,t · cos(φ_t) - M_real,t · sin(φ_t)
+features_real,t = S_real,t · cos(φ_t) + S_imag,t · sin(φ_t)
+features_imag,t = S_imag,t · cos(φ_t) - S_real,t · sin(φ_t)
 ```
 
-**Mechanism (Constructive/Destructive Interference):**
+**Mechanism (Phase-Space Dynamics):**
 
-For a pattern stored at phase φ_s and queried at phase φ_q:
+The multiplication by e^(-iφ_t) creates phase-dependent feature modulation:
 ```
-contribution ∝ e^(iφ_s) · e^(-iφ_q) = e^(i(φ_s - φ_q))
+contribution ∝ e^(iφ_s) · e^(-iφ_t) = e^(i(φ_s - φ_t))
 ```
 
-- If φ_s ≈ φ_q (similar phases): e^(i·0) = 1 → **constructive interference**
-- If φ_s ≠ φ_q (different phases): e^(i·Δφ) → **destructive interference**
+- Different phase offsets (φ_s - φ_t) produce different feature activations
+- This couples the integrated state with the current trajectory position
+- Not retrieval: the model cannot recall arbitrary past content
 
-This provides **automatic content-based filtering** without explicit similarity computation!
+**What TPI Cannot Do:**
+- No content-based retrieval (cannot look up arbitrary facts)
+- No associative recall (cannot bind arbitrary key-value pairs)
+- No episodic memory (will drift over long contexts)
+
+**What TPI Does:**
+- Learns temporal dynamics (how sequences evolve over time)
+- Integrates state trajectories in phase space
+- Generates via learned flow fields, not memory lookup
 
 ### 4. Trajectory Binding
 
@@ -119,13 +130,13 @@ This preserves semantic content while modulating it with temporal phase context.
 
 #### Context Concatenation
 ```
-context_t = [x_bound,real,t; x_bound,imag,t; retrieved_real,t; retrieved_imag,t]
+context_t = [x_bound,real,t; x_bound,imag,t; features_real,t; features_imag,t]
 ```
 where context_t ∈ ℝ⁴ᵈ
 
 This combines:
-- **When/where information** (trajectory binding)
-- **What information** (retrieved content from phase-coherent memory)
+- **Current trajectory position** (x modulated by current phase)
+- **Integrated state dynamics** (accumulated trajectory-modulated features)
 
 #### Multi-Layer Projection (Pre-Norm)
 ```
@@ -148,26 +159,26 @@ y_t = xᵗ + output_t
 
 Given input sequence **x** ∈ ℝⁿˣᵈ:
 
-1. **Compute phases:**
+1. **Compute phase trajectories (Euler integration):**
    - φ_init = W_init · x
-   - ω = W_ω · x
-   - φ = φ_init + cumsum(α ⊙ ω)
+   - ω = W_ω · x  (learned velocity field)
+   - φ = φ_init + cumsum(α ⊙ ω)  (integrate dφ/dt = ω)
 
-2. **Store in holographic memory:**
+2. **Integrate state dynamics:**
    - m = σ(W_m · x) · 5.0
-   - M_real = cumsum(m ⊙ x ⊙ cos(φ)) / cumsum(m)
-   - M_imag = cumsum(m ⊙ x ⊙ sin(φ)) / cumsum(m)
+   - S_real = cumsum(m ⊙ x ⊙ cos(φ)) / cumsum(m)
+   - S_imag = cumsum(m ⊙ x ⊙ sin(φ)) / cumsum(m)
 
-3. **Retrieve from memory:**
-   - r_real = M_real ⊙ cos(φ) + M_imag ⊙ sin(φ)
-   - r_imag = M_imag ⊙ cos(φ) - M_real ⊙ sin(φ)
+3. **Compute trajectory-modulated features:**
+   - f_real = S_real ⊙ cos(φ) + S_imag ⊙ sin(φ)
+   - f_imag = S_imag ⊙ cos(φ) - S_real ⊙ sin(φ)
 
-4. **Bind trajectory:**
+4. **Bind to trajectory:**
    - b_real = x ⊙ cos(φ)
    - b_imag = x ⊙ sin(φ)
 
 5. **Project and output:**
-   - context = [b_real; b_imag; r_real; r_imag]
+   - context = [b_real; b_imag; f_real; f_imag]
    - output = MLP(context)
    - y = x + output
 
@@ -183,43 +194,58 @@ phi = phi_init + cumsum(omega * self.integration_scale.abs())
 - Each dimension stores/retrieves independently in its own phase subspace
 
 So with dim=512, you effectively have 512 independent channels, each with its own:
-- Phase velocity (omega)
-- Integration rate (scale)
+- Phase velocity field (omega)
+- Integration rate / step size (scale)
 - Phase trajectory (phi)
-- Storage/retrieval dynamic
+- Learned differential equation dynamics
 
-## Why This Works
+## Why This Works for Dynamics Learning
 
 ### Content-Based Phase Initialization
-- Maps similar content to similar phase regions
-- Prevents phase collapse during generation
-- Critical for autoregressive robustness
+- Maps input content to initial phase states
+- Prevents phase collapse during autoregressive generation
+- Critical for maintaining diverse phase trajectories
 
 **Ablation Results:**
 - Without φ_init: BPC degrades, generation fails catastrophically
-- With φ_init: BPC 2.03, coherent generation
+- With φ_init: BPC 2.03, coherent (local) generation
 
-### Holographic Normalization
-- Bounded memory: ||M_t|| ≈ O(1) regardless of sequence length
-- Graceful degradation: older information blends via interference
-- Recency bias: recent tokens have stronger contribution
+### State Normalization
+- Bounded dynamics: ||S_t|| ≈ O(1) regardless of sequence length
+- Natural forgetting: older information blends into integrated state
+- Lossy compression: finite capacity like real dynamical systems
 
-### Phase-Space Dynamics
-- Different content → different φ_init → separated in phase space
-- Trajectory integration (cumsum) adds temporal ordering
-- Interference-based retrieval provides soft content matching
+### Learning Temporal Dynamics
+- Model learns velocity fields ω(x) that govern sequence evolution
+- Euler integration via cumsum computes trajectories in parallel
+- Works for: language dynamics, video dynamics, chaotic systems (Lorenz)
+- Does NOT work for: fact recall, associative memory, long-range grounding
+
+**Why Language Works Without Retrieval:**
+- Language has local statistical structure (grammar, syntax)
+- Short-term dynamics captured by phase trajectories
+- Long-range coherence drifts (no episodic memory)
+- Model learns "how text flows" not "what facts are true"
 
 ## Theoretical Connections
 
 ### Communication Through Coherence (CTC)
 - Neural oscillations synchronize via phase alignment
-- TPI: phase coherence → constructive retrieval
-- Phase difference → destructive filtering
+- TPI: learned phase trajectories couple content and temporal dynamics
+- Phase modulation creates temporal binding
 
-### Holographic Memory (Gabor, Pribram)
-- Information distributed across entire memory
-- Interference patterns enable content-addressable storage
-- TPI: complex phase space as holographic medium
+### Holographic Memory / HRR (Holographic Reduced Representations)
+- Distributed storage via binding operations (complex multiplication)
+- Superposition of bound patterns in shared representation space
+- TPI: uses holographic binding (x · e^(iφ)) to accumulate state trajectories
+- NOT for retrieval - used to integrate dynamics in distributed phase-space representation
+- Interference patterns drive state evolution, not content lookup
+
+### Dynamical Systems Theory
+- State evolution governed by differential equations
+- TPI: learns dφ/dt = ω(x) per dimension
+- Euler integration via cumsum (no solver needed)
+- Universal approximation of temporal dynamics
 
 ### State Space Models (S4, Mamba)
 - Recurrent dynamics via cumulative operations
@@ -235,8 +261,8 @@ So with dim=512, you effectively have 512 independent channels, each with its ow
 
 ### Time Complexity
 - Phase computation: O(n·d) via cumsum
-- Memory storage: O(n·d) via cumsum
-- Retrieval: O(n·d) element-wise ops
+- State integration: O(n·d) via cumsum
+- Feature computation: O(n·d) element-wise ops
 - Total: **O(n·d)** vs O(n²·d) for attention
 
 ### Space Complexity
@@ -252,15 +278,17 @@ So with dim=512, you effectively have 512 independent channels, each with its ow
 ## Limitations and Open Questions
 
 ### Current Limitations
-1. **Arbitrary key-value binding:** Interference-based retrieval assumes similarity structure
-2. **Length generalization:** Phase values at unseen positions can be OOD
-3. **Exact recall:** Normalization causes graceful degradation, not exact storage
+1. **No content-based retrieval:** Cannot recall arbitrary facts or do associative memory
+2. **Long-range drift:** No episodic memory; generations drift over long contexts
+3. **Length generalization:** Phase values at unseen positions can be OOD
+4. **Lossy dynamics:** Finite state capacity causes information blending/forgetting
 
 ### Theoretical Questions
-1. What is the capacity of phase-space holographic memory?
-2. Can we characterize the interference patterns mathematically?
-3. How does learnable α affect information retention curves?
+1. What class of differential equations can TPI learn?
+2. What is the capacity of phase-space state integration?
+3. How does learnable α affect trajectory stability and information retention?
 4. What is the optimal balance between φ_init and cumsum(ω)?
+5. Can we add episodic memory without losing O(n) complexity?
 
 ## Comparison with Transformers
 
@@ -269,9 +297,11 @@ So with dim=512, you effectively have 512 independent channels, each with its ow
 | Complexity | O(n²) | O(n) |
 | Memory | O(n²) KV cache | O(n) |
 | Context | Fixed window | Unbounded |
-| Retrieval | Explicit similarity | Phase interference |
-| Degradation | Hard cutoff | Graceful |
+| Mechanism | Content retrieval | Dynamics learning |
+| Degradation | Hard cutoff | Graceful drift |
 | Autoregressive | Stable | Requires φ_init |
+| Fact recall | Yes | No |
+| Temporal dynamics | Implicit | Explicit |
 
 ## Comparison with Holographic Reduced representations
 
@@ -336,15 +366,17 @@ TPI: "Semantically related content can be close in embedding space but separated
 
 This allows:
 - ✅ Semantic similarity in embeddings (useful for generalization)
-- ✅ Phase separation for interference (useful for retrieval)
+- ✅ Phase separation in trajectory space (useful for dynamics)
 - ✅ Task-optimized structure (learned, not random)
 
 ## Future Directions
 
 1. **Adaptive phase dynamics:** Learn when to advance phase vs. stay coherent
-2. **Multi-scale phases:** Different frequency bands for different timescales
-3. **Phase synchronization:** Explicit mechanisms for binding related concepts
-4. **Hybrid architectures:** Combine semantic (TPI) + episodic (position-based) memory
+2. **Multi-scale dynamics:** Different frequency bands for different timescales
+3. **Hierarchical integration:** Multi-level temporal dynamics
+4. **Hybrid architectures:** Combine dynamics (TPI) + episodic memory (attention/retrieval)
+5. **Higher-order integrators:** Beyond Euler (RK4, adaptive step size)
+6. **Symbolic dynamics:** Learn discrete state transitions in continuous phase space
 
 ---
 
