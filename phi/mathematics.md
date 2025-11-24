@@ -376,11 +376,9 @@ This allows:
 ## Future Directions
 
 1. **Adaptive phase dynamics:** Learn when to advance phase vs. stay coherent
-2. **Multi-scale dynamics:** Different frequency bands for different timescales
-3. **Hierarchical integration:** Multi-level temporal dynamics
-4. **Hybrid architectures:** Combine dynamics (PHI) + episodic memory (attention/retrieval)
-5. **Higher-order integrators:** Beyond Euler (RK4, adaptive step size)
-6. **Symbolic dynamics:** Learn discrete state transitions in continuous phase space
+2. **Hybrid architectures:** Combine dynamics (PHI) + episodic memory (attention/retrieval)
+3. **Higher-order integrators:** Beyond Euler (RK4, adaptive step size)
+4. **Symbolic dynamics:** Learn discrete state transitions in continuous phase space
 
 ---
 
