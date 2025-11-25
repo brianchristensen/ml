@@ -27,7 +27,10 @@
       "Bash(timeout 600 python:*)",
       "Bash(pkill:*)",
       "Bash(timeout:*)",
-      "Bash(pip install:*)"
+      "Bash(pip install:*)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:www.arxiv-vanity.com)",
+      "WebFetch(domain:ar5iv.labs.arxiv.org)"
     ],
     "deny": [],
     "ask": []

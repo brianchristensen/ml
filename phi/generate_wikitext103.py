@@ -55,11 +55,13 @@ def load_model(checkpoint_path, device='cuda'):
     tokenizer = CharacterTokenizer()
 
     # Create model
+    # Use 'max_len' if available, fall back to 'seq_len' for backwards compatibility
+    max_len = config.get('max_len', config.get('seq_len', 1024))
     model = ParallelHolographicIntegrator(
         vocab_size=config['vocab_size'],
         dim=config['dim'],
         num_layers=config['num_layers'],
-        max_len=config['seq_len'],
+        max_len=max_len,
         device=device
     ).to(device)
 
