@@ -1,0 +1,42 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "WebFetch(domain:arxiv.org)",
+      "WebFetch(domain:pages.ucsd.edu)",
+      "WebFetch(domain:www.frontiersin.org)",
+      "WebFetch(domain:pmc.ncbi.nlm.nih.gov)",
+      "Bash(python model.py:*)",
+      "WebFetch(domain:rctn.org)",
+      "Bash(python model_learned.py:*)",
+      "Bash(python model_hybrid.py:*)",
+      "Bash(python train.py:*)",
+      "Bash(python test_recursive.py:*)",
+      "Bash(python test_memory.py:*)",
+      "Bash(python debug_memory.py:*)",
+      "Bash(python test.py:*)",
+      "Bash(git add:*)",
+      "Bash(awk:*)",
+      "Bash(tee:*)",
+      "Bash(python model_hrr_trm_agi.py:*)",
+      "Bash(python:*)",
+      "Bash(timeout 300 python -c:*)",
+      "Bash(timeout 30 python:*)",
+      "Bash(timeout 300 python:*)",
+      "Bash(cat:*)",
+      "Bash(timeout 600 python:*)",
+      "Bash(pkill:*)",
+      "Bash(timeout:*)",
+      "Bash(pip install:*)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:www.arxiv-vanity.com)",
+      "WebFetch(domain:ar5iv.labs.arxiv.org)",
+      "WebFetch(domain:www.informatik.uni-wuerzburg.de)",
+      "WebFetch(domain:pypi.org)",
+      "WebFetch(domain:paperswithcode.com)",
+      "Bash(dir \"C:\\Projects\\ml\\phi\\data\\nuscenes\" /ad)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}
