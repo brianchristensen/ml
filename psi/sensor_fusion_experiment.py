@@ -39,6 +39,75 @@ device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 
 # ============================================================================
+# Sensor Dropout Augmentation
+# ============================================================================
+
+def apply_sensor_dropout(inputs: torch.Tensor, n_sensors: int, dropout_prob: float = 0.3,
+                         velocity_sensor_indices: list = None) -> torch.Tensor:
+    """
+    Randomly drop entire sensors during training to encourage robustness.
+
+    For synchronized format where each row contains ALL sensors:
+    [sensor0_valid, sensor0_pos(3), sensor0_vel(3), sensor0_conf,
+     sensor1_valid, sensor1_pos(3), sensor1_vel(3), sensor1_conf, ...]
+
+    For each sample in the batch, EACH sensor is independently dropped with
+    probability dropout_prob. This means with dropout_prob=0.5:
+    - 50% chance each sensor is dropped
+    - Sample might have 0, 1, 2, or all 3 sensors dropped
+    - Ensures model sees many single-sensor and two-sensor scenarios
+
+    IMPORTANT: If velocity_sensor_indices is provided, ensures at least ONE
+    velocity sensor remains active (tests redundant failover, not total failure).
+
+    Args:
+        inputs: [batch, seq_len, n_sensors * 8] tensor of sensor observations
+        n_sensors: number of sensors
+        dropout_prob: probability of dropping EACH sensor independently (0.0-1.0)
+        velocity_sensor_indices: list of sensor indices that provide velocity
+                                 (ensures at least one remains)
+
+    Returns:
+        Modified inputs with some sensors dropped (entire columns zeroed)
+    """
+    if dropout_prob <= 0:
+        return inputs
+
+    batch_size = inputs.shape[0]
+    inputs = inputs.clone()
+
+    for b in range(batch_size):
+        # Independently decide to drop each sensor
+        sensors_to_drop = []
+        for s in range(n_sensors):
+            if torch.rand(1).item() < dropout_prob:
+                sensors_to_drop.append(s)
+
+        # Don't drop ALL sensors - need at least one
+        if len(sensors_to_drop) == n_sensors:
+            # Keep one random sensor
+            keep_sensor = torch.randint(0, n_sensors, (1,)).item()
+            sensors_to_drop.remove(keep_sensor)
+
+        # Ensure at least one velocity sensor remains if specified
+        if velocity_sensor_indices is not None:
+            velocity_sensors_remaining = [v for v in velocity_sensor_indices if v not in sensors_to_drop]
+            if len(velocity_sensors_remaining) == 0:
+                # All velocity sensors would be dropped - keep one random velocity sensor
+                keep_velocity = velocity_sensor_indices[torch.randint(0, len(velocity_sensor_indices), (1,)).item()]
+                if keep_velocity in sensors_to_drop:
+                    sensors_to_drop.remove(keep_velocity)
+
+        # Zero out dropped sensors across ALL timesteps
+        for sensor_to_drop in sensors_to_drop:
+            offset = sensor_to_drop * SENSOR_INPUT_DIM
+            # Zero all 8 values for this sensor: valid, pos(3), vel(3), conf
+            inputs[b, :, offset:offset + SENSOR_INPUT_DIM] = 0.0
+
+    return inputs
+
+
+# ============================================================================
 # Sensor Models
 # ============================================================================
 
@@ -91,6 +160,21 @@ CAMERA = SensorConfig(
     max_range=50.0,
     has_velocity=False,
     has_depth=False         # Only 2D (bearing)
+)
+
+# IMU - Inertial Measurement Unit (secondary velocity source)
+# Measures acceleration and integrates to velocity - different physics than radar Doppler
+# Good at relative motion, but drifts over time (we simulate this with higher noise at longer ranges)
+IMU = SensorConfig(
+    name="imu",
+    update_rate=100.0,      # 100 Hz (very fast, typical for IMUs)
+    position_noise=5.0,     # IMU doesn't measure position directly (this is drift)
+    velocity_noise=0.5,     # Velocity from integrated acceleration (noisier than radar)
+    dropout_prob=0.02,      # IMUs are very reliable
+    false_positive_prob=0.0,  # No false positives (always measuring something)
+    max_range=float('inf'), # No range limit (measures own motion)
+    has_velocity=True,      # Primary purpose is velocity/acceleration
+    has_depth=True
 )
 
 
@@ -253,12 +337,28 @@ def generate_sensor_observations(
 # Dataset
 # ============================================================================
 
+# Input dimension per sensor: valid(1) + position(3) + velocity(3) + confidence(1) = 8
+SENSOR_INPUT_DIM = 8
+
+def compute_input_dim(n_sensors: int) -> int:
+    """Compute total input dimension for synchronized sensor format."""
+    return n_sensors * SENSOR_INPUT_DIM
+
+
 class SensorFusionDataset(Dataset):
     """
-    Dataset for sensor fusion task.
+    Dataset for sensor fusion task with SYNCHRONIZED time slices.
 
-    Each sample is a sequence of sensor observations and the corresponding
-    ground truth states at those timestamps.
+    Each row represents a SINGLE TIMESTEP with ALL sensor readings concatenated:
+    [radar_valid, radar_pos(3), radar_vel(3), radar_conf,
+     lidar_valid, lidar_pos(3), lidar_vel(3), lidar_conf,
+     camera_valid, camera_pos(3), camera_vel(3), camera_conf]
+
+    This allows PSI to learn temporal dynamics of state evolution,
+    with sensors providing simultaneous observations at each timestep.
+
+    Sensors that don't have a reading at a given timestep have valid=0
+    and all other values zeroed.
 
     IMPORTANT: Split at trajectory level to avoid data leakage.
     """
@@ -269,8 +369,9 @@ class SensorFusionDataset(Dataset):
         duration: float = 10.0,
         sensors: List[SensorConfig] = None,
         seq_len: int = 50,
-        dt: float = 0.01,
-        split: str = 'all',  # 'train', 'val', 'test', or 'all'
+        sample_dt: float = 0.1,  # Time between samples (synchronized timesteps)
+        sim_dt: float = 0.01,    # Simulation timestep for trajectory
+        split: str = 'all',      # 'train', 'val', 'test', or 'all'
         train_ratio: float = 0.7,
         val_ratio: float = 0.15,
         seed: int = 42
@@ -281,8 +382,12 @@ class SensorFusionDataset(Dataset):
         self.sensors = sensors
         self.n_sensors = len(sensors)
         self.seq_len = seq_len
-        self.dt = dt
+        self.sample_dt = sample_dt
+        self.sim_dt = sim_dt
         self.split = split
+
+        # Input format: for each sensor: [valid, pos_x, pos_y, pos_z, vel_x, vel_y, vel_z, confidence]
+        self.input_dim = compute_input_dim(self.n_sensors)
 
         # Determine which trajectories belong to this split
         np.random.seed(seed)
@@ -304,7 +409,7 @@ class SensorFusionDataset(Dataset):
             my_indices = set(range(n_trajectories))
             desc = f"all ({n_trajectories} trajectories)"
 
-        print(f"Generating {desc} with {len(sensors)} sensors...")
+        print(f"Generating {desc} with {len(sensors)} sensors (synchronized format)...")
         self.samples = self._generate_samples(n_trajectories, duration, my_indices)
         print(f"Created {len(self.samples)} samples for {split}")
 
@@ -315,54 +420,83 @@ class SensorFusionDataset(Dataset):
             if traj_id not in my_indices:
                 continue
 
-            # Generate ground truth
-            trajectory = generate_trajectory(duration, self.dt)
+            # Generate ground truth trajectory
+            trajectory = generate_trajectory(duration, self.sim_dt)
 
-            # Generate sensor observations
+            # Generate sensor observations (still asynchronous initially)
             observations = generate_sensor_observations(
-                trajectory, self.sensors, self.dt
+                trajectory, self.sensors, self.sim_dt
             )
 
-            # Filter to valid observations only for training
+            # Filter to valid observations only
             valid_obs = [o for o in observations if o.is_valid and not o.is_false_positive]
 
-            if len(valid_obs) < self.seq_len:
+            # Organize observations by sensor
+            obs_by_sensor = {i: [] for i in range(self.n_sensors)}
+            for obs in valid_obs:
+                obs_by_sensor[obs.sensor_id].append(obs)
+
+            # Sort each sensor's observations by time
+            for sensor_id in obs_by_sensor:
+                obs_by_sensor[sensor_id].sort(key=lambda x: x.timestamp)
+
+            # Create synchronized time slices
+            n_timesteps = int(duration / self.sample_dt)
+
+            if n_timesteps < self.seq_len:
                 continue
 
+            # Build synchronized data for entire trajectory
+            sync_inputs = np.zeros((n_timesteps, self.input_dim), dtype=np.float32)
+            sync_targets = np.zeros((n_timesteps, 6), dtype=np.float32)
+
+            # Track last observation index for each sensor
+            sensor_indices = {i: 0 for i in range(self.n_sensors)}
+
+            for t_idx in range(n_timesteps):
+                t = t_idx * self.sample_dt
+
+                # Get ground truth at this time
+                gt_idx = min(int(t / self.sim_dt), len(trajectory) - 1)
+                sync_targets[t_idx] = trajectory[gt_idx]
+
+                # For each sensor, find most recent observation
+                for sensor_id in range(self.n_sensors):
+                    sensor_obs = obs_by_sensor[sensor_id]
+                    idx = sensor_indices[sensor_id]
+
+                    # Advance to most recent observation at or before time t
+                    while idx < len(sensor_obs) - 1 and sensor_obs[idx + 1].timestamp <= t:
+                        idx += 1
+                    sensor_indices[sensor_id] = idx
+
+                    # Check if we have a valid recent observation (within 2x sensor period)
+                    sensor_config = self.sensors[sensor_id]
+                    max_age = 2.0 / sensor_config.update_rate
+
+                    offset = sensor_id * SENSOR_INPUT_DIM
+
+                    if idx < len(sensor_obs):
+                        obs = sensor_obs[idx]
+                        age = t - obs.timestamp
+
+                        if age >= 0 and age < max_age:
+                            # Valid recent observation
+                            sync_inputs[t_idx, offset] = 1.0  # valid flag
+                            sync_inputs[t_idx, offset+1:offset+4] = obs.position
+                            if obs.velocity is not None:
+                                sync_inputs[t_idx, offset+4:offset+7] = obs.velocity
+                            sync_inputs[t_idx, offset+7] = obs.confidence
+                        # else: leave as zeros (no valid reading)
+
             # Create sliding window samples
-            for start in range(0, len(valid_obs) - self.seq_len, self.seq_len // 2):
-                obs_window = valid_obs[start:start + self.seq_len]
-
-                # Build input tensor: [seq_len, input_dim]
-                # Input: sensor_id (one-hot), position, velocity (if any), confidence, dt
-                input_dim = self.n_sensors + 3 + 3 + 1 + 1  # one-hot + pos + vel + conf + dt
-                inputs = np.zeros((self.seq_len, input_dim))
-                targets = np.zeros((self.seq_len, 6))  # x, y, z, vx, vy, vz
-
-                prev_time = obs_window[0].timestamp
-                for i, obs in enumerate(obs_window):
-                    # One-hot sensor ID
-                    inputs[i, obs.sensor_id] = 1.0
-
-                    # Position
-                    inputs[i, self.n_sensors:self.n_sensors+3] = obs.position
-
-                    # Velocity (0 if not available)
-                    if obs.velocity is not None:
-                        inputs[i, self.n_sensors+3:self.n_sensors+6] = obs.velocity
-
-                    # Confidence
-                    inputs[i, self.n_sensors+6] = obs.confidence
-
-                    # Time delta
-                    inputs[i, self.n_sensors+7] = obs.timestamp - prev_time
-                    prev_time = obs.timestamp
-
-                    # Ground truth at this timestamp
-                    step_idx = min(int(obs.timestamp / self.dt), len(trajectory) - 1)
-                    targets[i] = trajectory[step_idx]
-
-                samples.append((inputs.astype(np.float32), targets.astype(np.float32)))
+            stride = max(1, self.seq_len // 2)
+            for start in range(0, n_timesteps - self.seq_len + 1, stride):
+                end = start + self.seq_len
+                samples.append((
+                    sync_inputs[start:end].copy(),
+                    sync_targets[start:end].copy()
+                ))
 
         return samples
 
@@ -453,7 +587,7 @@ class KalmanFilter:
 
 
 def evaluate_kalman_baseline(dataset: SensorFusionDataset) -> dict:
-    """Evaluate Kalman filter on the dataset."""
+    """Evaluate Kalman filter on the dataset (synchronized format)."""
 
     position_errors = []
     velocity_errors = []
@@ -465,27 +599,26 @@ def evaluate_kalman_baseline(dataset: SensorFusionDataset) -> dict:
         seq_errors_pos = []
         seq_errors_vel = []
 
-        prev_time = 0
         for i in range(len(inputs)):
-            # Get sensor ID
-            sensor_id = np.argmax(inputs[i, :dataset.n_sensors])
-            sensor = dataset.sensors[sensor_id]
+            # Predict with fixed dt (synchronized format uses constant sample_dt)
+            if i > 0:
+                kf.predict(dataset.sample_dt)
 
-            # Get measurement
-            pos = inputs[i, dataset.n_sensors:dataset.n_sensors+3]
-            vel = inputs[i, dataset.n_sensors+3:dataset.n_sensors+6]
-            dt = inputs[i, -1]
+            # Process each sensor's observation at this timestep
+            for sensor_id in range(dataset.n_sensors):
+                offset = sensor_id * SENSOR_INPUT_DIM
+                valid = inputs[i, offset]
 
-            # Predict
-            if dt > 0:
-                kf.predict(dt)
+                if valid > 0.5:  # Sensor has valid reading
+                    sensor = dataset.sensors[sensor_id]
+                    pos = inputs[i, offset+1:offset+4]
+                    vel = inputs[i, offset+4:offset+7]
 
-            # Update
-            if sensor.has_velocity:
-                measurement = np.concatenate([pos, vel])
-            else:
-                measurement = pos
-            kf.update(measurement, sensor)
+                    if sensor.has_velocity:
+                        measurement = np.concatenate([pos, vel])
+                    else:
+                        measurement = pos
+                    kf.update(measurement, sensor)
 
             # Compute error
             est_state = kf.get_state()
@@ -562,8 +695,22 @@ class PSISensorFusionModel(nn.Module):
 # Training
 # ============================================================================
 
-def train_model(model, train_loader, val_loader, epochs, lr, device):
-    """Train the PSI sensor fusion model."""
+def train_model(model, train_loader, val_loader, epochs, lr, device,
+                sensor_dropout_prob=0.0, n_sensors=3, velocity_sensor_indices=None):
+    """
+    Train the PSI sensor fusion model.
+
+    Args:
+        model: PSI model to train
+        train_loader: training data loader
+        val_loader: validation data loader
+        epochs: number of training epochs
+        lr: learning rate
+        device: device to train on
+        sensor_dropout_prob: probability of dropping a sensor during training (0.0-1.0)
+        n_sensors: number of sensors for dropout augmentation
+        velocity_sensor_indices: indices of sensors that provide velocity (for redundancy protection)
+    """
 
     optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, epochs)
@@ -573,6 +720,9 @@ def train_model(model, train_loader, val_loader, epochs, lr, device):
 
     best_val_loss = float('inf')
 
+    if sensor_dropout_prob > 0:
+        print(f"\nSensor dropout augmentation enabled: {sensor_dropout_prob*100:.0f}% of batches will have a random sensor dropped")
+
     for epoch in range(epochs):
         model.train()
         train_loss = 0.0
@@ -580,6 +730,11 @@ def train_model(model, train_loader, val_loader, epochs, lr, device):
         for inputs, targets in tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs}"):
             inputs = inputs.to(device)
             targets = targets.to(device)
+
+            # Apply sensor dropout augmentation during training
+            if sensor_dropout_prob > 0:
+                inputs = apply_sensor_dropout(inputs, n_sensors, sensor_dropout_prob,
+                                              velocity_sensor_indices=velocity_sensor_indices)
 
             optimizer.zero_grad()
 
@@ -701,12 +856,15 @@ def visualize_fusion(model, dataset, device, n_samples=3):
         # Left plot: Position
         ax = axes[row, 0]
 
-        # Plot raw sensor observations
+        # Plot raw sensor observations (new synchronized format)
         for s_id in range(dataset.n_sensors):
-            mask = raw_inputs[:, s_id] == 1
-            sensor_pos = raw_inputs[mask, dataset.n_sensors:dataset.n_sensors+2]
-            ax.scatter(sensor_pos[:, 0], sensor_pos[:, 1], alpha=0.3, s=20,
-                      label=f'{dataset.sensors[s_id].name}')
+            offset = s_id * SENSOR_INPUT_DIM
+            # valid flag is at offset, position at offset+1:offset+4
+            mask = raw_inputs[:, offset] == 1.0
+            if mask.sum() > 0:
+                sensor_pos = raw_inputs[mask, offset+1:offset+3]  # x, y only
+                ax.scatter(sensor_pos[:, 0], sensor_pos[:, 1], alpha=0.3, s=20,
+                          label=f'{dataset.sensors[s_id].name}')
 
         # Plot ground truth
         ax.plot(targets[:, 0], targets[:, 1], 'g-', linewidth=2, label='Ground Truth')
@@ -750,7 +908,7 @@ def visualize_fusion(model, dataset, device, n_samples=3):
 
 def main():
     parser = argparse.ArgumentParser(description='Sensor Fusion Experiment with PSI')
-    parser.add_argument('--n_trajectories', type=int, default=2000,
+    parser.add_argument('--n_trajectories', type=int, default=10000,
                         help='Number of trajectories to generate')
     parser.add_argument('--duration', type=float, default=10.0,
                         help='Duration of each trajectory (seconds)')
@@ -768,6 +926,9 @@ def main():
                         help='Learning rate')
     parser.add_argument('--skip_kalman', action='store_true',
                         help='Skip Kalman filter baseline')
+    parser.add_argument('--sensor_dropout', type=float, default=0.0,
+                        help='Sensor dropout probability during training (0.0-1.0). '
+                             'Higher values make model more robust to sensor failure.')
     args = parser.parse_args()
 
     print("=" * 80)
@@ -776,13 +937,22 @@ def main():
     print()
     print("Task: Fuse noisy observations from multiple sensors to estimate true state")
     print("Sensors:")
-    print(f"  - Radar: noisy position (std=1.5m), good velocity, 200m range, 10Hz")
+    print(f"  - Radar: noisy position (std=1.5m), good velocity (Doppler), 200m range, 10Hz")
     print(f"  - Lidar: accurate position (std=0.1m), no velocity, 70m range, 10Hz")
     print(f"  - Camera: poor depth (std=2.0m), no velocity, 50m range, 30Hz")
+    print(f"  - IMU: poor position (drift), moderate velocity (integrated accel), unlimited range, 100Hz")
+    print()
+    print("Velocity redundancy: Radar (idx=0) and IMU (idx=3) both provide velocity")
+    print("Dropout ensures at least one velocity sensor remains active")
     print()
 
     # Generate datasets with trajectory-level splits (avoids data leakage)
-    sensors = [RADAR, LIDAR, CAMERA]
+    # Now with 4 sensors: Radar, Lidar, Camera, IMU
+    sensors = [RADAR, LIDAR, CAMERA, IMU]
+
+    # Track which sensors provide velocity for redundancy protection
+    velocity_sensor_indices = [i for i, s in enumerate(sensors) if s.has_velocity]
+    print(f"Velocity sensors: {[sensors[i].name for i in velocity_sensor_indices]} (indices: {velocity_sensor_indices})")
 
     train_dataset = SensorFusionDataset(
         n_trajectories=args.n_trajectories,
@@ -832,7 +1002,13 @@ def main():
     print("Training PSI Model")
     print("=" * 80)
 
-    input_dim = len(sensors) + 3 + 3 + 1 + 1  # one-hot + pos + vel + conf + dt
+    # New synchronized format: each sensor has 8 values (valid, pos(3), vel(3), conf)
+    input_dim = compute_input_dim(len(sensors))
+    print(f"\nInput format: synchronized time slices")
+    print(f"  Each timestep contains all {len(sensors)} sensors")
+    print(f"  Per sensor: valid(1) + pos(3) + vel(3) + conf(1) = 8 values")
+    print(f"  Total input dim: {input_dim}")
+
     model = PSISensorFusionModel(
         input_dim=input_dim,
         state_dim=6,
@@ -843,7 +1019,9 @@ def main():
     n_params = sum(p.numel() for p in model.parameters())
     print(f"\nModel parameters: {n_params:,}")
 
-    train_model(model, train_loader, val_loader, args.epochs, args.lr, device)
+    train_model(model, train_loader, val_loader, args.epochs, args.lr, device,
+                sensor_dropout_prob=args.sensor_dropout, n_sensors=len(sensors),
+                velocity_sensor_indices=velocity_sensor_indices)
 
     # Load best model
     checkpoint = torch.load('sensor_fusion_model.pt', map_location=device, weights_only=True)
