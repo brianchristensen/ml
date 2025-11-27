@@ -2,7 +2,7 @@
 
 ## Overview
 
-Phase-Space Integration is a universal temporal dynamics learner that uses **complex-valued phase trajectories** and **phase-bound state accumulation** to learn the geometry of phase space from temporal data.
+Phase-Space Integration is a universal temporal dynamics learner that uses **complex-valued phase trajectories** and **phase-bound state accumulation** to learn the geometry of phase space from temporal sequences.
 
 - Integration learnable (ω is learned, not specified)
 - Parallelizable (cumsum, not sequential solver)
