@@ -27,11 +27,11 @@ class PSI(nn.Module):
         self.to_query_offset = nn.Linear(dim, dim)
 
         self.to_out = nn.Sequential(
-            nn.LayerNorm(dim * 4),
-            nn.Linear(dim * 4, dim * 2),
+            nn.LayerNorm(dim * 2),
+            nn.Linear(dim * 2, dim),
             nn.GELU(),
             nn.Dropout(0.1),
-            nn.Linear(dim * 2, dim)
+            nn.Linear(dim, dim)
         )
 
     def forward(self, x):
@@ -48,9 +48,6 @@ class PSI(nn.Module):
         gated_omega = gate * omega_scaled
 
         phi = phi_init + torch.cumsum(gated_omega, dim=1)
-
-        trajectory_real = torch.cos(phi)
-        trajectory_imag = torch.sin(phi)
 
         weighted_content = magnitude * x
 
@@ -71,15 +68,7 @@ class PSI(nn.Module):
         retrieved_real = memory_real_normalized * cos_phi_q + memory_imag_normalized * sin_phi_q
         retrieved_imag = memory_imag_normalized * cos_phi_q - memory_real_normalized * sin_phi_q
 
-        content_modulated_real = x * trajectory_real
-        content_modulated_imag = x * trajectory_imag
-
-        context = torch.cat([
-            content_modulated_real,
-            content_modulated_imag,
-            retrieved_real,
-            retrieved_imag
-        ], dim=-1)
+        context = torch.cat([retrieved_real, retrieved_imag], dim=-1)
 
         phase_contribution = self.to_out(context)
 
