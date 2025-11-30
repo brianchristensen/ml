@@ -4,28 +4,18 @@ import torch.nn.functional as F
 import math
 
 class PSI(nn.Module):
-    """Phase-Space Integration core module."""
-
     def __init__(self, dim):
         super().__init__()
 
         self.dim = dim
 
+        # Learned velocity field (the differential equation)
         self.to_omega = nn.Linear(dim, dim)
-        self.to_phase_init = nn.Sequential(
-            nn.Linear(dim, dim),
-            nn.GELU(),
-            nn.Linear(dim, dim)
-        )
 
-        self.to_gate = nn.Linear(dim, dim)
+        # Fixed integration scale
+        self.register_buffer('integration_scale', torch.ones(dim) * 0.001)
 
-        self.integration_scale = nn.Parameter(torch.ones(dim) * 0.001)
-
-        self.to_magnitude = nn.Linear(dim, dim)
-
-        self.to_query_offset = nn.Linear(dim, dim)
-
+        # Output projection
         self.to_out = nn.Sequential(
             nn.LayerNorm(dim * 4),
             nn.Linear(dim * 4, dim * 2),
@@ -35,45 +25,39 @@ class PSI(nn.Module):
         )
 
     def forward(self, x):
+        batch_size, seq_len, dim = x.shape
+
+        # Compute velocity field
         omega = self.to_omega(x)
 
-        magnitude_scale = 5.0
-        magnitude = torch.sigmoid(self.to_magnitude(x)) * magnitude_scale
+        # Scale omega
+        omega_scaled = omega * self.integration_scale
 
-        phi_init = self.to_phase_init(x)
+        # Integrate: phi = cumsum(omega) - this IS Euler integration
+        phi = torch.cumsum(omega_scaled, dim=1)
 
-        gate = torch.sigmoid(self.to_gate(x))
+        # Phase trajectory
+        cos_phi = torch.cos(phi)
+        sin_phi = torch.sin(phi)
 
-        omega_scaled = omega * self.integration_scale.abs()
-        gated_omega = gate * omega_scaled
+        # Phase-bound memory accumulation (uniform weighting)
+        memory_real = torch.cumsum(x * cos_phi, dim=1)
+        memory_imag = torch.cumsum(x * sin_phi, dim=1)
 
-        phi = phi_init + torch.cumsum(gated_omega, dim=1)
+        # Position-based normalization (simpler than magnitude-based)
+        position = torch.arange(1, seq_len + 1, device=x.device, dtype=x.dtype).view(1, -1, 1)
+        memory_real_normalized = memory_real / position
+        memory_imag_normalized = memory_imag / position
 
-        trajectory_real = torch.cos(phi)
-        trajectory_imag = torch.sin(phi)
+        # Retrieve at current phase (no query offset)
+        retrieved_real = memory_real_normalized * cos_phi + memory_imag_normalized * sin_phi
+        retrieved_imag = memory_imag_normalized * cos_phi - memory_real_normalized * sin_phi
 
-        weighted_content = magnitude * x
+        # Content modulation by trajectory
+        content_modulated_real = x * cos_phi
+        content_modulated_imag = x * sin_phi
 
-        memory_real = torch.cumsum(weighted_content * torch.cos(phi), dim=1)
-        memory_imag = torch.cumsum(weighted_content * torch.sin(phi), dim=1)
-
-        accumulated_magnitude = torch.cumsum(magnitude, dim=1)
-        sqrt_magnitude = torch.sqrt(accumulated_magnitude + 1e-8)
-        memory_real_normalized = memory_real / sqrt_magnitude
-        memory_imag_normalized = memory_imag / sqrt_magnitude
-
-        query_offset = self.to_query_offset(x)
-        phi_query = phi + query_offset
-
-        cos_phi_q = torch.cos(phi_query)
-        sin_phi_q = torch.sin(phi_query)
-
-        retrieved_real = memory_real_normalized * cos_phi_q + memory_imag_normalized * sin_phi_q
-        retrieved_imag = memory_imag_normalized * cos_phi_q - memory_real_normalized * sin_phi_q
-
-        content_modulated_real = x * trajectory_real
-        content_modulated_imag = x * trajectory_imag
-
+        # Combine all signals
         context = torch.cat([
             content_modulated_real,
             content_modulated_imag,
@@ -81,11 +65,10 @@ class PSI(nn.Module):
             retrieved_imag
         ], dim=-1)
 
+        # Project to output
         phase_contribution = self.to_out(context)
 
-        output = x + phase_contribution
-
-        return output
+        return x + phase_contribution
 
 class PSIBlock(nn.Module):
     """PSI block with pre-norm residual connection."""
