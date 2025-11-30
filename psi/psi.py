@@ -4,7 +4,7 @@ import torch.nn.functional as F
 import math
 
 class PSI(nn.Module):
-    def __init__(self, dim):
+    def __init__(self, dim, init_scale=0.1):
         super().__init__()
 
         self.dim = dim
@@ -12,8 +12,8 @@ class PSI(nn.Module):
         # Learned velocity field (the differential equation)
         self.to_omega = nn.Linear(dim, dim)
 
-        # Fixed integration scale
-        self.register_buffer('integration_scale', torch.ones(dim) * 0.001)
+        # Learned per-dimension integration scale (log-space for stability)
+        self.log_scale = nn.Parameter(torch.ones(dim) * math.log(init_scale))
 
         # Output projection (4x dim: content_real, content_imag, retrieved_real, retrieved_imag)
         self.to_out = nn.Sequential(
@@ -30,8 +30,14 @@ class PSI(nn.Module):
         # Compute velocity field
         omega = self.to_omega(x)
 
-        # Scale omega
-        omega_scaled = omega * self.integration_scale
+        # Position-dependent scale: 1/sqrt(position) decay prevents unbounded phase accumulation
+        # This enables long-range dependencies while maintaining O(n) complexity
+        position = torch.arange(1, seq_len + 1, device=x.device, dtype=x.dtype).view(1, -1, 1)
+        pos_scale = 1.0 / torch.sqrt(position)
+
+        # Learned scale (exp to ensure positive) with position decay
+        scale = torch.exp(self.log_scale)
+        omega_scaled = omega * scale * pos_scale
 
         # Integrate: phi = cumsum(omega) - this IS Euler integration
         phi = torch.cumsum(omega_scaled, dim=1)
@@ -44,8 +50,7 @@ class PSI(nn.Module):
         memory_real = torch.cumsum(x * cos_phi, dim=1)
         memory_imag = torch.cumsum(x * sin_phi, dim=1)
 
-        # Position-based normalization (simpler than magnitude-based)
-        position = torch.arange(1, seq_len + 1, device=x.device, dtype=x.dtype).view(1, -1, 1)
+        # Position-based normalization
         memory_real_normalized = memory_real / position
         memory_imag_normalized = memory_imag / position
 
