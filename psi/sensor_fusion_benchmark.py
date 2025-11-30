@@ -94,26 +94,35 @@ def apply_sensor_dropout(sensor_data, dropout_mask):
 # =============================================================================
 
 class PSISensorFusion(nn.Module):
-    """PSI-based sensor fusion model."""
+    """
+    PSI-based sensor fusion model.
+
+    Matches the architecture from sensor_fusion_experiment.py:
+    - Direct projection of all sensor inputs into hidden_dim
+    - PSI blocks for temporal processing
+    - Output head for state estimation
+    """
 
     def __init__(self, n_sensors, hidden_dim=64, num_layers=4, output_dim=3):
         super().__init__()
         self.n_sensors = n_sensors
 
-        # Per-sensor embedding
-        self.sensor_embeds = nn.ModuleList([
-            nn.Linear(1, hidden_dim // n_sensors) for _ in range(n_sensors)
-        ])
-
-        # Combine sensor embeddings
-        self.fusion_proj = nn.Linear(hidden_dim // n_sensors * n_sensors, hidden_dim)
+        # Project all sensors directly into hidden space (matches original PSI approach)
+        self.input_proj = nn.Sequential(
+            nn.Linear(n_sensors, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, hidden_dim)
+        )
 
         # PSI blocks
         self.blocks = nn.ModuleList([PSIBlock(hidden_dim) for _ in range(num_layers)])
 
-        # Output
+        # Output head (matches original)
         self.output_proj = nn.Sequential(
             nn.LayerNorm(hidden_dim),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.GELU(),
             nn.Linear(hidden_dim, output_dim)
         )
 
@@ -121,17 +130,8 @@ class PSISensorFusion(nn.Module):
         """
         sensors: [batch, seq_len, n_sensors]
         """
-        batch, seq_len, n_sensors = sensors.shape
-
-        # Embed each sensor separately
-        sensor_embeds = []
-        for i in range(self.n_sensors):
-            embed = self.sensor_embeds[i](sensors[:, :, i:i+1])
-            sensor_embeds.append(embed)
-
-        # Concatenate and fuse
-        combined = torch.cat(sensor_embeds, dim=-1)
-        h = self.fusion_proj(combined)
+        # Project all sensor inputs together
+        h = self.input_proj(sensors)
 
         # PSI processing
         for block in self.blocks:
@@ -141,18 +141,19 @@ class PSISensorFusion(nn.Module):
 
 
 class TransformerSensorFusion(nn.Module):
-    """Transformer-based sensor fusion model."""
+    """Transformer-based sensor fusion model - same architecture pattern as PSI."""
 
     def __init__(self, n_sensors, hidden_dim=64, num_layers=4, output_dim=3, num_heads=4):
         super().__init__()
         self.n_sensors = n_sensors
 
-        # Per-sensor embedding
-        self.sensor_embeds = nn.ModuleList([
-            nn.Linear(1, hidden_dim // n_sensors) for _ in range(n_sensors)
-        ])
-
-        self.fusion_proj = nn.Linear(hidden_dim // n_sensors * n_sensors, hidden_dim)
+        # Direct projection (same as PSI)
+        self.input_proj = nn.Sequential(
+            nn.Linear(n_sensors, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, hidden_dim)
+        )
 
         # Positional encoding
         self.pos_encoding = nn.Parameter(torch.randn(1, 1000, hidden_dim) * 0.02)
@@ -167,22 +168,19 @@ class TransformerSensorFusion(nn.Module):
         # Causal mask
         self.register_buffer('causal_mask', None)
 
+        # Output head (same as PSI)
         self.output_proj = nn.Sequential(
             nn.LayerNorm(hidden_dim),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.GELU(),
             nn.Linear(hidden_dim, output_dim)
         )
 
     def forward(self, sensors):
         batch, seq_len, n_sensors = sensors.shape
 
-        # Embed each sensor
-        sensor_embeds = []
-        for i in range(self.n_sensors):
-            embed = self.sensor_embeds[i](sensors[:, :, i:i+1])
-            sensor_embeds.append(embed)
-
-        combined = torch.cat(sensor_embeds, dim=-1)
-        h = self.fusion_proj(combined)
+        # Project all sensors together
+        h = self.input_proj(sensors)
         h = h + self.pos_encoding[:, :seq_len, :]
 
         # Create causal mask
@@ -219,7 +217,7 @@ class ManualLSTMCell(nn.Module):
 
 
 class LSTMSensorFusion(nn.Module):
-    """Manual LSTM sensor fusion - fair comparison."""
+    """Manual LSTM sensor fusion - same architecture pattern as PSI."""
 
     def __init__(self, n_sensors, hidden_dim=64, num_layers=4, output_dim=3):
         super().__init__()
@@ -227,34 +225,32 @@ class LSTMSensorFusion(nn.Module):
         self.hidden_dim = hidden_dim
         self.num_layers = num_layers
 
-        # Per-sensor embedding
-        self.sensor_embeds = nn.ModuleList([
-            nn.Linear(1, hidden_dim // n_sensors) for _ in range(n_sensors)
-        ])
-
-        self.fusion_proj = nn.Linear(hidden_dim // n_sensors * n_sensors, hidden_dim)
+        # Direct projection (same as PSI)
+        self.input_proj = nn.Sequential(
+            nn.Linear(n_sensors, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, hidden_dim)
+        )
 
         # Manual LSTM cells
         self.cells = nn.ModuleList([
             ManualLSTMCell(hidden_dim, hidden_dim) for _ in range(num_layers)
         ])
 
+        # Output head (same as PSI)
         self.output_proj = nn.Sequential(
             nn.LayerNorm(hidden_dim),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.GELU(),
             nn.Linear(hidden_dim, output_dim)
         )
 
     def forward(self, sensors):
         batch, seq_len, n_sensors = sensors.shape
 
-        # Embed each sensor
-        sensor_embeds = []
-        for i in range(self.n_sensors):
-            embed = self.sensor_embeds[i](sensors[:, :, i:i+1])
-            sensor_embeds.append(embed)
-
-        combined = torch.cat(sensor_embeds, dim=-1)
-        x = self.fusion_proj(combined)
+        # Project all sensors together
+        x = self.input_proj(sensors)
 
         # Initialize hidden states
         h = [torch.zeros(batch, self.hidden_dim, device=sensors.device)
