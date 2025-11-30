@@ -2,7 +2,7 @@
 
 ## Overview
 
-Phase-Space Integration is a universal temporal dynamics learner that uses **complex-valued phase trajectories** and **phase-bound state accumulation** to learn the geometry of phase space from temporal data.
+A parallel sequence processor that uses cumsum-based memory with phase/frequency encoding. It's essentially a learned Euler integrator with trigonometric basis functions.
 
 - Integration learnable (ω is learned, not specified)
 - Parallelizable (cumsum, not sequential solver)

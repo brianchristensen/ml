@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python comprehensive_benchmark.py:*)",
+      "Bash(python:*)",
+      "Bash(Get-Process python -ErrorAction SilentlyContinue)",
+      "Bash(Select-Object Id, ProcessName, StartTime)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

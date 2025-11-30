@@ -15,7 +15,7 @@ class PSI(nn.Module):
         # Fixed integration scale
         self.register_buffer('integration_scale', torch.ones(dim) * 0.001)
 
-        # Output projection
+        # Output projection (4x dim: content_real, content_imag, retrieved_real, retrieved_imag)
         self.to_out = nn.Sequential(
             nn.LayerNorm(dim * 4),
             nn.Linear(dim * 4, dim * 2),
