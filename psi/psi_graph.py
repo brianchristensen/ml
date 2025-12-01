@@ -1017,12 +1017,26 @@ class VectorizedPSIGraph:
     - biases: [n_nodes, dim] - per-node biases
     """
 
-    def __init__(self, n_nodes: int, dim: int, seed: int = None):
+    def __init__(self, n_nodes: int, dim: int, seed: int = None,
+                 topology: str = 'small_world', k_neighbors: int = 3,
+                 long_range_prob: float = 0.15):
+        """
+        Initialize PSI graph.
+
+        Args:
+            n_nodes: Number of nodes in the graph
+            dim: Dimensionality of each node's state
+            seed: Random seed for reproducibility
+            topology: 'dense' (80% connectivity) or 'small_world' (scalable sparse)
+            k_neighbors: For small_world, number of nearest neighbors
+            long_range_prob: For small_world, probability of long-range connections
+        """
         if seed is not None:
             np.random.seed(seed)
 
         self.n_nodes = n_nodes
         self.dim = dim
+        self.topology = topology
 
         # Node states: [n_nodes, dim]
         self.states = np.random.randn(n_nodes, dim) * 0.01
@@ -1035,12 +1049,18 @@ class VectorizedPSIGraph:
         self.omega = np.random.randn(n_nodes, dim) * 0.03
 
         # Connection weights (adjacency matrix): [n_nodes, n_nodes]
-        # Symmetric for bidirectional connections
-        density = 0.8
-        mask = np.random.random((n_nodes, n_nodes)) < density
-        mask = np.triu(mask, 1)  # Upper triangle only
-        mask = mask | mask.T  # Make symmetric
-        self.adj = mask.astype(float)
+        if topology == 'dense':
+            # Original 80% density - does NOT scale well
+            density = 0.8
+            mask = np.random.random((n_nodes, n_nodes)) < density
+            mask = np.triu(mask, 1)  # Upper triangle only
+            mask = mask | mask.T  # Make symmetric
+            self.adj = mask.astype(float)
+        else:
+            # Small-world topology - SCALES properly
+            # Maintains constant ~5-7 neighbors regardless of total node count
+            self.adj = self._build_small_world_adj(k_neighbors, long_range_prob)
+
         self.W_conn = np.random.uniform(0.5, 1.0, (n_nodes, n_nodes)) * self.adj
         self.W_conn = (self.W_conn + self.W_conn.T) / 2  # Symmetric
 
@@ -1070,6 +1090,56 @@ class VectorizedPSIGraph:
         self.memory_imag = np.zeros((n_nodes, dim))
         self.memory_strength = np.zeros(n_nodes)
         self.avg_confidence = np.ones(n_nodes) * 0.3
+
+    def _build_small_world_adj(self, k: int, p_long: float) -> np.ndarray:
+        """
+        Build small-world adjacency matrix for scalable topology.
+
+        This topology maintains constant neighborhood size (~5-7 neighbors)
+        regardless of total node count, preventing signal dilution.
+
+        Args:
+            k: Each node connects to k nearest neighbors (by index)
+            p_long: Probability of additional random long-range connections
+        """
+        adj = np.zeros((self.n_nodes, self.n_nodes))
+
+        # Local connections (k nearest neighbors by index)
+        for i in range(self.n_nodes):
+            for offset in range(1, k // 2 + 2):
+                # Forward neighbor
+                j_fwd = (i + offset) % self.n_nodes
+                if j_fwd != i:
+                    adj[i, j_fwd] = 1.0
+                    adj[j_fwd, i] = 1.0
+
+                # Backward neighbor
+                j_bwd = (i - offset) % self.n_nodes
+                if j_bwd != i:
+                    adj[i, j_bwd] = 1.0
+                    adj[j_bwd, i] = 1.0
+
+        # Long-range connections (skip connections for faster propagation)
+        for i in range(self.n_nodes):
+            for j in range(i + 2, self.n_nodes):
+                if adj[i, j] == 0 and np.random.random() < p_long:
+                    adj[i, j] = 1.0
+                    adj[j, i] = 1.0
+
+        # Ensure input-output pathway exists (critical for learning)
+        if self.n_nodes > 4:
+            mid = self.n_nodes // 2
+            # Input nodes (0, 1) connect to middle region
+            adj[0, mid] = 1.0
+            adj[mid, 0] = 1.0
+            adj[1, mid] = 1.0
+            adj[mid, 1] = 1.0
+            # Middle connects to near-output
+            adj[mid, -2] = 1.0
+            adj[-2, mid] = 1.0
+
+        np.fill_diagonal(adj, 0)  # No self-connections
+        return adj
 
     def step(self, target_mode: bool = False):
         """One parallel update step - ALL nodes update simultaneously."""
