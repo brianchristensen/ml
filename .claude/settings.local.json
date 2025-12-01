@@ -5,7 +5,12 @@
       "Bash(python:*)",
       "Bash(Get-Process python -ErrorAction SilentlyContinue)",
       "Bash(Select-Object Id, ProcessName, StartTime)",
-      "Bash(timeout 60 python:*)"
+      "Bash(timeout 60 python:*)",
+      "Bash(git checkout:*)",
+      "Bash(for i in 1 2 3)",
+      "Bash(do echo \"=== Run $i ===\")",
+      "Bash(done)",
+      "Bash(git stash:*)"
     ],
     "deny": [],
     "ask": []

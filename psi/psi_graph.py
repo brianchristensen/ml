@@ -105,6 +105,16 @@ class TargetLearningNode:
         self.predicted_input = np.zeros(dim)
         self.prediction_error = np.zeros(dim)
 
+        # HOLOGRAPHIC MEMORY: stores confident predictions at current phase
+        # Only accumulates when prediction error is low (signal, not noise)
+        # Content-addressing via input-dependent phase: input determines WHERE in memory
+        self.memory_real = np.zeros(dim)
+        self.memory_imag = np.zeros(dim)
+        self.memory_strength = 0.0  # Total accumulated confidence
+
+        # Adaptive storage threshold: starts low, rises with average confidence
+        self.avg_confidence = 0.3  # Running average of confidence
+
     def phase_coherence(self, other_phase: np.ndarray) -> float:
         """Compute phase coherence."""
         return float(np.mean(np.cos(self.phase - other_phase)))
@@ -163,8 +173,35 @@ class TargetLearningNode:
         # Update prediction (slow tracking of actual input)
         self.predicted_input = 0.8 * self.predicted_input + 0.2 * total_input
 
-        # Transform
-        pre_act = self.W @ total_input + self.bias
+        # HOLOGRAPHIC CONTENT-ADDRESSABLE RETRIEVAL (O(1))
+        # Key insight: input modulates the retrieval phase
+        # Similar inputs -> similar retrieval phases -> retrieve similar outputs
+        # This is how the brain does associative memory without explicit search
+
+        # Compute input-dependent retrieval phase
+        # The input "addresses" the memory by shifting the phase
+        input_phase_shift = total_input * 0.5  # Input modulates where we look
+
+        cos_phi = np.cos(self.phase + input_phase_shift)
+        sin_phi = np.sin(self.phase + input_phase_shift)
+
+        memory_bias = np.zeros(self.dim)
+        if self.memory_strength > 1.0:  # Higher threshold - need real memory
+            # Holographic retrieval: memory * e^{-i(φ + input_shift)}
+            retrieved = (self.memory_real * cos_phi + self.memory_imag * sin_phi) / self.memory_strength
+
+            # Compute retrieval confidence from signal coherence
+            retrieval_mag = np.mean(np.abs(retrieved))
+
+            # Only use memory if retrieval is strong (clear match)
+            # Weak retrieval = interference, don't use
+            if retrieval_mag > 0.3:
+                # Winner-take-all: strong retrieval dominates, weak ignored
+                influence = min(0.4, (retrieval_mag - 0.3) * 0.8)
+                memory_bias = influence * retrieved
+
+        # Transform with memory context
+        pre_act = self.W @ total_input + self.bias + memory_bias
         pre_act = np.clip(pre_act, -5, 5)
         target_activation = np.tanh(pre_act)
 
@@ -262,6 +299,38 @@ class TargetLearningNode:
             conn.weight += self.lr * 0.15 * coherence_gate * corr_diff
             conn.weight = np.clip(conn.weight, 0.1, 2.0)
 
+        # HOLOGRAPHIC MEMORY: Store into memory only when confident
+        # Low state_diff = we predicted well = store this pattern
+        # Key: input modulates storage phase = content-addressable without O(n) search
+        confidence = 1.0 - np.mean(np.abs(state_diff))  # High when state_diff is low
+
+        # Update running average confidence
+        self.avg_confidence = 0.9 * self.avg_confidence + 0.1 * confidence
+
+        # Adaptive threshold: store if above average (relative novelty)
+        # Early: low avg -> low threshold -> store easily (bootstrap)
+        # Late: high avg -> high threshold -> only store if exceptional
+        storage_threshold = self.avg_confidence * 0.8  # Slightly below average
+
+        # Input-dependent storage phase (matches retrieval)
+        input_phase_shift = free_input * 0.5
+        cos_phi = np.cos(self.phase + input_phase_shift)
+        sin_phi = np.sin(self.phase + input_phase_shift)
+
+        # Store if confidence exceeds adaptive threshold
+        if confidence > storage_threshold:
+            # Strength based on how much above threshold
+            relative_confidence = (confidence - storage_threshold) / (1.0 - storage_threshold + 0.01)
+            if relative_confidence > 0.7:
+                store_scale = relative_confidence * 0.5  # Strong one-shot
+            elif relative_confidence > 0.4:
+                store_scale = relative_confidence * 0.25
+            else:
+                store_scale = relative_confidence * 0.1
+
+            self.memory_real += store_scale * self.target_state * cos_phi
+            self.memory_imag += store_scale * self.target_state * sin_phi
+            self.memory_strength += store_scale
 
     def reset(self):
         """Reset state."""
