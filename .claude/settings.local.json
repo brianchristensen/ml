@@ -4,7 +4,8 @@
       "Bash(python comprehensive_benchmark.py:*)",
       "Bash(python:*)",
       "Bash(Get-Process python -ErrorAction SilentlyContinue)",
-      "Bash(Select-Object Id, ProcessName, StartTime)"
+      "Bash(Select-Object Id, ProcessName, StartTime)",
+      "Bash(timeout 60 python:*)"
     ],
     "deny": [],
     "ask": []
