@@ -872,6 +872,99 @@ def test_sample_efficiency():
     return avg_curve
 
 
+def test_function_approximation():
+    """
+    TRUE GENERALIZATION TEST: Function approximation with held-out regions.
+
+    Train on sampled continuous inputs, test on unseen regions.
+    This tests whether the network learns the RULE vs memorizing points.
+
+    Function: f(x1, x2) = sign(x1 * x2)  (continuous XOR-like)
+    Train: sample from regions where |x1|, |x2| > 0.3 (away from decision boundary)
+    Test: sample from held-out quadrant + near decision boundary
+    """
+    print("\n" + "=" * 70)
+    print("FUNCTION APPROXIMATION TEST")
+    print("=" * 70)
+    print("Goal: Learn f(x1,x2) = sign(x1*x2) from continuous samples")
+    print("Train: random samples from 3 quadrants, away from boundary")
+    print("Test: held-out quadrant + boundary region (generalization)")
+
+    def target_func(x1, x2):
+        """XOR-like function on continuous inputs."""
+        return 1.0 if x1 * x2 > 0 else -1.0
+
+    results = {}
+
+    for n_train in [20, 50, 100]:
+        successes = 0
+
+        for seed in range(10):
+            np.random.seed(seed)
+
+            # Create graph
+            graph = PSITargetGraph(n_nodes=6, dim=8, seed=seed)
+
+            # Generate TRAINING data: 3 quadrants, away from boundary
+            train_data = []
+            for _ in range(n_train):
+                # Random quadrant (exclude quadrant 4: x1>0, x2<0)
+                quadrant = np.random.choice([1, 2, 3])
+                if quadrant == 1:  # x1 > 0, x2 > 0
+                    x1 = np.random.uniform(0.3, 1.0)
+                    x2 = np.random.uniform(0.3, 1.0)
+                elif quadrant == 2:  # x1 < 0, x2 > 0
+                    x1 = np.random.uniform(-1.0, -0.3)
+                    x2 = np.random.uniform(0.3, 1.0)
+                else:  # quadrant 3: x1 < 0, x2 < 0
+                    x1 = np.random.uniform(-1.0, -0.3)
+                    x2 = np.random.uniform(-1.0, -0.3)
+
+                train_data.append((np.array([x1, x2]), target_func(x1, x2)))
+
+            # Train
+            for epoch in range(100):
+                np.random.shuffle(train_data)
+                for inp, target in train_data:
+                    graph.train_step(inp, target)
+
+            # TEST on held-out quadrant 4: x1 > 0, x2 < 0 (never seen!)
+            test_quadrant4 = []
+            for _ in range(20):
+                x1 = np.random.uniform(0.3, 1.0)
+                x2 = np.random.uniform(-1.0, -0.3)
+                test_quadrant4.append((np.array([x1, x2]), target_func(x1, x2)))
+
+            # TEST on boundary region (hard cases)
+            test_boundary = []
+            for _ in range(20):
+                x1 = np.random.uniform(-0.3, 0.3)
+                x2 = np.random.uniform(-1.0, 1.0)
+                test_boundary.append((np.array([x1, x2]), target_func(x1, x2)))
+
+            # Evaluate
+            correct_q4 = 0
+            for inp, target in test_quadrant4:
+                pred = graph.predict(inp)
+                if (pred > 0) == (target > 0):
+                    correct_q4 += 1
+
+            correct_boundary = 0
+            for inp, target in test_boundary:
+                pred = graph.predict(inp)
+                if (pred > 0) == (target > 0):
+                    correct_boundary += 1
+
+            # Success = good on held-out quadrant (generalization)
+            if correct_q4 >= 14:  # 70% on unseen quadrant
+                successes += 1
+
+        results[n_train] = successes
+        print(f"  {n_train:3d} training samples: {successes}/10 generalize to held-out quadrant")
+
+    return results
+
+
 if __name__ == "__main__":
     # First show how target propagation works
     analyze_target_propagation()
@@ -891,15 +984,290 @@ if __name__ == "__main__":
     # Sample efficiency
     test_sample_efficiency()
 
+    # Function approximation - true generalization test
+    func_results = test_function_approximation()
+
     print("\n" + "=" * 70)
     print("SUMMARY")
     print("=" * 70)
     print(f"  XOR: {'PASSED' if xor_learned else 'FAILED'}")
     print(f"  XOR Robustness: {n_successes}/20 seeds")
     print(f"  3-bit Parity: {parity_successes}/20 seeds")
+    print(f"  Function Approx (generalize to held-out quadrant): {func_results}")
     print()
     print("Predictive Target Learning:")
     print("  - Target patterns propagate through recurrent dynamics")
     print("  - Prediction error modulates learning (surprise = learn more)")
     print("  - Phase coherence gates which nodes learn together")
     print("  - Local learning rules only")
+
+
+class VectorizedPSIGraph:
+    """
+    VECTORIZED PSI Target Learning Graph.
+
+    All operations are parallel matrix operations - no Python loops over nodes.
+    This mirrors how the brain works: all neurons update simultaneously.
+
+    State representation:
+    - states: [n_nodes, dim] - all node states
+    - phases: [n_nodes, dim] - all node phases
+    - W: [n_nodes, n_nodes] - connection weights (adjacency matrix)
+    - node_W: [n_nodes, dim, dim] - per-node transformation weights
+    - biases: [n_nodes, dim] - per-node biases
+    """
+
+    def __init__(self, n_nodes: int, dim: int, seed: int = None):
+        if seed is not None:
+            np.random.seed(seed)
+
+        self.n_nodes = n_nodes
+        self.dim = dim
+
+        # Node states: [n_nodes, dim]
+        self.states = np.random.randn(n_nodes, dim) * 0.01
+        self.prev_states = np.zeros((n_nodes, dim))
+        self.free_states = np.zeros((n_nodes, dim))
+        self.target_states = np.zeros((n_nodes, dim))
+
+        # Phases: [n_nodes, dim]
+        self.phases = np.random.uniform(0, 2*np.pi, (n_nodes, dim))
+        self.omega = np.random.randn(n_nodes, dim) * 0.03
+
+        # Connection weights (adjacency matrix): [n_nodes, n_nodes]
+        # Symmetric for bidirectional connections
+        density = 0.8
+        mask = np.random.random((n_nodes, n_nodes)) < density
+        mask = np.triu(mask, 1)  # Upper triangle only
+        mask = mask | mask.T  # Make symmetric
+        self.adj = mask.astype(float)
+        self.W_conn = np.random.uniform(0.5, 1.0, (n_nodes, n_nodes)) * self.adj
+        self.W_conn = (self.W_conn + self.W_conn.T) / 2  # Symmetric
+
+        # Per-node transformation: [n_nodes, dim, dim]
+        scale = 0.5 / np.sqrt(dim)
+        self.node_W = np.random.randn(n_nodes, dim, dim) * scale
+        for i in range(n_nodes):
+            self.node_W[i] += np.eye(dim) * 0.4  # Self-connection
+
+        # Biases: [n_nodes, dim]
+        self.biases = np.random.randn(n_nodes, dim) * 0.15
+
+        # Learning rate
+        self.lr = 0.25
+
+        # Input/output masks
+        self.input_mask = np.zeros(n_nodes, dtype=bool)
+        self.input_mask[:2] = True  # First 2 nodes are inputs
+        self.output_mask = np.zeros(n_nodes, dtype=bool)
+        self.output_mask[-1] = True  # Last node is output
+
+        # Clamp values: [n_nodes, dim] - NaN means not clamped
+        self.clamped = np.full((n_nodes, dim), np.nan)
+
+        # Holographic memory: [n_nodes, dim]
+        self.memory_real = np.zeros((n_nodes, dim))
+        self.memory_imag = np.zeros((n_nodes, dim))
+        self.memory_strength = np.zeros(n_nodes)
+        self.avg_confidence = np.ones(n_nodes) * 0.3
+
+    def step(self, target_mode: bool = False):
+        """One parallel update step - ALL nodes update simultaneously."""
+        self.prev_states = self.states.copy()
+
+        # Compute phase coherence matrix: [n_nodes, n_nodes]
+        # coherence[i,j] = mean(cos(phase_i - phase_j))
+        phase_diff = self.phases[:, np.newaxis, :] - self.phases[np.newaxis, :, :]  # [n, n, dim]
+        coherence = np.mean(np.cos(phase_diff), axis=2)  # [n, n]
+
+        # Gate by coherence
+        gate = (1 + coherence) / 2
+        if target_mode:
+            gate = gate + 0.3  # Boost in target mode
+
+        # Weighted input from neighbors: [n_nodes, dim]
+        # For each node i: sum_j(W[i,j] * gate[i,j] * states[j])
+        weighted_adj = self.W_conn * gate * self.adj  # [n, n]
+        total_weight = np.sum(np.abs(weighted_adj), axis=1, keepdims=True) + 0.1  # [n, 1]
+        neighbor_input = (weighted_adj @ self.states) / total_weight  # [n, dim]
+
+        # Per-node transformation: apply node_W to input
+        # pre_act[i] = node_W[i] @ neighbor_input[i] + bias[i]
+        pre_act = np.einsum('nij,nj->ni', self.node_W, neighbor_input) + self.biases
+        pre_act = np.clip(pre_act, -5, 5)
+        target_activation = np.tanh(pre_act)
+
+        # Leaky integration
+        leak = 0.7 if target_mode else 0.5
+        new_states = (1 - leak) * self.states + leak * target_activation
+
+        # Apply clamping (only where not NaN)
+        clamped_mask = ~np.isnan(self.clamped)
+        new_states = np.where(clamped_mask, self.clamped, new_states)
+
+        self.states = new_states
+
+        # Update phases
+        self.phases += self.omega + 0.03 * self.states
+        self.phases = np.mod(self.phases, 2 * np.pi)
+
+    def has_converged(self, threshold: float = 0.015) -> bool:
+        """Check if all nodes have converged."""
+        change = np.mean(np.abs(self.states - self.prev_states))
+        return change < threshold
+
+    def settle(self, max_iters: int = 12, min_steps: int = 3, target_mode: bool = False) -> int:
+        """Settle until convergence."""
+        for i in range(max_iters):
+            self.step(target_mode=target_mode)
+            if i >= min_steps and self.has_converged():
+                return i + 1
+        return max_iters
+
+    def free_phase(self, input_values: np.ndarray) -> float:
+        """FREE PHASE: Settle with input clamped."""
+        # Reset states
+        self.states = np.random.randn(self.n_nodes, self.dim) * 0.01
+
+        # Clear clamps
+        self.clamped = np.full((self.n_nodes, self.dim), np.nan)
+
+        # Clamp inputs
+        for i, val in enumerate(input_values):
+            if i < 2:  # First 2 nodes
+                self.clamped[i] = np.ones(self.dim) * val
+
+        # Settle
+        self.settle()
+
+        # Store free states
+        self.free_states = self.states.copy()
+
+        # Return output (mean of last node)
+        return float(np.mean(self.states[-1]))
+
+    def target_phase(self, target: float) -> None:
+        """TARGET PHASE: Clamp output, let targets propagate back."""
+        # Clamp output node
+        self.clamped[-1] = np.ones(self.dim) * target
+
+        # Settle with target mode (stronger coupling)
+        self.settle(max_iters=18, min_steps=6, target_mode=True)
+
+        # Store target states
+        self.target_states = self.states.copy()
+
+    def learn(self):
+        """Apply target learning - move free states toward target states."""
+        # State difference: [n_nodes, dim]
+        state_diff = self.target_states - self.free_states
+        state_diff = np.clip(state_diff, -1, 1)
+
+        # Compute tanh derivative: 1 - free_state^2
+        tanh_deriv = 1 - self.free_states ** 2
+        delta = state_diff * tanh_deriv  # [n_nodes, dim]
+
+        # Compute phase coherence matrix for gating
+        phase_diff = self.phases[:, np.newaxis, :] - self.phases[np.newaxis, :, :]
+        coherence = np.mean(np.cos(phase_diff), axis=2)  # [n, n]
+
+        # Compute weighted neighbor input for each node during free phase
+        # neighbor_input[i] = sum_j(W[i,j] * coherence[i,j] * free_states[j])
+        gate = (1 + coherence) / 2
+        weighted_adj = self.W_conn * gate * self.adj
+        total_weight = np.sum(np.abs(weighted_adj), axis=1, keepdims=True) + 0.1
+        neighbor_input = (weighted_adj @ self.free_states) / total_weight  # [n, dim]
+
+        # Update node_W using outer product: dW[i] = delta[i] ⊗ neighbor_input[i]
+        # Vectorized: [n, dim, 1] @ [n, 1, dim] -> [n, dim, dim]
+        dW = np.einsum('ni,nj->nij', delta, neighbor_input) * self.lr
+        # Don't update input nodes
+        dW[self.input_mask] = 0
+        self.node_W += dW
+        self.node_W = np.clip(self.node_W, -3, 3)
+
+        # Update biases
+        self.biases += self.lr * 0.5 * delta
+        self.biases[self.input_mask] = 0  # Don't update input nodes
+        self.biases = np.clip(self.biases, -2, 2)
+
+        # Update connection weights based on correlation change
+        # Correlation in target vs free phase
+        target_corr = (self.target_states @ self.target_states.T) / self.dim
+        free_corr = (self.free_states @ self.free_states.T) / self.dim
+        corr_diff = target_corr - free_corr
+
+        # Coherence gates: only high coherence enables learning
+        coherence_gate = np.maximum(0, 2 * coherence - 0.5)
+
+        # Update where target correlation > free correlation
+        dW_conn = self.lr * 0.15 * coherence_gate * corr_diff * self.adj
+        self.W_conn = np.clip(self.W_conn + dW_conn, 0.1, 2.0)
+
+    def train_step(self, input_values: np.ndarray, target: float):
+        """One complete training step."""
+        self.free_phase(input_values)
+        self.target_phase(target)
+        self.learn()
+
+    def predict(self, input_values: np.ndarray) -> float:
+        """Predict without learning."""
+        return self.free_phase(input_values)
+
+
+def test_vectorized_speed():
+    """Compare speed of vectorized vs original."""
+    import time
+
+    print("\n" + "=" * 70)
+    print("SPEED COMPARISON: Vectorized vs Original")
+    print("=" * 70)
+
+    n_samples = 50
+    n_epochs = 10
+
+    # Generate test data
+    np.random.seed(42)
+    data = []
+    for _ in range(n_samples):
+        x1 = np.random.uniform(-1, 1)
+        x2 = np.random.uniform(-1, 1)
+        target = 1.0 if x1 * x2 > 0 else -1.0
+        data.append((np.array([x1, x2]), target))
+
+    # Test original
+    start = time.time()
+    graph_orig = PSITargetGraph(n_nodes=6, dim=8, seed=0)
+    for epoch in range(n_epochs):
+        for inp, target in data:
+            graph_orig.train_step(inp, target)
+    orig_time = time.time() - start
+
+    # Test vectorized
+    start = time.time()
+    graph_vec = VectorizedPSIGraph(n_nodes=6, dim=8, seed=0)
+    for epoch in range(n_epochs):
+        for inp, target in data:
+            graph_vec.train_step(inp, target)
+    vec_time = time.time() - start
+
+    print(f"  Original:   {orig_time:.2f}s")
+    print(f"  Vectorized: {vec_time:.2f}s")
+    print(f"  Speedup:    {orig_time/vec_time:.1f}x")
+
+    # Test accuracy
+    print("\nAccuracy check (XOR):")
+    xor_data = [
+        (np.array([1.0, 1.0]), -1.0),
+        (np.array([1.0, -1.0]), 1.0),
+        (np.array([-1.0, 1.0]), 1.0),
+        (np.array([-1.0, -1.0]), -1.0),
+    ]
+
+    correct = 0
+    for inp, target in xor_data:
+        pred = graph_vec.predict(inp)
+        if (pred > 0) == (target > 0):
+            correct += 1
+        print(f"  {inp} -> {pred:.3f} (target {target})")
+    print(f"  Accuracy: {correct}/4")
