@@ -34,7 +34,9 @@
       "WebFetch(domain:www.informatik.uni-wuerzburg.de)",
       "WebFetch(domain:pypi.org)",
       "WebFetch(domain:paperswithcode.com)",
-      "Bash(dir \"C:\\Projects\\ml\\phi\\data\\nuscenes\" /ad)"
+      "Bash(dir \"C:\\Projects\\ml\\phi\\data\\nuscenes\" /ad)",
+      "Bash(dir:*)",
+      "Bash(cd:*)"
     ],
     "deny": [],
     "ask": []
