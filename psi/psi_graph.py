@@ -1091,11 +1091,34 @@ class VectorizedPSIGraph:
         total_weight = np.sum(np.abs(weighted_adj), axis=1, keepdims=True) + 0.1  # [n, 1]
         neighbor_input = (weighted_adj @ self.states) / total_weight  # [n, dim]
 
+        # NEURAL NOISE: biological regularization
+        # The brain is inherently noisy - this prevents overfitting to exact patterns
+        noise = np.random.randn(self.n_nodes, self.dim) * 0.05
+        neighbor_input = neighbor_input + noise
+
         # Per-node transformation: apply node_W to input
         # pre_act[i] = node_W[i] @ neighbor_input[i] + bias[i]
         pre_act = np.einsum('nij,nj->ni', self.node_W, neighbor_input) + self.biases
         pre_act = np.clip(pre_act, -5, 5)
         target_activation = np.tanh(pre_act)
+
+        # PHASE-BASED NODE ROUTING (not dimension routing)
+        # Sparsity comes from which NODES are active, not which dimensions
+        # Nodes that are phase-coherent with the input get activated
+        # This is "neurons that fire together" at the node level
+        #
+        # Compute mean phase coherence of each node with all its active neighbors
+        # Nodes with high mean coherence are "on the path" and get amplified
+        # Nodes with low mean coherence are "off the path" and get dampened
+        mean_node_coherence = np.mean(coherence * self.adj, axis=1) / (np.sum(self.adj, axis=1) + 0.1)
+
+        # Soft winner-take-all at node level
+        # Nodes with above-average coherence get boosted, below-average get dampened
+        coherence_threshold = np.mean(mean_node_coherence)
+        node_gate = np.clip(1 + 2 * (mean_node_coherence - coherence_threshold), 0.3, 1.5)
+
+        # Apply node-level gating (broadcast to all dimensions)
+        target_activation = target_activation * node_gate[:, np.newaxis]
 
         # Leaky integration
         leak = 0.7 if target_mode else 0.5
@@ -1203,6 +1226,32 @@ class VectorizedPSIGraph:
         # Update where target correlation > free correlation
         dW_conn = self.lr * 0.15 * coherence_gate * corr_diff * self.adj
         self.W_conn = np.clip(self.W_conn + dW_conn, 0.1, 2.0)
+
+        # SYNAPTIC DECAY: the brain actively forgets
+        # This prevents overfitting by erasing old, unused patterns
+        # Balance: too fast = can't learn, too slow = overfits
+        decay_rate = 0.002  # Moderate decay
+
+        # Weights decay toward initial scale (not zero)
+        baseline_scale = 0.5 / np.sqrt(self.dim)
+        self.node_W = self.node_W * (1 - decay_rate) + baseline_scale * decay_rate * np.random.randn(self.n_nodes, self.dim, self.dim)
+
+        # Restore diagonal (self-connections should stay strong)
+        for i in range(self.n_nodes):
+            self.node_W[i, np.arange(self.dim), np.arange(self.dim)] *= (1 + decay_rate * 2)
+
+        # Bias decay toward zero
+        self.biases = self.biases * (1 - decay_rate * 0.5)
+
+        # Connection weight decay toward baseline
+        baseline_conn = 0.75  # Middle of [0.5, 1.0] init range
+        self.W_conn = self.W_conn * (1 - decay_rate) + baseline_conn * decay_rate * self.adj
+
+        # HOLOGRAPHIC MEMORY DECAY: old memories fade
+        # This is crucial - without it, memory accumulates noise indefinitely
+        self.memory_strength = self.memory_strength * 0.995  # Slow memory fade
+        self.memory_real = self.memory_real * 0.995
+        self.memory_imag = self.memory_imag * 0.995
 
     def train_step(self, input_values: np.ndarray, target: float):
         """One complete training step."""
