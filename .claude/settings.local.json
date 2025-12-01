@@ -10,7 +10,8 @@
       "Bash(for i in 1 2 3)",
       "Bash(do echo \"=== Run $i ===\")",
       "Bash(done)",
-      "Bash(git stash:*)"
+      "Bash(git stash:*)",
+      "Bash(timeout 120 python:*)"
     ],
     "deny": [],
     "ask": []

@@ -1017,7 +1017,7 @@ class VectorizedPSIGraph:
     - biases: [n_nodes, dim] - per-node biases
     """
 
-    def __init__(self, n_nodes: int, dim: int, seed: int = None,
+    def __init__(self, n_nodes: int = 16, dim: int = 32, seed: int = None,
                  topology: str = 'small_world', k_neighbors: int = 3,
                  long_range_prob: float = 0.15):
         """
@@ -1091,6 +1091,10 @@ class VectorizedPSIGraph:
         self.memory_strength = np.zeros(n_nodes)
         self.avg_confidence = np.ones(n_nodes) * 0.3
 
+        # Pre-computed values for speed
+        self.adj_sum = np.sum(self.adj, axis=1) + 0.1  # [n_nodes]
+        self.diag_indices = np.arange(dim)  # For diagonal updates
+
     def _build_small_world_adj(self, k: int, p_long: float) -> np.ndarray:
         """
         Build small-world adjacency matrix for scalable topology.
@@ -1142,75 +1146,57 @@ class VectorizedPSIGraph:
         return adj
 
     def step(self, target_mode: bool = False):
-        """One parallel update step - ALL nodes update simultaneously."""
+        """One parallel update step - ALL nodes update simultaneously. Optimized."""
         self.prev_states = self.states.copy()
 
         # Compute phase coherence matrix: [n_nodes, n_nodes]
-        # coherence[i,j] = mean(cos(phase_i - phase_j))
-        phase_diff = self.phases[:, np.newaxis, :] - self.phases[np.newaxis, :, :]  # [n, n, dim]
-        coherence = np.mean(np.cos(phase_diff), axis=2)  # [n, n]
+        phase_diff = self.phases[:, np.newaxis, :] - self.phases[np.newaxis, :, :]
+        coherence = np.mean(np.cos(phase_diff), axis=2)
 
         # Gate by coherence
-        gate = (1 + coherence) / 2
+        gate = (1 + coherence) * 0.5
         if target_mode:
-            gate = gate + 0.3  # Boost in target mode
+            gate += 0.3
 
-        # Weighted input from neighbors: [n_nodes, dim]
-        # For each node i: sum_j(W[i,j] * gate[i,j] * states[j])
-        weighted_adj = self.W_conn * gate * self.adj  # [n, n]
-        total_weight = np.sum(np.abs(weighted_adj), axis=1, keepdims=True) + 0.1  # [n, 1]
-        neighbor_input = (weighted_adj @ self.states) / total_weight  # [n, dim]
+        # Weighted input from neighbors
+        weighted_adj = self.W_conn * gate * self.adj
+        total_weight = np.sum(weighted_adj, axis=1, keepdims=True) + 0.1
+        neighbor_input = (weighted_adj @ self.states) / total_weight
 
-        # NEURAL NOISE: biological regularization
-        # The brain is inherently noisy - this prevents overfitting to exact patterns
-        noise = np.random.randn(self.n_nodes, self.dim) * 0.05
-        neighbor_input = neighbor_input + noise
+        # Neural noise
+        neighbor_input += np.random.randn(self.n_nodes, self.dim) * 0.05
 
-        # Per-node transformation: apply node_W to input
-        # pre_act[i] = node_W[i] @ neighbor_input[i] + bias[i]
+        # Per-node transformation
         pre_act = np.einsum('nij,nj->ni', self.node_W, neighbor_input) + self.biases
-        pre_act = np.clip(pre_act, -5, 5)
+        np.clip(pre_act, -5, 5, out=pre_act)
         target_activation = np.tanh(pre_act)
 
-        # PHASE-BASED NODE ROUTING (not dimension routing)
-        # Sparsity comes from which NODES are active, not which dimensions
-        # Nodes that are phase-coherent with the input get activated
-        # This is "neurons that fire together" at the node level
-        #
-        # Compute mean phase coherence of each node with all its active neighbors
-        # Nodes with high mean coherence are "on the path" and get amplified
-        # Nodes with low mean coherence are "off the path" and get dampened
-        mean_node_coherence = np.mean(coherence * self.adj, axis=1) / (np.sum(self.adj, axis=1) + 0.1)
-
-        # Soft winner-take-all at node level
-        # Nodes with above-average coherence get boosted, below-average get dampened
+        # Node gating based on mean coherence with neighbors
+        mean_node_coherence = np.sum(coherence * self.adj, axis=1) / self.adj_sum
         coherence_threshold = np.mean(mean_node_coherence)
         node_gate = np.clip(1 + 2 * (mean_node_coherence - coherence_threshold), 0.3, 1.5)
-
-        # Apply node-level gating (broadcast to all dimensions)
-        target_activation = target_activation * node_gate[:, np.newaxis]
+        target_activation *= node_gate[:, np.newaxis]
 
         # Leaky integration
         leak = 0.7 if target_mode else 0.5
         new_states = (1 - leak) * self.states + leak * target_activation
 
-        # Apply clamping (only where not NaN)
+        # Apply clamping
         clamped_mask = ~np.isnan(self.clamped)
-        new_states = np.where(clamped_mask, self.clamped, new_states)
-
+        np.copyto(new_states, self.clamped, where=clamped_mask)
         self.states = new_states
 
         # Update phases
         self.phases += self.omega + 0.03 * self.states
-        self.phases = np.mod(self.phases, 2 * np.pi)
+        np.mod(self.phases, 2 * np.pi, out=self.phases)
 
     def has_converged(self, threshold: float = 0.015) -> bool:
         """Check if all nodes have converged."""
         change = np.mean(np.abs(self.states - self.prev_states))
         return change < threshold
 
-    def settle(self, max_iters: int = 12, min_steps: int = 3, target_mode: bool = False) -> int:
-        """Settle until convergence."""
+    def settle(self, max_iters: int = 8, min_steps: int = 3, target_mode: bool = False) -> int:
+        """Settle until convergence. Optimized for speed."""
         for i in range(max_iters):
             self.step(target_mode=target_mode)
             if i >= min_steps and self.has_converged():
@@ -1222,16 +1208,14 @@ class VectorizedPSIGraph:
         # Reset states
         self.states = np.random.randn(self.n_nodes, self.dim) * 0.01
 
-        # Clear clamps
+        # Clear clamps and set inputs
         self.clamped = np.full((self.n_nodes, self.dim), np.nan)
-
-        # Clamp inputs
-        for i, val in enumerate(input_values):
-            if i < 2:  # First 2 nodes
-                self.clamped[i] = np.ones(self.dim) * val
+        n_inputs = min(len(input_values), 2)
+        for i in range(n_inputs):
+            self.clamped[i] = input_values[i]
 
         # Settle
-        self.settle()
+        self.settle(max_iters=8, min_steps=3)
 
         # Store free states
         self.free_states = self.states.copy()
@@ -1242,86 +1226,67 @@ class VectorizedPSIGraph:
     def target_phase(self, target: float) -> None:
         """TARGET PHASE: Clamp output, let targets propagate back."""
         # Clamp output node
-        self.clamped[-1] = np.ones(self.dim) * target
+        self.clamped[-1] = target
 
-        # Settle with target mode (stronger coupling)
-        self.settle(max_iters=18, min_steps=6, target_mode=True)
+        # Settle with target mode
+        self.settle(max_iters=10, min_steps=4, target_mode=True)
 
         # Store target states
         self.target_states = self.states.copy()
 
     def learn(self):
-        """Apply target learning - move free states toward target states."""
-        # State difference: [n_nodes, dim]
+        """Apply target learning - move free states toward target states. Optimized."""
+        # State difference
         state_diff = self.target_states - self.free_states
-        state_diff = np.clip(state_diff, -1, 1)
+        np.clip(state_diff, -1, 1, out=state_diff)
 
-        # Compute tanh derivative: 1 - free_state^2
+        # Compute delta with tanh derivative
         tanh_deriv = 1 - self.free_states ** 2
-        delta = state_diff * tanh_deriv  # [n_nodes, dim]
+        delta = state_diff * tanh_deriv
 
-        # Compute phase coherence matrix for gating
+        # Compute phase coherence matrix
         phase_diff = self.phases[:, np.newaxis, :] - self.phases[np.newaxis, :, :]
-        coherence = np.mean(np.cos(phase_diff), axis=2)  # [n, n]
+        coherence = np.mean(np.cos(phase_diff), axis=2)
 
-        # Compute weighted neighbor input for each node during free phase
-        # neighbor_input[i] = sum_j(W[i,j] * coherence[i,j] * free_states[j])
-        gate = (1 + coherence) / 2
+        # Compute neighbor input
+        gate = (1 + coherence) * 0.5
         weighted_adj = self.W_conn * gate * self.adj
-        total_weight = np.sum(np.abs(weighted_adj), axis=1, keepdims=True) + 0.1
-        neighbor_input = (weighted_adj @ self.free_states) / total_weight  # [n, dim]
+        total_weight = np.sum(weighted_adj, axis=1, keepdims=True) + 0.1
+        neighbor_input = (weighted_adj @ self.free_states) / total_weight
 
-        # Update node_W using outer product: dW[i] = delta[i] ⊗ neighbor_input[i]
-        # Vectorized: [n, dim, 1] @ [n, 1, dim] -> [n, dim, dim]
+        # Update node_W
         dW = np.einsum('ni,nj->nij', delta, neighbor_input) * self.lr
-        # Don't update input nodes
         dW[self.input_mask] = 0
         self.node_W += dW
-        self.node_W = np.clip(self.node_W, -3, 3)
+        np.clip(self.node_W, -3, 3, out=self.node_W)
 
         # Update biases
         self.biases += self.lr * 0.5 * delta
-        self.biases[self.input_mask] = 0  # Don't update input nodes
-        self.biases = np.clip(self.biases, -2, 2)
+        self.biases[self.input_mask] = 0
+        np.clip(self.biases, -2, 2, out=self.biases)
 
-        # Update connection weights based on correlation change
-        # Correlation in target vs free phase
+        # Update connection weights
         target_corr = (self.target_states @ self.target_states.T) / self.dim
         free_corr = (self.free_states @ self.free_states.T) / self.dim
         corr_diff = target_corr - free_corr
-
-        # Coherence gates: only high coherence enables learning
         coherence_gate = np.maximum(0, 2 * coherence - 0.5)
-
-        # Update where target correlation > free correlation
         dW_conn = self.lr * 0.15 * coherence_gate * corr_diff * self.adj
-        self.W_conn = np.clip(self.W_conn + dW_conn, 0.1, 2.0)
+        self.W_conn += dW_conn
+        np.clip(self.W_conn, 0.1, 2.0, out=self.W_conn)
 
-        # SYNAPTIC DECAY: the brain actively forgets
-        # This prevents overfitting by erasing old, unused patterns
-        # Balance: too fast = can't learn, too slow = overfits
-        decay_rate = 0.002  # Moderate decay
+        # Synaptic decay (simplified)
+        decay = 0.998
+        self.node_W *= decay
+        self.biases *= decay
+        self.W_conn = self.W_conn * decay + 0.75 * (1 - decay) * self.adj
 
-        # Weights decay toward initial scale (not zero)
-        baseline_scale = 0.5 / np.sqrt(self.dim)
-        self.node_W = self.node_W * (1 - decay_rate) + baseline_scale * decay_rate * np.random.randn(self.n_nodes, self.dim, self.dim)
+        # Restore diagonals (vectorized)
+        self.node_W[:, self.diag_indices, self.diag_indices] *= 1.004
 
-        # Restore diagonal (self-connections should stay strong)
-        for i in range(self.n_nodes):
-            self.node_W[i, np.arange(self.dim), np.arange(self.dim)] *= (1 + decay_rate * 2)
-
-        # Bias decay toward zero
-        self.biases = self.biases * (1 - decay_rate * 0.5)
-
-        # Connection weight decay toward baseline
-        baseline_conn = 0.75  # Middle of [0.5, 1.0] init range
-        self.W_conn = self.W_conn * (1 - decay_rate) + baseline_conn * decay_rate * self.adj
-
-        # HOLOGRAPHIC MEMORY DECAY: old memories fade
-        # This is crucial - without it, memory accumulates noise indefinitely
-        self.memory_strength = self.memory_strength * 0.995  # Slow memory fade
-        self.memory_real = self.memory_real * 0.995
-        self.memory_imag = self.memory_imag * 0.995
+        # Memory decay
+        self.memory_strength *= 0.995
+        self.memory_real *= 0.995
+        self.memory_imag *= 0.995
 
     def train_step(self, input_values: np.ndarray, target: float):
         """One complete training step."""
