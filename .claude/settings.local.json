@@ -12,7 +12,8 @@
       "Bash(done)",
       "Bash(git stash:*)",
       "Bash(timeout 120 python:*)",
-      "Bash(timeout 300 python:*)"
+      "Bash(timeout 300 python:*)",
+      "Bash(timeout 180 python:*)"
     ],
     "deny": [],
     "ask": []

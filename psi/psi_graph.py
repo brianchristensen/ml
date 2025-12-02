@@ -137,6 +137,30 @@ class VectorizedPSIGraph:
         # Store last target for learning
         self.last_target = None
 
+        # ============================================================
+        # ELIGIBILITY TRACES: Accumulate activity over time
+        # ============================================================
+        self.eligibility_trace = np.zeros((n_nodes, dim))
+        self.eligibility_decay = 0.8  # How fast traces decay
+
+        # ============================================================
+        # PHASIC/TONIC DOPAMINE: Fast and slow signals
+        # ============================================================
+        # Phasic: fast, transient signal for immediate learning
+        self.phasic_reward = 0.5  # Fast moving average
+        self.phasic_decay = 0.7   # Fast decay (more responsive)
+        # Tonic: slow, baseline signal for exploration/stability
+        self.tonic_reward = 0.5   # Slow moving average
+        self.tonic_decay = 0.98   # Very slow decay (stable baseline)
+
+        # ============================================================
+        # ACTOR-CRITIC: Separate value estimation network
+        # ============================================================
+        # Critic: learns to predict reward given current state
+        # Uses a simple linear function of input features
+        self.critic_W = np.random.randn(n_nodes * dim) * 0.1
+        self.critic_lr = 0.05
+
     def _build_small_world_adj(self, k: int, p_long: float) -> np.ndarray:
         """
         Build small-world adjacency matrix for scalable topology.
@@ -225,6 +249,10 @@ class VectorizedPSIGraph:
         self.phases += self.omega + 0.03 * self.states
         np.mod(self.phases, 2 * np.pi, out=self.phases)
 
+        # Accumulate eligibility trace: decay + current activity
+        self.eligibility_trace = (self.eligibility_decay * self.eligibility_trace +
+                                  (1 - self.eligibility_decay) * np.abs(self.states))
+
     def has_converged(self, threshold: float = 0.015) -> bool:
         """Check if all nodes have converged."""
         change = np.mean(np.abs(self.states - self.prev_states))
@@ -240,8 +268,9 @@ class VectorizedPSIGraph:
 
     def free_phase(self, input_values: np.ndarray) -> float:
         """FREE PHASE: Settle with input clamped."""
-        # Reset states
+        # Reset states and eligibility trace
         self.states = np.random.randn(self.n_nodes, self.dim) * 0.01
+        self.eligibility_trace = np.zeros((self.n_nodes, self.dim))
 
         # Clear clamps and set inputs
         self.clamped = np.full((self.n_nodes, self.dim), np.nan)
@@ -313,8 +342,38 @@ class VectorizedPSIGraph:
         # Update expected reward (slow moving average)
         self.expected_reward = self.reward_decay * self.expected_reward + (1 - self.reward_decay) * reward
 
-        # Dopamine signal
-        dopamine = td_error
+        # ============================================================
+        # PHASIC/TONIC DOPAMINE: Separate fast and slow signals
+        # ============================================================
+        # Phasic dopamine: fast, transient surprise signal for learning
+        phasic_error = reward - self.phasic_reward
+        self.phasic_reward = self.phasic_decay * self.phasic_reward + (1 - self.phasic_decay) * reward
+
+        # Tonic dopamine: slow baseline, controls exploration/stability
+        tonic_error = reward - self.tonic_reward
+        self.tonic_reward = self.tonic_decay * self.tonic_reward + (1 - self.tonic_decay) * reward
+
+        # ============================================================
+        # ACTOR-CRITIC: Critic provides variance reduction
+        # ============================================================
+        # Flatten free states for critic input
+        state_features = self.free_states.flatten()
+
+        # Critic predicts expected value for this state
+        critic_prediction = np.dot(self.critic_W, state_features)
+        critic_prediction = np.clip(critic_prediction, 0, 1)
+
+        # Advantage: how much better/worse than expected
+        advantage = reward - critic_prediction
+
+        # Update critic (learns to predict value)
+        self.critic_W += self.critic_lr * advantage * state_features
+        np.clip(self.critic_W, -2, 2, out=self.critic_W)
+
+        # Combined dopamine: phasic drives learning, advantage reduces variance
+        # Use phasic for direction, but scale by advantage magnitude
+        tonic_factor = np.clip(self.tonic_reward, 0.3, 0.7)
+        dopamine = phasic_error * (1.5 - tonic_factor) + 0.3 * advantage
 
         # ============================================================
         # THREE-FACTOR LEARNING: pre × post × dopamine
@@ -330,8 +389,9 @@ class VectorizedPSIGraph:
         total_weight = np.sum(weighted_adj, axis=1, keepdims=True) + 0.1
         neighbor_input = (weighted_adj @ self.free_states) / total_weight
 
-        # Eligibility: which nodes were active?
-        eligibility = np.abs(self.free_states)
+        # Eligibility: use accumulated trace (remembers activity over time)
+        # This is more biologically plausible than just final activity
+        eligibility = self.eligibility_trace.copy()
         eligibility = eligibility / (eligibility.max() + 1e-8)
 
         # Dopamine gate: modulates learning magnitude
@@ -388,7 +448,7 @@ class VectorizedPSIGraph:
         return self.free_phase(input_values)
 
 
-def test_xor():
+def test_xor(n_epochs=150, search_epochs=100):
     """Test XOR with dopamine-gated learning."""
     print("=" * 70)
     print("PSI DOPAMINE-GATED LEARNING - XOR TEST")
@@ -398,6 +458,9 @@ def test_xor():
     print("  - Global dopamine signal (TD error) modulates all learning")
     print("  - Three-factor rule: pre × post × dopamine")
     print("  - Phase coherence gates communication")
+    print("  - Eligibility traces with decay")
+    print("  - Phasic/tonic dopamine signals")
+    print(f"  - Training: {search_epochs} search + {n_epochs} full epochs")
     print()
 
     xor_data = [
@@ -414,7 +477,7 @@ def test_xor():
     for seed in range(30):
         graph = VectorizedPSIGraph(n_nodes=6, dim=8, seed=seed)
 
-        for _ in range(100):
+        for _ in range(search_epochs):
             np.random.shuffle(xor_data)
             for inp, target in xor_data:
                 graph.train_step(inp, target)
@@ -439,7 +502,8 @@ def test_xor():
     print("\nFull training with diagnostics:")
     graph = VectorizedPSIGraph(n_nodes=6, dim=8, seed=best_seed)
 
-    for epoch in range(150):
+    report_interval = max(1, n_epochs // 5)
+    for epoch in range(n_epochs):
         np.random.shuffle(xor_data)
         total_td = 0
 
@@ -447,7 +511,7 @@ def test_xor():
             _, td_error = graph.train_step(inp, target)
             total_td += td_error
 
-        if epoch % 30 == 0:
+        if epoch % report_interval == 0:
             correct = sum(1 for inp, target in xor_data
                          if (graph.predict(inp) > 0) == (target > 0))
             print(f"  Epoch {epoch}: {correct}/4, avg_td={total_td/4:.3f}, "

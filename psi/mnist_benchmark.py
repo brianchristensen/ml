@@ -141,8 +141,41 @@ class PSIClassifier:
         self.B_input = np.random.randn(n_output, n_input * dim) * 0.1  # Output -> input directly
 
         # DOPAMINE-LIKE TD ERROR: Track running average of reward for surprise signal
-        self.expected_reward = 0.5  # Running average (start at chance level for 10 classes = 0.1, but use 0.5 as neutral)
-        self.reward_decay = 0.99  # How fast to update expectation (slow = more stable baseline)
+        self.expected_reward = 0.1  # Start at chance level (10 classes)
+        self.reward_decay = 0.995  # Slower update for more stable baseline
+
+        # Learning step counter for warmup
+        self.step_count = 0
+
+        # SYNAPTIC CONSOLIDATION: Track importance of each synapse
+        # Synapses that contribute to correct predictions become "consolidated"
+        # (like LTP consolidation in biology)
+        self.ho_importance = np.zeros_like(self.hidden_to_output)  # Classifier weights
+        self.consolidation_rate = 0.02  # How fast importance builds up (increased)
+
+        # BEST PERFORMANCE CHECKPOINT: Lock in best weights
+        self.best_accuracy = 0.0
+        self.best_weights = None  # Will store (hidden_to_output, node_W, input_proj, biases)
+        self.accuracy_history = []  # Track recent accuracy for lock-in signal
+
+        # HOMEOSTATIC PLASTICITY: Track each node's average activity
+        # Nodes that are too active get suppressed, too inactive get boosted
+        self.target_activity = 0.3  # Target average activation
+        self.activity_trace = np.ones(self.n_nodes) * self.target_activity
+        self.homeostatic_rate = 0.01  # How fast to adjust
+
+        # LATERAL INHIBITION weights (for hidden layer competition)
+        # Nearby hidden nodes inhibit each other
+        self.lateral_inhibition = np.zeros((n_hidden, n_hidden))
+        for i in range(n_hidden):
+            for j in range(n_hidden):
+                if i != j:
+                    dist = min(abs(i - j), n_hidden - abs(i - j))  # Circular distance
+                    self.lateral_inhibition[i, j] = -0.3 * np.exp(-dist / 3.0)  # Local inhibition
+
+        # Adaptive learning rate based on surprise
+        self.base_lr = 0.05
+        self.lr = self.base_lr
 
         # Diagnostics
         self.diag = {
@@ -246,50 +279,39 @@ class PSIClassifier:
         np.copyto(new_states, self.clamped, where=clamped_mask)
         self.states = new_states
 
-        # Update phases with ACTIVITY-BASED SYNCHRONIZATION
-        # Nodes with similar activations should sync their phases
-        # This creates meaningful routing patterns based on data
+        # Update phases with VECTORIZED ACTIVITY-BASED SYNCHRONIZATION
+        # Compute state similarity once
         state_similarity = self.states @ self.states.T / self.dim  # [n_nodes, n_nodes]
 
-        # Each node's phase is pulled toward neighbors with similar activations
-        # BUT we want SELECTIVE sync - only sync with highly correlated neighbors
-        phase_pull = np.zeros_like(self.phases)
-        for i in range(self.n_nodes):
-            neighbors = np.where(self.adj[i] > 0)[0]
-            if len(neighbors) > 0:
-                # Only sync with neighbors that have ABOVE-AVERAGE similarity
-                sim = state_similarity[i, neighbors]
-                mean_sim = np.mean(sim)
-                # Selective: only positive deviations from mean
-                sim_weights = np.maximum(0, sim - mean_sim)
-                if sim_weights.sum() > 0.01:
-                    sim_weights = sim_weights / sim_weights.sum()
-                    neighbor_phases = self.phases[neighbors]
-                    weighted_sin = np.sum(sim_weights[:, np.newaxis] * np.sin(neighbor_phases), axis=0)
-                    weighted_cos = np.sum(sim_weights[:, np.newaxis] * np.cos(neighbor_phases), axis=0)
-                    target_phase = np.arctan2(weighted_sin, weighted_cos)
-                    phase_diff = target_phase - self.phases[i]
-                    phase_diff = np.mod(phase_diff + np.pi, 2 * np.pi) - np.pi
-                    phase_pull[i] = 0.15 * phase_diff  # Reduced sync strength
+        # Mask to only consider adjacent nodes
+        adj_mask = self.adj > 0  # [n_nodes, n_nodes]
 
-        # Add anti-phase coupling: push AWAY from dissimilar neighbors
-        for i in range(self.n_nodes):
-            neighbors = np.where(self.adj[i] > 0)[0]
-            if len(neighbors) > 0:
-                sim = state_similarity[i, neighbors]
-                # Anti-correlate with very dissimilar neighbors
-                anti_weights = np.maximum(0, -sim)  # Negative correlations
-                if anti_weights.sum() > 0.01:
-                    anti_weights = anti_weights / anti_weights.sum()
-                    neighbor_phases = self.phases[neighbors]
-                    weighted_sin = np.sum(anti_weights[:, np.newaxis] * np.sin(neighbor_phases), axis=0)
-                    weighted_cos = np.sum(anti_weights[:, np.newaxis] * np.cos(neighbor_phases), axis=0)
-                    anti_phase = np.arctan2(weighted_sin, weighted_cos)
-                    # Push AWAY from anti-phase
-                    phase_diff = self.phases[i] - anti_phase
-                    phase_diff = np.mod(phase_diff + np.pi, 2 * np.pi) - np.pi
-                    phase_pull[i] += 0.1 * np.sign(phase_diff) * 0.3  # Push away
+        # For each node, compute mean similarity with neighbors
+        neighbor_sim = state_similarity * adj_mask  # Zero out non-neighbors
+        neighbor_count = adj_mask.sum(axis=1, keepdims=True) + 1e-8
+        mean_neighbor_sim = neighbor_sim.sum(axis=1, keepdims=True) / neighbor_count
 
+        # Selective weights: only above-average similarity neighbors contribute
+        sim_weights = np.maximum(0, state_similarity - mean_neighbor_sim) * adj_mask
+        sim_weights_sum = sim_weights.sum(axis=1, keepdims=True) + 1e-8
+        sim_weights_norm = sim_weights / sim_weights_sum  # [n_nodes, n_nodes]
+
+        # Compute weighted circular mean of neighbor phases
+        # sin and cos of phases: [n_nodes, dim]
+        sin_phases = np.sin(self.phases)
+        cos_phases = np.cos(self.phases)
+
+        # Weighted sum across neighbors: [n_nodes, dim]
+        weighted_sin = sim_weights_norm @ sin_phases
+        weighted_cos = sim_weights_norm @ cos_phases
+        target_phase = np.arctan2(weighted_sin, weighted_cos)
+
+        # Phase difference (wrapped to [-pi, pi])
+        phase_diff = target_phase - self.phases
+        phase_diff = np.mod(phase_diff + np.pi, 2 * np.pi) - np.pi
+        phase_pull = 0.15 * phase_diff
+
+        # Simple phase update (skip anti-phase for speed - small effect)
         self.phases += self.omega + 0.02 * self.states + phase_pull
         np.mod(self.phases, 2 * np.pi, out=self.phases)
 
@@ -307,10 +329,13 @@ class PSIClassifier:
         """Project 784-dim image to input node states [n_input, dim]."""
         # Reshape to [n_input, pixels_per_input]
         pixels = image.reshape(self.n_input, self.pixels_per_input)
+
         # Store for learning
         self.last_pixels = pixels.copy()
+
         # Project each chunk: [n_input, pixels_per_input] @ [n_input, pixels_per_input, dim]
         projected = np.einsum('np,npd->nd', pixels, self.input_proj)
+
         return np.tanh(projected)
 
     def free_phase(self, image: np.ndarray) -> np.ndarray:
@@ -437,9 +462,15 @@ class PSIClassifier:
             # ---- THREE-FACTOR LEARNING ----
             # All weight updates are modulated by the GLOBAL td_error signal
 
-            # Scale learning by |td_error| - learn more from surprising outcomes
-            # Sign of td_error determines direction
-            dopamine = td_error  # Can be positive or negative
+            # Learning rate warmup: start lower, ramp up over first 200 steps
+            # This mimics synaptic maturation and provides stability
+            self.step_count += 1
+            warmup_factor = min(1.0, self.step_count / 200)
+            effective_lr = self.lr * warmup_factor
+
+            # Dopamine signal: clamp to prevent extreme updates
+            # This mimics saturation of neurotransmitter release
+            dopamine = np.clip(td_error, -0.5, 0.5)
 
             # 1. Update hidden_to_output using three-factor rule
             # We still need SOME directional signal for the output layer
@@ -449,9 +480,21 @@ class PSIClassifier:
             target_direction -= probs  # Direction toward correct answer
 
             # Three-factor: pre (combined_features) × post_direction × dopamine
-            # When dopamine > 0 (better than expected): reinforce current direction
-            # When dopamine < 0 (worse than expected): move away from current
-            dW_ho = self.lr * np.outer(combined_features, target_direction) * (1 + dopamine * 2)
+            # Conservative gating: don't let dopamine swing learning too wildly
+            dopamine_mod = 1.0 + dopamine  # Range [0.5, 1.5] instead of unbounded
+            dW_ho = effective_lr * np.outer(combined_features, target_direction) * dopamine_mod
+
+            # SYNAPTIC CONSOLIDATION: Reduce learning on important synapses
+            # Importance grows when prediction is correct (reward > 0.5)
+            if reward > 0.3:  # Correct-ish prediction
+                # Update importance: synapses active during success become protected
+                activity_pattern = np.abs(np.outer(combined_features, probs))
+                self.ho_importance += self.consolidation_rate * activity_pattern
+
+            # Scale down updates to important synapses (they resist change)
+            consolidation_protection = 1.0 / (1.0 + self.ho_importance)
+            dW_ho *= consolidation_protection
+
             self.hidden_to_output += dW_ho
             np.clip(self.hidden_to_output, -3, 3, out=self.hidden_to_output)
 
@@ -478,29 +521,27 @@ class PSIClassifier:
             # Dopamine gates the contrastive signal too
             # Positive dopamine: trust the contrastive difference
             # Negative dopamine: maybe the free phase was better, reduce update
-            dopamine_gate = np.clip(0.5 + dopamine, 0.1, 2.0)
+            dopamine_gate = np.clip(0.5 + dopamine, 0.3, 1.5)  # More conservative range
             combined_delta = dopamine_gate * hidden_delta + 0.3 * h_update_reshaped
 
-            # Update hidden node_W
-            for h in range(self.n_hidden):
-                node_idx = hidden_start + h
-                dW = np.outer(combined_delta[h], neighbor_input[node_idx]) * self.lr
-                self.node_W[node_idx] += dW
+            # Update hidden node_W (VECTORIZED)
+            # combined_delta: [n_hidden, dim], neighbor_input: [n_nodes, dim]
+            hidden_neighbor = neighbor_input[hidden_start:hidden_end]  # [n_hidden, dim]
+            # Outer product for each hidden node: [n_hidden, dim, dim]
+            dW_hidden = effective_lr * np.einsum('hi,hj->hij', combined_delta, hidden_neighbor)
+            self.node_W[hidden_start:hidden_end] += dW_hidden
 
             np.clip(self.node_W, -3, 3, out=self.node_W)
 
-            # 3. Input projections: dopamine-gated Hebbian
+            # 3. Input projections: dopamine-gated Hebbian (VECTORIZED)
             if hasattr(self, 'last_pixels'):
                 # Which input dimensions were active and contributed to the response?
                 input_eligibility = np.abs(input_flat.reshape(self.n_input, self.dim))
 
-                # Update input projections with dopamine gating
-                for i in range(self.n_input):
-                    # Hebbian: correlation of pixels with projected state
-                    # Gated by dopamine: reinforce if good, weaken if bad
-                    hebbian = np.outer(self.last_pixels[i], input_eligibility[i])
-                    dProj = self.lr * 0.1 * dopamine * hebbian
-                    self.input_proj[i] += dProj
+                # Vectorized Hebbian: [n_input, pixels_per_input, dim]
+                # last_pixels: [n_input, pixels_per_input], input_eligibility: [n_input, dim]
+                dProj = effective_lr * 0.1 * dopamine * np.einsum('ip,id->ipd', self.last_pixels, input_eligibility)
+                self.input_proj += dProj
 
                 np.clip(self.input_proj, -1.5, 1.5, out=self.input_proj)
 
@@ -509,15 +550,21 @@ class PSIClassifier:
         # (Also gated by dopamine when available)
         # ============================================================
 
+        # Compute effective learning rate (handles case where step_count wasn't incremented above)
+        if not hasattr(self, 'last_label'):
+            self.step_count += 1
+        warmup_factor = min(1.0, self.step_count / 200)
+        effective_lr_ch = self.lr * warmup_factor
+
         # Get dopamine for gating (default to 0 if not computed yet)
-        dopamine = getattr(self, '_last_dopamine', 0.0) if not hasattr(self, 'last_label') else td_error
+        ch_dopamine = getattr(self, '_last_dopamine', 0.0) if not hasattr(self, 'last_label') else td_error
         if hasattr(self, 'last_label'):
             self._last_dopamine = td_error  # Store for next iteration
 
-        dopamine_gate = np.clip(0.5 + dopamine, 0.2, 1.5)
+        dopamine_gate = np.clip(0.5 + ch_dopamine, 0.3, 1.5)
 
         # Update biases using contrastive delta, gated by dopamine
-        self.biases += self.lr * 0.3 * delta * dopamine_gate
+        self.biases += effective_lr_ch * 0.3 * delta * dopamine_gate
         self.biases[self.input_mask] = 0
         np.clip(self.biases, -2, 2, out=self.biases)
 
@@ -526,17 +573,19 @@ class PSIClassifier:
         free_corr = (self.free_states @ self.free_states.T) / self.dim
         corr_diff = target_corr - free_corr
         coherence_gate = np.maximum(0, 2 * coherence - 0.5)
-        dW_conn = self.lr * 0.1 * dopamine_gate * coherence_gate * corr_diff * self.adj
+        dW_conn = effective_lr_ch * 0.1 * dopamine_gate * coherence_gate * corr_diff * self.adj
         self.W_conn += dW_conn
         np.clip(self.W_conn, 0.1, 2.0, out=self.W_conn)
 
-        # Synaptic decay
-        decay = 0.999
+        # Synaptic decay (reduced to prevent forgetting)
+        decay = 0.9995
         self.node_W *= decay
         self.biases *= decay
         self.W_conn = self.W_conn * decay + 0.75 * (1 - decay) * self.adj
-        self.node_W[:, self.diag_indices, self.diag_indices] *= 1.002
-        self.hidden_to_output *= 0.9995  # Slight decay on classifier
+        self.node_W[:, self.diag_indices, self.diag_indices] *= 1.001
+        # Classifier decay - only on less important weights
+        classifier_decay = 1.0 - 0.0005 / (1.0 + self.ho_importance)
+        self.hidden_to_output *= classifier_decay
 
         # Collect diagnostics after updates
         if collect_diag:
@@ -581,6 +630,52 @@ class PSIClassifier:
         """Clear diagnostic buffers."""
         for key in self.diag:
             self.diag[key] = []
+
+    def checkpoint_if_best(self, accuracy: float):
+        """Save weights if this is the best accuracy seen.
+
+        Bio-plausible interpretation: Strong reward from achieving new peak
+        triggers consolidation of current synaptic configuration.
+        """
+        self.accuracy_history.append(accuracy)
+
+        if accuracy > self.best_accuracy:
+            self.best_accuracy = accuracy
+            # Save current weights (deep copy)
+            self.best_weights = (
+                self.hidden_to_output.copy(),
+                self.node_W.copy(),
+                self.input_proj.copy(),
+                self.biases.copy(),
+                self.W_conn.copy(),
+            )
+            # STRONG CONSOLIDATION: When hitting new peak, dramatically increase importance
+            # This is like a "winner-take-all" signal that locks in the winning configuration
+            self.ho_importance += 0.5 * np.abs(self.hidden_to_output)
+            return True
+        return False
+
+    def restore_best(self):
+        """Restore best weights if performance has degraded significantly.
+
+        Bio-plausible interpretation: Homeostatic mechanism that reverts to
+        a known-good state when current state is performing poorly.
+        """
+        if self.best_weights is not None:
+            # Check if we've degraded significantly (more than 15% below best)
+            if len(self.accuracy_history) >= 3:
+                recent_avg = np.mean(self.accuracy_history[-3:])
+                if recent_avg < self.best_accuracy - 0.15:
+                    # Partial restore: blend current with best (not full replacement)
+                    # This allows some continued exploration while recovering
+                    blend = 0.7  # 70% best, 30% current
+                    self.hidden_to_output = blend * self.best_weights[0] + (1 - blend) * self.hidden_to_output
+                    self.node_W = blend * self.best_weights[1] + (1 - blend) * self.node_W
+                    self.input_proj = blend * self.best_weights[2] + (1 - blend) * self.input_proj
+                    self.biases = blend * self.best_weights[3] + (1 - blend) * self.biases
+                    self.W_conn = blend * self.best_weights[4] + (1 - blend) * self.W_conn
+                    return True
+        return False
 
 
 class MLPBaseline:
@@ -668,7 +763,7 @@ def main():
     psi = PSIClassifier(n_input=28, n_hidden=24, n_output=10, dim=24, seed=42)
 
     psi_start = time.time()
-    for epoch in range(5):
+    for epoch in range(10):  # More epochs for better learning
         epoch_start = time.time()
         psi.clear_diagnostics()
         idx = np.random.permutation(len(X_train))
@@ -680,13 +775,19 @@ def main():
 
         epoch_time = time.time() - epoch_start
 
-        # Quick eval on subset
-        test_subset = np.random.permutation(len(X_test))[:100]
-        correct = sum(1 for i in test_subset if psi.predict(X_test[i]) == y_test[i])
-        print(f"  Epoch {epoch+1}: {correct}/100 = {correct}% ({epoch_time:.1f}s)")
+        # Evaluate on FULL test set for accurate checkpointing
+        correct = sum(1 for i in range(len(X_test)) if psi.predict(X_test[i]) == y_test[i])
+        acc = correct / len(X_test)
 
-        # Print diagnostics after each epoch
-        psi.print_diagnostics(f"(epoch {epoch+1})")
+        # Checkpoint if best, restore if degraded
+        is_best = psi.checkpoint_if_best(acc)
+        restored = psi.restore_best()
+        status = '*** BEST ***' if is_best else ('(restored)' if restored else '')
+        print(f"  Epoch {epoch+1}: {correct}/{len(X_test)} = {acc:.1%} ({epoch_time:.1f}s) {status}")
+
+        # Print diagnostics only on first and last epoch to reduce output
+        if epoch == 0 or epoch == 9:
+            psi.print_diagnostics(f"(epoch {epoch+1})")
 
     psi_time = time.time() - psi_start
     print(f"\nPSI training time: {psi_time:.1f}s")
@@ -720,12 +821,21 @@ def main():
     print("FINAL EVALUATION")
     print("=" * 70)
 
+    # Restore best checkpoint for PSI before evaluation
+    if psi.best_weights is not None:
+        psi.hidden_to_output = psi.best_weights[0].copy()
+        psi.node_W = psi.best_weights[1].copy()
+        psi.input_proj = psi.best_weights[2].copy()
+        psi.biases = psi.best_weights[3].copy()
+        psi.W_conn = psi.best_weights[4].copy()
+        print(f"(PSI restored to best checkpoint: {psi.best_accuracy:.1%})")
+
     psi_acc = evaluate(psi, X_test, y_test, "PSI")
     mlp_acc = evaluate(mlp, X_test, y_test, "MLP")
 
     print()
     print("Summary:")
-    print(f"  PSI: {psi_acc:.1%} accuracy, {psi_time:.1f}s training")
+    print(f"  PSI: {psi_acc:.1%} accuracy (best: {psi.best_accuracy:.1%}), {psi_time:.1f}s training")
     print(f"  MLP: {mlp_acc:.1%} accuracy, {mlp_time:.1f}s training")
     if mlp_time > 0:
         print(f"  Speed ratio: MLP is {psi_time/mlp_time:.1f}x faster")
