@@ -133,6 +133,7 @@ class PSIClassifier:
         # Combined classifier: uses BOTH input projections and hidden states
         # This allows the classifier to access both raw input features and processed features
         combined_size = n_input * dim + n_hidden * dim  # Both input and hidden
+        self.combined_size = combined_size  # Store for learning rate scaling
         self.hidden_to_output = np.random.randn(combined_size, n_output) * np.sqrt(2.0 / combined_size)
 
         # FEEDBACK ALIGNMENT: Random fixed feedback weights for biologically plausible error propagation
@@ -151,7 +152,8 @@ class PSIClassifier:
         # Synapses that contribute to correct predictions become "consolidated"
         # (like LTP consolidation in biology)
         self.ho_importance = np.zeros_like(self.hidden_to_output)  # Classifier weights
-        self.consolidation_rate = 0.02  # How fast importance builds up (increased)
+        # Consolidation rate scaled by layer size (more weights need faster consolidation)
+        self.consolidation_rate = 0.02 * np.sqrt(combined_size / 1000)  # Scale with sqrt of size
 
         # BEST PERFORMANCE CHECKPOINT: Lock in best weights
         self.best_accuracy = 0.0
@@ -370,6 +372,13 @@ class PSIClassifier:
 
         # Combined feature vector
         combined_features = np.concatenate([input_flat, hidden_flat])
+
+        # LAYER NORMALIZATION: Normalize features to prevent logit explosion
+        # This is bio-plausible as neurons have homeostatic mechanisms
+        feat_mean = combined_features.mean()
+        feat_std = combined_features.std() + 1e-8
+        combined_features = (combined_features - feat_mean) / feat_std
+
         self.last_combined = combined_features  # Store for learning
 
         # Use combined features for classification
@@ -466,7 +475,10 @@ class PSIClassifier:
             # This mimics synaptic maturation and provides stability
             self.step_count += 1
             warmup_factor = min(1.0, self.step_count / 200)
-            effective_lr = self.lr * warmup_factor
+            # SCALE BY LAYER SIZE: Prevents explosion with more hidden nodes
+            # Standard practice: scale lr by 1/sqrt(fan_in)
+            size_scale = 1.0 / np.sqrt(self.combined_size)
+            effective_lr = self.lr * warmup_factor * size_scale
 
             # Dopamine signal: clamp to prevent extreme updates
             # This mimics saturation of neurotransmitter release
@@ -495,8 +507,13 @@ class PSIClassifier:
             consolidation_protection = 1.0 / (1.0 + self.ho_importance)
             dW_ho *= consolidation_protection
 
+            # WEIGHT DECAY: Prevent unbounded weight growth (bio-plausible: synaptic decay)
+            weight_decay = 0.001
+            self.hidden_to_output *= (1.0 - weight_decay)
+
             self.hidden_to_output += dW_ho
-            np.clip(self.hidden_to_output, -3, 3, out=self.hidden_to_output)
+            # Tighter clip to prevent saturation
+            np.clip(self.hidden_to_output, -1.5, 1.5, out=self.hidden_to_output)
 
             # 2. Hidden layer: use dopamine to gate Hebbian learning
             # The B_hidden matrix gives each hidden unit a fixed "role" in the output
