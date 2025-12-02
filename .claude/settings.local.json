@@ -11,7 +11,8 @@
       "Bash(do echo \"=== Run $i ===\")",
       "Bash(done)",
       "Bash(git stash:*)",
-      "Bash(timeout 120 python:*)"
+      "Bash(timeout 120 python:*)",
+      "Bash(timeout 300 python:*)"
     ],
     "deny": [],
     "ask": []
