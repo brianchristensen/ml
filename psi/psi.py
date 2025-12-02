@@ -4,10 +4,18 @@ import torch.nn.functional as F
 import math
 
 class PSI(nn.Module):
-    def __init__(self, dim, init_scale=0.1):
+    """
+    Phase-Space Integration module.
+
+    Uses chunked normalization for better extrapolation to longer sequences.
+    Memory is accumulated within fixed-size chunks, then normalized per chunk.
+    This prevents the memory magnitude decay that causes extrapolation failure.
+    """
+    def __init__(self, dim, init_scale=0.1, chunk_size=64):
         super().__init__()
 
         self.dim = dim
+        self.chunk_size = chunk_size
 
         # Learned velocity field (the differential equation)
         self.to_omega = nn.Linear(dim, dim)
@@ -30,37 +38,67 @@ class PSI(nn.Module):
         # Compute velocity field
         omega = self.to_omega(x)
 
-        # Position-dependent scale: 1/sqrt(position) decay prevents unbounded phase accumulation
-        # This enables long-range dependencies while maintaining O(n) complexity
-        position = torch.arange(1, seq_len + 1, device=x.device, dtype=x.dtype).view(1, -1, 1)
-        pos_scale = 1.0 / torch.sqrt(position)
+        # Pad sequence to multiple of chunk_size for efficient parallel processing
+        pad_len = (self.chunk_size - seq_len % self.chunk_size) % self.chunk_size
+        if pad_len > 0:
+            omega_padded = F.pad(omega, (0, 0, 0, pad_len))
+            x_padded = F.pad(x, (0, 0, 0, pad_len))
+        else:
+            omega_padded = omega
+            x_padded = x
 
-        # Learned scale (exp to ensure positive) with position decay
+        padded_len = omega_padded.shape[1]
+        num_chunks = padded_len // self.chunk_size
+
+        # Reshape for parallel chunk processing: (batch, seq, dim) -> (batch, num_chunks, chunk_size, dim)
+        omega_chunked = omega_padded.view(batch_size, num_chunks, self.chunk_size, dim)
+        x_chunked = x_padded.view(batch_size, num_chunks, self.chunk_size, dim)
+
+        # Position scaling within each chunk (1/sqrt(pos) where pos resets each chunk)
+        chunk_pos = torch.arange(1, self.chunk_size + 1, device=x.device, dtype=x.dtype)
+        pos_scale = 1.0 / torch.sqrt(chunk_pos).view(1, 1, -1, 1)
+
+        # Learned scale with position decay
         scale = torch.exp(self.log_scale)
-        omega_scaled = omega * scale * pos_scale
+        omega_scaled = omega_chunked * scale * pos_scale
 
-        # Integrate: phi = cumsum(omega) - this IS Euler integration
-        phi = torch.cumsum(omega_scaled, dim=1)
+        # PARALLEL cumsum across all chunks simultaneously
+        # cumsum on dim=2 (chunk_size dimension) processes all chunks in parallel
+        phi_chunked = torch.cumsum(omega_scaled, dim=2)
 
         # Phase trajectory
-        cos_phi = torch.cos(phi)
-        sin_phi = torch.sin(phi)
+        cos_phi = torch.cos(phi_chunked)
+        sin_phi = torch.sin(phi_chunked)
 
-        # Phase-bound memory accumulation (uniform weighting)
-        memory_real = torch.cumsum(x * cos_phi, dim=1)
-        memory_imag = torch.cumsum(x * sin_phi, dim=1)
+        # PARALLEL memory accumulation across all chunks
+        chunk_mem_real = torch.cumsum(x_chunked * cos_phi, dim=2)
+        chunk_mem_imag = torch.cumsum(x_chunked * sin_phi, dim=2)
 
-        # Position-based normalization
-        memory_real_normalized = memory_real / position
-        memory_imag_normalized = memory_imag / position
+        # Normalize by chunk position (same pos_scale pattern, but for denominator)
+        chunk_pos_norm = chunk_pos.view(1, 1, -1, 1)
+        memory_real = chunk_mem_real / chunk_pos_norm
+        memory_imag = chunk_mem_imag / chunk_pos_norm
 
-        # Retrieve at current phase (no query offset)
-        retrieved_real = memory_real_normalized * cos_phi + memory_imag_normalized * sin_phi
-        retrieved_imag = memory_imag_normalized * cos_phi - memory_real_normalized * sin_phi
+        # Retrieve at current phase
+        retrieved_real = memory_real * cos_phi + memory_imag * sin_phi
+        retrieved_imag = memory_imag * cos_phi - memory_real * sin_phi
 
         # Content modulation by trajectory
-        content_modulated_real = x * cos_phi
-        content_modulated_imag = x * sin_phi
+        content_modulated_real = x_chunked * cos_phi
+        content_modulated_imag = x_chunked * sin_phi
+
+        # Reshape back: (batch, num_chunks, chunk_size, dim) -> (batch, padded_len, dim)
+        content_modulated_real = content_modulated_real.view(batch_size, padded_len, dim)
+        content_modulated_imag = content_modulated_imag.view(batch_size, padded_len, dim)
+        retrieved_real = retrieved_real.view(batch_size, padded_len, dim)
+        retrieved_imag = retrieved_imag.view(batch_size, padded_len, dim)
+
+        # Remove padding
+        if pad_len > 0:
+            content_modulated_real = content_modulated_real[:, :seq_len, :]
+            content_modulated_imag = content_modulated_imag[:, :seq_len, :]
+            retrieved_real = retrieved_real[:, :seq_len, :]
+            retrieved_imag = retrieved_imag[:, :seq_len, :]
 
         # Combine all signals
         context = torch.cat([

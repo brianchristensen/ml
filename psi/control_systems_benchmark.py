@@ -28,8 +28,10 @@ device = 'cuda' if torch.cuda.is_available() else 'cpu'
 # =============================================================================
 
 class PSIBlock(nn.Module):
-    def __init__(self, dim):
+    """PSI block with chunked cumsum for extrapolation-safe operation."""
+    def __init__(self, dim, chunk_size=64):
         super().__init__()
+        self.chunk_size = chunk_size
         self.norm1 = nn.LayerNorm(dim)
         self.norm2 = nn.LayerNorm(dim)
         self.gate = nn.Sequential(nn.Linear(dim, dim), nn.Sigmoid())
@@ -39,12 +41,40 @@ class PSIBlock(nn.Module):
         )
 
     def forward(self, x):
+        batch_size, seq_len, dim = x.shape
         h = self.norm1(x)
         g = self.gate(h)
         v = self.value(h)
-        cumsum_v = torch.cumsum(g * v, dim=1)
-        cumsum_g = torch.cumsum(g, dim=1) + 1e-6
+        gv = g * v
+
+        # Pad to multiple of chunk_size for efficient parallel processing
+        pad_len = (self.chunk_size - seq_len % self.chunk_size) % self.chunk_size
+        if pad_len > 0:
+            gv_padded = F.pad(gv, (0, 0, 0, pad_len))
+            g_padded = F.pad(g, (0, 0, 0, pad_len))
+        else:
+            gv_padded = gv
+            g_padded = g
+
+        padded_len = gv_padded.shape[1]
+        num_chunks = padded_len // self.chunk_size
+
+        # Reshape for parallel chunk processing
+        gv_chunked = gv_padded.view(batch_size, num_chunks, self.chunk_size, dim)
+        g_chunked = g_padded.view(batch_size, num_chunks, self.chunk_size, dim)
+
+        # Parallel cumsum across all chunks
+        cumsum_v = torch.cumsum(gv_chunked, dim=2)
+        cumsum_g = torch.cumsum(g_chunked, dim=2) + 1e-6
+
+        # Running average within each chunk
         mem = cumsum_v / cumsum_g
+
+        # Reshape back and remove padding
+        mem = mem.view(batch_size, padded_len, dim)
+        if pad_len > 0:
+            mem = mem[:, :seq_len, :]
+
         x = x + mem
         x = x + self.ffn(self.norm2(x))
         return x

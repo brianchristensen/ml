@@ -109,6 +109,7 @@ class PSIClassifier:
         self.biases = np.random.randn(self.n_nodes, dim) * 0.15
 
         # Input projection: pixels -> dim
+        # Random init with larger magnitude for stronger input signal propagation
         self.input_proj = np.random.randn(n_input, self.pixels_per_input, dim) * 0.1
 
         # Learning rate - moderate for stability
@@ -142,8 +143,9 @@ class PSIClassifier:
         self.B_input = np.random.randn(n_output, n_input * dim) * 0.1  # Output -> input directly
 
         # DOPAMINE-LIKE TD ERROR: Track running average of reward for surprise signal
-        self.expected_reward = 0.1  # Start at chance level (10 classes)
-        self.reward_decay = 0.995  # Slower update for more stable baseline
+        # With bipolar reward [-1, 1], start at 0 (neutral expectation)
+        self.expected_reward = 0.0  # Neutral for bipolar rewards
+        self.reward_decay = 0.99  # Slightly faster update to track bipolar signal better
 
         # Learning step counter for warmup
         self.step_count = 0
@@ -174,6 +176,11 @@ class PSIClassifier:
                 if i != j:
                     dist = min(abs(i - j), n_hidden - abs(i - j))  # Circular distance
                     self.lateral_inhibition[i, j] = -0.3 * np.exp(-dist / 3.0)  # Local inhibition
+
+        # OUTPUT LATERAL INHIBITION: Strong winner-take-all competition
+        # All output nodes inhibit each other (forces distinct class representations)
+        self.output_lateral = np.full((n_output, n_output), -0.5)  # All-to-all inhibition
+        np.fill_diagonal(self.output_lateral, 0.0)  # No self-inhibition
 
         # Adaptive learning rate based on surprise
         self.base_lr = 0.05
@@ -276,6 +283,38 @@ class PSIClassifier:
         leak = 0.7 if target_mode else 0.5
         new_states = (1 - leak) * self.states + leak * target_activation
 
+        # APPLY LATERAL INHIBITION to output nodes (winner-take-all competition)
+        # This forces output nodes to compete, creating distinct class representations
+        output_start = self.n_input + self.n_hidden
+        output_states = new_states[output_start:]  # [n_output, dim]
+        # Compute mean activation per output node
+        output_mean = np.mean(output_states, axis=1)  # [n_output]
+        # Lateral inhibition: each node suppresses others based on its activation
+        inhibition = self.output_lateral @ np.maximum(0, output_mean)  # [n_output]
+        # Apply inhibition (broadcast to all dimensions)
+        new_states[output_start:] += inhibition[:, np.newaxis] * 0.3
+
+        # APPLY SOFT k-WINNERS-TAKE-ALL to hidden nodes
+        # Encourage sparse, input-specific activations without being too harsh
+        hidden_start = self.n_input
+        hidden_end = self.n_input + self.n_hidden
+        hidden_states = new_states[hidden_start:hidden_end]  # [n_hidden, dim]
+        hidden_mean = np.mean(hidden_states, axis=1)  # [n_hidden]
+
+        # Soft WTA: Keep top 50% relatively unaffected, gently suppress bottom 50%
+        k = self.n_hidden // 2  # Keep top 50% most active
+        threshold = np.partition(hidden_mean, -k)[-k]  # k-th largest value
+
+        # Very soft suppression: nodes below threshold get gently inhibited
+        below_threshold = hidden_mean < threshold
+        suppression = np.zeros(self.n_hidden)
+        suppression[below_threshold] = -0.2 * (threshold - hidden_mean[below_threshold])
+        new_states[hidden_start:hidden_end] += suppression[:, np.newaxis]
+
+        # Local lateral inhibition for fine-grained competition
+        hidden_inhibition = self.lateral_inhibition @ np.maximum(0, hidden_mean)
+        new_states[hidden_start:hidden_end] += hidden_inhibition[:, np.newaxis] * 0.2
+
         # Apply clamping
         clamped_mask = ~np.isnan(self.clamped)
         np.copyto(new_states, self.clamped, where=clamped_mask)
@@ -311,10 +350,20 @@ class PSIClassifier:
         # Phase difference (wrapped to [-pi, pi])
         phase_diff = target_phase - self.phases
         phase_diff = np.mod(phase_diff + np.pi, 2 * np.pi) - np.pi
-        phase_pull = 0.15 * phase_diff
 
-        # Simple phase update (skip anti-phase for speed - small effect)
-        self.phases += self.omega + 0.02 * self.states + phase_pull
+        # STRONGER phase coupling for better synchronization
+        # Vary coupling strength by layer: stronger in hidden for better signal propagation
+        phase_coupling = np.ones(self.n_nodes) * 0.2  # Base coupling
+        hidden_start = self.n_input
+        hidden_end = self.n_input + self.n_hidden
+        phase_coupling[hidden_start:hidden_end] = 0.35  # Stronger hidden coupling
+        phase_coupling[-self.n_output:] = 0.25  # Moderate output coupling
+
+        phase_pull = phase_coupling[:, np.newaxis] * phase_diff
+
+        # Activity-dependent phase update: more active nodes drive phase more
+        activity_drive = 0.03 * self.states  # Slightly stronger activity influence
+        self.phases += self.omega + activity_drive + phase_pull
         np.mod(self.phases, 2 * np.pi, out=self.phases)
 
     def has_converged(self, threshold: float = 0.015) -> bool:
@@ -386,13 +435,16 @@ class PSIClassifier:
         return output_logits
 
     def target_phase(self, label: int):
-        """TARGET PHASE: Clamp output to one-hot target."""
-        # Create one-hot target with stronger contrast
-        target = np.full((self.n_output, self.dim), -0.8)  # Stronger negative
-        target[label] = 0.9  # Target class
+        """TARGET PHASE: Clamp output to one-hot target with STRONG propagation."""
+        # Create one-hot target with MAXIMUM contrast for stronger contrastive signal
+        target = np.full((self.n_output, self.dim), -1.0)  # Full negative
+        target[label] = 1.0  # Full positive for target class
 
         self.clamped[-self.n_output:] = target
-        self.settle(max_iters=12, min_steps=5, target_mode=True)
+
+        # MORE settling iterations to let target signal propagate back through network
+        # This strengthens the contrastive signal (target_states - free_states)
+        self.settle(max_iters=15, min_steps=6, target_mode=True)
         self.target_states = self.states.copy()
 
     def softmax(self, x):
@@ -447,9 +499,18 @@ class PSIClassifier:
             prediction = np.argmax(probs)
 
             # ---- REWARD COMPUTATION ----
-            # Reward is based on confidence in the correct answer
+            # BIPOLAR REWARD in [-1, 1]: punish wrong guesses, reward correct ones
             # This is a SINGLE SCALAR, like dopamine
-            reward = probs[self.last_label]  # Range [0, 1]: how confident in correct answer
+
+            # confidence in correct answer vs confidence in wrong answers
+            correct_prob = probs[self.last_label]
+            max_wrong_prob = np.max(np.delete(probs, self.last_label))  # Best wrong answer
+
+            # Bipolar reward:
+            # +1 when fully confident in correct answer
+            # -1 when fully confident in wrong answer
+            # 0 when uncertain (equal probs)
+            reward = correct_prob - max_wrong_prob  # Range [-1, 1]
 
             # TD ERROR: surprise = reward - expected_reward
             # Positive = "better than expected" (dopamine burst)
@@ -457,6 +518,7 @@ class PSIClassifier:
             td_error = reward - self.expected_reward
 
             # Update expected reward (slow moving average)
+            # Start expected_reward at 0 (neutral) for bipolar rewards
             self.expected_reward = self.reward_decay * self.expected_reward + (1 - self.reward_decay) * reward
 
             # Collect TD diagnostics
@@ -471,13 +533,12 @@ class PSIClassifier:
             # ---- THREE-FACTOR LEARNING ----
             # All weight updates are modulated by the GLOBAL td_error signal
 
-            # Learning rate warmup: start lower, ramp up over first 200 steps
-            # This mimics synaptic maturation and provides stability
+            # Learning rate warmup: start at 0.5, ramp to 1.0 over first 50 steps
+            # Much faster warmup to allow learning from the start
             self.step_count += 1
-            warmup_factor = min(1.0, self.step_count / 200)
-            # SCALE BY LAYER SIZE: Prevents explosion with more hidden nodes
-            # Standard practice: scale lr by 1/sqrt(fan_in)
-            size_scale = 1.0 / np.sqrt(self.combined_size)
+            warmup_factor = min(1.0, 0.5 + 0.5 * self.step_count / 50)  # Start at 0.5, not 0
+            # GENTLER SIZE SCALING: Use 4th root for gentle reduction with larger networks
+            size_scale = 1.0 / (self.combined_size ** 0.25)
             effective_lr = self.lr * warmup_factor * size_scale
 
             # Dopamine signal: clamp to prevent extreme updates
@@ -497,8 +558,8 @@ class PSIClassifier:
             dW_ho = effective_lr * np.outer(combined_features, target_direction) * dopamine_mod
 
             # SYNAPTIC CONSOLIDATION: Reduce learning on important synapses
-            # Importance grows when prediction is correct (reward > 0.5)
-            if reward > 0.3:  # Correct-ish prediction
+            # Importance grows when prediction is correct (reward > 0 in bipolar scheme)
+            if reward > 0.2:  # Correct-ish prediction (bipolar: positive = correct)
                 # Update importance: synapses active during success become protected
                 activity_pattern = np.abs(np.outer(combined_features, probs))
                 self.ho_importance += self.consolidation_rate * activity_pattern
@@ -507,9 +568,8 @@ class PSIClassifier:
             consolidation_protection = 1.0 / (1.0 + self.ho_importance)
             dW_ho *= consolidation_protection
 
-            # WEIGHT DECAY: Prevent unbounded weight growth (bio-plausible: synaptic decay)
-            weight_decay = 0.001
-            self.hidden_to_output *= (1.0 - weight_decay)
+            # NOTE: Weight decay is applied once at the end of learn(), not here
+            # This prevents double-decay which was causing h2o weights to shrink
 
             self.hidden_to_output += dW_ho
             # Tighter clip to prevent saturation
@@ -550,17 +610,27 @@ class PSIClassifier:
 
             np.clip(self.node_W, -3, 3, out=self.node_W)
 
-            # 3. Input projections: dopamine-gated Hebbian (VECTORIZED)
+            # 3. Input projections: Learn to produce class-discriminative representations
+            # Use target direction via B_input for bio-plausible feedback alignment
             if hasattr(self, 'last_pixels'):
                 # Which input dimensions were active and contributed to the response?
-                input_eligibility = np.abs(input_flat.reshape(self.n_input, self.dim))
+                input_states = input_flat.reshape(self.n_input, self.dim)
+                input_eligibility = np.abs(input_states)
 
-                # Vectorized Hebbian: [n_input, pixels_per_input, dim]
-                # last_pixels: [n_input, pixels_per_input], input_eligibility: [n_input, dim]
-                dProj = effective_lr * 0.1 * dopamine * np.einsum('ip,id->ipd', self.last_pixels, input_eligibility)
+                # Use target direction signal to guide input projection learning
+                # Project the error signal back to input space via feedback alignment
+                input_error_signal = self.B_input.T @ target_direction  # [n_input * dim]
+                input_error_signal = input_error_signal.reshape(self.n_input, self.dim)
+                input_error_signal = input_error_signal / (np.linalg.norm(input_error_signal) + 1e-8)
+
+                # Combine eligibility with error signal
+                input_delta = input_eligibility * input_error_signal
+
+                # Hebbian learning with moderate rate
+                dProj = effective_lr * 1.0 * dopamine_mod * np.einsum('ip,id->ipd', self.last_pixels, input_delta)
                 self.input_proj += dProj
 
-                np.clip(self.input_proj, -1.5, 1.5, out=self.input_proj)
+                np.clip(self.input_proj, -2.0, 2.0, out=self.input_proj)
 
         # ============================================================
         # CONTRASTIVE HEBBIAN: PSI graph dynamics learning
@@ -594,14 +664,15 @@ class PSIClassifier:
         self.W_conn += dW_conn
         np.clip(self.W_conn, 0.1, 2.0, out=self.W_conn)
 
-        # Synaptic decay (reduced to prevent forgetting)
-        decay = 0.9995
+        # Synaptic decay - REDUCED to allow learning to accumulate
+        # Previous decay was too strong (0.9995), nearly canceling learning
+        decay = 0.9999  # Much gentler decay
         self.node_W *= decay
         self.biases *= decay
         self.W_conn = self.W_conn * decay + 0.75 * (1 - decay) * self.adj
-        self.node_W[:, self.diag_indices, self.diag_indices] *= 1.001
+        self.node_W[:, self.diag_indices, self.diag_indices] *= 1.0005  # Gentler diagonal boost
         # Classifier decay - only on less important weights
-        classifier_decay = 1.0 - 0.0005 / (1.0 + self.ho_importance)
+        classifier_decay = 1.0 - 0.0001 / (1.0 + self.ho_importance)  # Reduced from 0.0005
         self.hidden_to_output *= classifier_decay
 
         # Collect diagnostics after updates
