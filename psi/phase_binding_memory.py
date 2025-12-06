@@ -1,463 +1,335 @@
 """
-NOVEL: Phase Binding Memory
+Phase Binding Memory - O(n) Content-Addressable Memory
 
-The brain's insight: Items occurring close in TIME bind together automatically.
-Phase = "when" something happened.
+Core mechanism:
+- Keys encoded as complex phasors: amp * exp(i * phase)
+- Values modulated by key phasors and summed (superposition)
+- Query demodulates via conjugate multiplication
+- Matched phases reinforce, mismatched phases cancel
+- RoPE-style positional encoding via phase rotation
 
-Key mechanism:
-- Each item gets a PHASE based on its content + position
-- Items at SAME phase interfere CONSTRUCTIVELY (reinforce)
-- Items at DIFFERENT phases interfere DESTRUCTIVELY (cancel)
-
-Retrieval:
-- Query generates a phase
-- Only items at matching phase contribute
-- NO softmax, NO attention weights, NO explicit lookup
-
-The magic: Phase interference IS the selection mechanism.
-We don't COMPUTE which items match - matching items NATURALLY reinforce.
-
-This is NOT:
-- Attention (no softmax, no explicit comparison)
-- Linear attention (no cumsum pattern)
-- Modern Hopfield (no exponential energy)
-
-Complexity: O(n) - single pass through sequence
+Complexity: O(n) for n items - no attention matrix needed.
 """
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import numpy as np
 import math
 
-device = 'cuda' if torch.cuda.is_available() else 'cpu'
-print(f'Device: {device}')
+
+def precompute_freqs(n_oscillators: int, max_len: int, base: float = 10000.0):
+    """
+    Precompute RoPE frequency table for positional phase offsets.
+
+    Returns angles theta[pos, k] = pos * freq[k] where freq[k] decays geometrically.
+    """
+    # Frequencies: 1/base^(2k/d) for k in [0, n_oscillators)
+    freqs = 1.0 / (base ** (torch.arange(0, n_oscillators, dtype=torch.float32) / n_oscillators))
+    # Position indices
+    positions = torch.arange(max_len, dtype=torch.float32)
+    # Outer product: [max_len, n_oscillators]
+    angles = torch.outer(positions, freqs)
+    return angles
 
 
 class PhaseEncoder(nn.Module):
-    """
-    Encode content to a phase angle.
+    """Encode content to complex phasor (amplitude * e^(i*phase))."""
 
-    The key insight: Similar content should get similar phases.
-    This creates "phase clusters" - related items reinforce.
-    """
     def __init__(self, dim, n_oscillators=32):
         super().__init__()
-        self.dim = dim
         self.n_oscillators = n_oscillators
-
-        # Map content to phase for each oscillator
         self.to_phase = nn.Sequential(
             nn.Linear(dim, dim),
             nn.Tanh(),
             nn.Linear(dim, n_oscillators)
         )
-
-        # Map content to amplitude (how strongly to store)
         self.to_amp = nn.Sequential(
             nn.Linear(dim, n_oscillators),
             nn.Softplus()
         )
 
-    def forward(self, x):
+    def forward(self, x, pos_angles=None):
         """
-        x: [..., D]
-        Returns: complex phasor [..., K]
+        x: [..., D] -> complex phasor [..., K]
+        pos_angles: [..., K] optional positional phase offsets (RoPE)
         """
-        # Phase: content-dependent, bounded to [-pi, pi]
-        phase = torch.tanh(self.to_phase(x)) * math.pi  # [..., K]
-
-        # Amplitude: how strongly to store
-        amp = self.to_amp(x) + 0.1  # [..., K]
-
-        # Complex phasor
+        phase = torch.tanh(self.to_phase(x)) * math.pi
+        if pos_angles is not None:
+            phase = phase + pos_angles  # Add positional phase offset
+        amp = self.to_amp(x) + 0.1
         return amp * torch.exp(1j * phase)
 
 
 class PhaseBindingMemory(nn.Module):
     """
-    Memory via phase binding and interference.
+    Core O(n) phase binding memory.
 
-    Write:
-    - Each key gets a phasor (amplitude * e^(i*phase))
-    - Each value gets modulated by this phasor
-    - Values are SUMMED (superposition) - no explicit storage
-
-    Read:
-    - Query generates its own phasor
-    - Conjugate multiply with memory (demodulation)
-    - Items at matching phase add constructively
-    - Items at mismatched phase CANCEL
-
-    The genius: No attention computation needed.
-    Phase matching is IMPLICIT in the interference.
+    Write: modulate values by key phasors, sum into memory
+    Read: demodulate memory with query phasor, matched phases reinforce
     """
+
     def __init__(self, dim, n_oscillators=32):
         super().__init__()
         self.dim = dim
         self.n_oscillators = n_oscillators
-
-        # Encode keys and queries to phases
-        self.key_phase = PhaseEncoder(dim, n_oscillators)
-        self.query_phase = PhaseEncoder(dim, n_oscillators)
-
-        # Value projection (maps to each oscillator channel)
+        self.key_encoder = PhaseEncoder(dim, n_oscillators)
+        self.query_encoder = PhaseEncoder(dim, n_oscillators)
         self.to_value = nn.Linear(dim, dim)
+        self.out = nn.Sequential(nn.LayerNorm(dim), nn.Linear(dim, dim))
 
-        # Output projection
-        self.out = nn.Sequential(
-            nn.LayerNorm(dim),
-            nn.Linear(dim, dim)
-        )
-
-    def forward(self, keys, values, query):
+    def forward(self, keys, values, queries):
         """
-        keys: [B, n, D]
-        values: [B, n, D]
-        query: [B, D]
+        Batched retrieval - fully vectorized.
 
-        Returns: [B, D]
+        Args:
+            keys: [B, N, D] - N key embeddings per batch
+            values: [B, N, D] - N value embeddings per batch
+            queries: [B, Q, D] - Q query embeddings per batch
+
+        Returns:
+            retrieved: [B, Q, D] - retrieved values for each query
         """
-        B, n, D = keys.shape
+        B, N, D = keys.shape
+        Q = queries.shape[1]
+        K = self.n_oscillators
 
-        # Encode keys to phasors
-        key_phasors = self.key_phase(keys)  # [B, n, K]
+        # Encode keys to phasors [B, N, K]
+        key_phasors = self.key_encoder(keys)
 
-        # Project values
-        V = self.to_value(values)  # [B, n, D]
+        # Project values [B, N, D]
+        V = self.to_value(values)
+        V_complex = V.to(torch.complex64)
 
-        # WRITE: Superimpose all values, each modulated by its key's phase
-        # For each oscillator k, memory[k] = sum_i (V[i] * phasor[i,k])
-        # This is a "holographic" write - all values overlap in phase space
-
-        # Convert V to complex for modulation
-        V_complex = V.to(torch.complex64)  # [B, n, D]
-
-        # Modulate: V * phasor (broadcast over D)
-        # key_phasors: [B, n, K] -> [B, n, K, 1]
-        # V_complex: [B, n, D] -> [B, n, 1, D]
-        modulated = key_phasors.unsqueeze(-1) * V_complex.unsqueeze(-2)  # [B, n, K, D]
-
-        # Sum over sequence to create memory trace
+        # Write: modulate and sum
+        # key_phasors: [B, N, K] -> [B, N, K, 1]
+        # V_complex: [B, N, D] -> [B, N, 1, D]
+        modulated = key_phasors.unsqueeze(-1) * V_complex.unsqueeze(-2)  # [B, N, K, D]
         memory = modulated.sum(dim=1)  # [B, K, D]
 
-        # READ: Query with conjugate phasor (demodulation)
-        query_phasors = self.query_phase(query)  # [B, K]
+        # Encode queries [B, Q, K]
+        query_phasors = self.query_encoder(queries)
 
-        # Demodulate: memory * conj(query_phasor)
-        # query_phasors.conj(): [B, K] -> [B, K, 1]
-        demodulated = memory * query_phasors.conj().unsqueeze(-1)  # [B, K, D]
+        # Read: demodulate for each query
+        # memory: [B, K, D] -> [B, 1, K, D]
+        # query_phasors.conj(): [B, Q, K] -> [B, Q, K, 1]
+        demodulated = memory.unsqueeze(1) * query_phasors.conj().unsqueeze(-1)  # [B, Q, K, D]
 
-        # Sum over oscillators (real part only - imaginary cancels for matched phases)
-        retrieved = demodulated.sum(dim=1).real  # [B, D]
-
-        # Normalize by number of items and oscillators
-        retrieved = retrieved / math.sqrt(n * self.n_oscillators)
+        # Sum over oscillators, take real part
+        retrieved = demodulated.sum(dim=2).real  # [B, Q, D]
+        retrieved = retrieved / math.sqrt(N * K)
 
         return self.out(retrieved)
 
 
-class TemporalPhaseBinding(nn.Module):
+class PhaseBindingBlock(nn.Module):
     """
-    Add temporal phase offset based on position.
+    Causal phase binding for sequence modeling.
+    Uses cumsum for O(n) causal attention.
+    Supports RoPE-style positional encoding via phase rotation.
+    """
 
-    Key insight: Items that occur TOGETHER should have same phase.
-    In the associative recall task, keys and values occur adjacently.
-    We can learn to give them the same phase offset.
-    """
-    def __init__(self, dim, n_oscillators=32, max_len=100):
+    def __init__(self, dim, n_oscillators=32):
         super().__init__()
         self.dim = dim
         self.n_oscillators = n_oscillators
-
-        # Content-based phase
-        self.content_phase = PhaseEncoder(dim, n_oscillators)
-
-        # Temporal phase: each position gets a learnable offset
-        self.temporal_offsets = nn.Embedding(max_len, n_oscillators)
-
-        # Value projection
+        self.key_encoder = PhaseEncoder(dim, n_oscillators)
+        self.query_encoder = PhaseEncoder(dim, n_oscillators)
         self.to_value = nn.Linear(dim, dim)
-
-        # Output
         self.out = nn.Sequential(nn.LayerNorm(dim), nn.Linear(dim, dim))
 
-    def forward(self, keys, values, query, key_positions=None, query_position=None):
+    def forward(self, x, pos_angles=None):
         """
-        keys: [B, n, D]
-        values: [B, n, D]
-        query: [B, D]
-        key_positions: [B, n] - optional, defaults to 0,1,2,...
-        query_position: [B] - optional
-
-        Returns: [B, D]
+        x: [B, L, D] -> [B, L, D] with causal context
+        pos_angles: [L, K] optional RoPE positional phase offsets
         """
-        B, n, D = keys.shape
+        B, L, D = x.shape
+        K = self.n_oscillators
 
-        # Default positions
-        if key_positions is None:
-            key_positions = torch.arange(n, device=keys.device).unsqueeze(0).expand(B, -1)
+        # Pass positional angles to encoders for RoPE
+        key_phasors = self.key_encoder(x, pos_angles)  # [B, L, K]
+        query_phasors = self.query_encoder(x, pos_angles)  # [B, L, K]
+        V = self.to_value(x).to(torch.complex64)  # [B, L, D]
 
-        # Content phase + temporal phase
-        content_phasors = self.content_phase(keys)  # [B, n, K]
-        temporal_offsets = self.temporal_offsets(key_positions)  # [B, n, K]
+        # Modulate and cumsum for causal memory
+        modulated = key_phasors.unsqueeze(-1) * V.unsqueeze(-2)  # [B, L, K, D]
+        memory = torch.cumsum(modulated, dim=1)  # [B, L, K, D]
 
-        # Total phase = content + temporal
-        # Convert offsets to phasors and multiply
-        temporal_phasors = torch.exp(1j * temporal_offsets)
-        key_phasors = content_phasors * temporal_phasors  # [B, n, K]
+        # Demodulate at each position
+        demodulated = memory * query_phasors.conj().unsqueeze(-1)  # [B, L, K, D]
+        retrieved = demodulated.sum(dim=2).real  # [B, L, D]
 
-        # Values
-        V = self.to_value(values).to(torch.complex64)  # [B, n, D]
+        # Position-dependent normalization
+        positions = torch.arange(1, L + 1, device=x.device, dtype=torch.float32)
+        norm = torch.sqrt(positions * K).view(1, L, 1)
+        retrieved = retrieved / norm
 
-        # Write: modulate and sum
-        modulated = key_phasors.unsqueeze(-1) * V.unsqueeze(-2)  # [B, n, K, D]
-        memory = modulated.sum(dim=1)  # [B, K, D]
-
-        # Query phase
-        query_content = self.content_phase(query)  # [B, K]
-
-        # Read: demodulate
-        demodulated = memory * query_content.conj().unsqueeze(-1)
-        retrieved = demodulated.sum(dim=1).real / math.sqrt(n * self.n_oscillators)
-
-        return self.out(retrieved)
+        return x + self.out(retrieved)
 
 
-class LearnedBindingMemory(nn.Module):
-    """
-    NOVEL: Learn the binding-unbinding relationship.
+class PhaseBindingLanguageModel(nn.Module):
+    """Language model using stacked PhaseBindingBlocks with RoPE positional encoding."""
 
-    Key insight: The relationship between key and value can be LEARNED.
-    We don't assume any particular binding mechanism.
-
-    Instead:
-    1. Learn a "binding transform" that combines key with value
-    2. Learn an "unbinding transform" that extracts value given query
-    3. The transforms must be compatible (unbind(bind(k,v), k) ≈ v)
-
-    This is more general than phase binding but preserves the key property:
-    NO attention, NO softmax, just learned transforms.
-    """
-    def __init__(self, dim, binding_dim=64):
-        super().__init__()
-        self.dim = dim
-        self.binding_dim = binding_dim
-
-        # Binding transform: key + value -> bound representation
-        # We use a bilinear form (outer-product-like but learnable)
-        self.bind_key = nn.Linear(dim, binding_dim)
-        self.bind_val = nn.Linear(dim, binding_dim)
-        self.bind_combine = nn.Linear(binding_dim, dim)
-
-        # Unbinding transform: query -> extraction mask
-        self.unbind_query = nn.Linear(dim, binding_dim)
-        self.unbind_extract = nn.Linear(binding_dim, dim)
-
-        # Output
-        self.out = nn.Sequential(nn.LayerNorm(dim), nn.Linear(dim, dim))
-
-    def bind(self, key, value):
-        """
-        Create a bound representation of key-value pair.
-        The binding should encode BOTH key and value such that
-        we can later extract the value given the key.
-        """
-        k = self.bind_key(key)        # [..., B]
-        v = self.bind_val(value)      # [..., B]
-
-        # Element-wise multiplication (like HRR but learnable transforms)
-        bound = k * v  # [..., B]
-
-        # Project to output dim
-        return self.bind_combine(bound)  # [..., D]
-
-    def unbind(self, bound, query):
-        """
-        Extract value from bound representation using query as key.
-        """
-        q = self.unbind_query(query)  # [B, binding_dim]
-
-        # Element-wise "division" (implemented as learned inverse)
-        # The intuition: if bind(k,v) = k*v, then unbind(k*v, k) should give v
-        # We approximate this with learned transforms
-
-        # bound: [B, n, D] or [B, D]
-        if bound.dim() == 3:
-            # Multiple bounds - need to aggregate
-            # This is where the magic happens: only matching keys contribute
-            q_expanded = q.unsqueeze(1)  # [B, 1, binding_dim]
-
-            # Project bound to binding space
-            bound_proj = self.unbind_query(bound)  # [B, n, binding_dim]
-
-            # "Match": similar keys have similar projections
-            match = bound_proj * q_expanded  # [B, n, binding_dim]
-
-            # Extract value direction
-            extracted = self.unbind_extract(match)  # [B, n, D]
-
-            # Sum (matching keys add, mismatched cancel due to random alignment)
-            return extracted.sum(dim=1) / math.sqrt(bound.shape[1])
-        else:
-            # Single bound
-            bound_proj = self.unbind_query(bound)  # [B, binding_dim]
-            match = bound_proj * q
-            return self.unbind_extract(match)
-
-    def forward(self, keys, values, query):
-        """
-        keys: [B, n, D]
-        values: [B, n, D]
-        query: [B, D]
-        """
-        B, n, D = keys.shape
-
-        # Bind all key-value pairs
-        bindings = self.bind(keys, values)  # [B, n, D]
-
-        # Superposition: sum all bindings
-        memory = bindings.sum(dim=1)  # [B, D]
-
-        # Unbind with query
-        retrieved = self.unbind(bindings, query)  # [B, D]
-
-        return self.out(retrieved)
-
-
-# =============================================================================
-# Associative Recall Models
-# =============================================================================
-
-class PhaseBindingRecall(nn.Module):
-    def __init__(self, vocab_size, dim=64, n_oscillators=32, use_temporal=False, use_learned=False):
+    def __init__(self, vocab_size, dim=256, num_layers=8, n_oscillators=32,
+                 max_len=2048, device='cuda'):
         super().__init__()
         self.vocab_size = vocab_size
+        self.dim = dim
+        self.max_len = max_len
+        self.n_oscillators = n_oscillators
+
+        self.embed = nn.Embedding(vocab_size, dim)
+        # Keep additive pos_embed for compatibility, but RoPE in phasors is the key
+        self.pos_embed = nn.Parameter(torch.randn(max_len, dim) * 0.02)
+
+        # Precompute RoPE angles for phase binding [max_len, n_oscillators]
+        rope_angles = precompute_freqs(n_oscillators, max_len)
+        self.register_buffer('rope_angles', rope_angles)
+
+        self.layers = nn.ModuleList([
+            PhaseBindingBlock(dim, n_oscillators) for _ in range(num_layers)
+        ])
+        self.norms = nn.ModuleList([nn.LayerNorm(dim) for _ in range(num_layers)])
+
+        self.norm_out = nn.LayerNorm(dim)
+        self.head = nn.Linear(dim, vocab_size)
+        self.head.weight = self.embed.weight  # Tie weights
+
+    def forward(self, x, target_indices=None):
+        """x: [B, L] token indices -> [B, L, vocab_size] logits"""
+        B, L = x.shape
+        h = self.embed(x) + self.pos_embed[:L]
+
+        # Get RoPE angles for current sequence length [L, K]
+        pos_angles = self.rope_angles[:L]
+
+        for norm, layer in zip(self.norms, self.layers):
+            h = layer(norm(h), pos_angles)
+
+        return self.head(self.norm_out(h))
+
+    def count_parameters(self):
+        return sum(p.numel() for p in self.parameters() if p.requires_grad)
+
+    @property
+    def device(self):
+        """Return the device of the model's parameters."""
+        return next(self.parameters()).device
+
+    @torch.no_grad()
+    def generate(self, input_ids, max_length, temperature=1.0, top_k=50):
+        """Autoregressive generation."""
+        self.eval()
+        generated = input_ids.clone()
+
+        while generated.shape[1] < max_length:
+            context = generated[:, -self.max_len:]
+            logits = self(context)[:, -1, :] / temperature
+
+            if top_k > 0:
+                top_logits, top_idx = torch.topk(logits, k=min(top_k, logits.size(-1)))
+                probs = F.softmax(top_logits, dim=-1)
+                next_token = top_idx.gather(-1, torch.multinomial(probs, 1))
+            else:
+                next_token = logits.argmax(dim=-1, keepdim=True)
+
+            generated = torch.cat([generated, next_token], dim=1)
+
+        return generated
+
+
+class PhaseBindingRecall(nn.Module):
+    """
+    Associative recall model - fully vectorized.
+
+    Input format: [k1, v1, k2, v2, ..., kN, vN, QUERY, q1, QUERY, q2, ...]
+    Assumes fixed structure: n_pairs KV pairs followed by n_queries queries.
+    """
+
+    def __init__(self, vocab_size, dim=64, n_oscillators=32, query_token=None):
+        super().__init__()
+        self.vocab_size = vocab_size
+        self.dim = dim
+        self.n_oscillators = n_oscillators
+        self.query_token = query_token if query_token is not None else vocab_size
+
         self.embed = nn.Embedding(vocab_size + 1, dim)
-
-        if use_learned:
-            self.memory = LearnedBindingMemory(dim, binding_dim=dim)
-        elif use_temporal:
-            self.memory = TemporalPhaseBinding(dim, n_oscillators)
-        else:
-            self.memory = PhaseBindingMemory(dim, n_oscillators)
-
+        self.memory = PhaseBindingMemory(dim, n_oscillators)
         self.output = nn.Linear(dim, vocab_size)
 
-    def forward(self, x):
-        B, L, _ = x.shape
-        indices = x.argmax(dim=-1)
-        h = self.embed(indices)
+    def forward(self, x, target_indices=None):
+        """
+        Fully vectorized forward pass.
 
-        n_pairs = (L - 2) // 2
-        keys = h[:, 0::2][:, :n_pairs]
-        values = h[:, 1::2][:, :n_pairs]
-        query = h[:, -1]
+        Args:
+            x: [B, L] token indices or [B, L, V] one-hot
 
-        retrieved = self.memory(keys, values, query)
-        logits = self.output(retrieved)
+        Returns:
+            logits: [B, L, vocab_size]
+        """
+        # Handle input format
+        if x.dim() == 3:
+            indices = x.argmax(dim=-1)
+        else:
+            indices = x
 
-        out = torch.zeros(B, L, self.vocab_size, device=x.device)
-        out[:, -1] = logits
+        B, L = indices.shape
+        device = indices.device
+
+        h = self.embed(indices)  # [B, L, D]
+
+        # Find first QUERY position (all batches assumed same structure)
+        query_mask = (indices == self.query_token)
+        first_query_pos = query_mask.int().argmax(dim=1)  # [B]
+
+        # For vectorization, assume all batches have same n_pairs
+        # (standard for benchmarks with fixed structure)
+        kv_end = first_query_pos[0].item()
+        n_pairs = kv_end // 2
+
+        # Extract keys and values (even/odd positions before QUERY)
+        # keys: positions 0, 2, 4, ... -> [B, n_pairs, D]
+        # values: positions 1, 3, 5, ... -> [B, n_pairs, D]
+        key_indices = torch.arange(0, kv_end, 2, device=device)
+        val_indices = torch.arange(1, kv_end, 2, device=device)
+
+        keys = h[:, key_indices, :]    # [B, n_pairs, D]
+        values = h[:, val_indices, :]  # [B, n_pairs, D]
+
+        # Find all query positions (positions right after QUERY tokens)
+        # Query structure: QUERY, q1, QUERY, q2, ...
+        # We need positions kv_end+1, kv_end+3, kv_end+5, ...
+        query_content_positions = []
+        pos = kv_end + 1  # First query content is right after first QUERY
+        while pos < L:
+            query_content_positions.append(pos)
+            pos += 2  # Skip QUERY token and move to next query content
+
+        if not query_content_positions:
+            # No queries, return zeros
+            return torch.zeros(B, L, self.vocab_size, device=device)
+
+        query_pos = torch.tensor(query_content_positions, device=device)
+        n_queries = len(query_content_positions)
+
+        # Extract query embeddings [B, n_queries, D]
+        queries = h[:, query_pos, :]
+
+        # Batch retrieval [B, n_queries, D]
+        retrieved = self.memory(keys, values, queries)
+
+        # Build output logits
+        out = torch.zeros(B, L, self.vocab_size, device=device)
+        logits = self.output(retrieved)  # [B, n_queries, vocab_size]
+
+        # Scatter logits to correct positions
+        for i, pos in enumerate(query_content_positions):
+            out[:, pos, :] = logits[:, i, :]
 
         return out
 
-
-# =============================================================================
-# Test
-# =============================================================================
-
-def generate_associative_recall(batch_size, n_pairs, vocab_size):
-    seq_len = n_pairs * 2 + 2
-    QUERY_TOKEN = vocab_size
-
-    data = torch.zeros(batch_size, seq_len, vocab_size + 1, device=device)
-    targets = torch.zeros(batch_size, seq_len, dtype=torch.long, device=device)
-
-    for b in range(batch_size):
-        available = list(range(vocab_size))
-        np.random.shuffle(available)
-        pairs = [(available[2*i], available[2*i+1]) for i in range(n_pairs)]
-
-        pos = 0
-        for k, v in pairs:
-            data[b, pos, k] = 1.0
-            data[b, pos+1, v] = 1.0
-            pos += 2
-
-        data[b, pos, QUERY_TOKEN] = 1.0
-        pos += 1
-
-        query_idx = np.random.randint(0, n_pairs)
-        query_k, query_v = pairs[query_idx]
-        data[b, pos, query_k] = 1.0
-        targets[b, pos] = query_v
-
-    return data, targets
+    def count_parameters(self):
+        return sum(p.numel() for p in self.parameters() if p.requires_grad)
 
 
-def test_phase_binding():
-    print('=' * 70)
-    print('NOVEL: Phase Binding Memory')
-    print('=' * 70)
-    print()
-    print('Mechanism: Items with matching phase reinforce via interference')
-    print('NO attention, NO softmax, NO explicit comparison')
-    print()
-
-    vocab_size = 16
-    n_pairs = 5
-    dim = 64
-
-    models = {
-        'PhaseBinding (32 osc)': lambda: PhaseBindingRecall(vocab_size, dim, n_oscillators=32),
-        'PhaseBinding (64 osc)': lambda: PhaseBindingRecall(vocab_size, dim, n_oscillators=64),
-        'TemporalPhase': lambda: PhaseBindingRecall(vocab_size, dim, n_oscillators=32, use_temporal=True),
-        'LearnedBinding': lambda: PhaseBindingRecall(vocab_size, dim, use_learned=True),
-    }
-
-    for name, model_fn in models.items():
-        print(f'\n--- {name} ---')
-
-        model = model_fn().to(device)
-        params = sum(p.numel() for p in model.parameters())
-        print(f'  Parameters: {params:,}')
-
-        optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
-        criterion = nn.CrossEntropyLoss(ignore_index=0)
-
-        query_pos = n_pairs * 2 + 1
-        best_acc = 0.0
-
-        for epoch in range(1000):
-            model.train()
-            data, targets = generate_associative_recall(64, n_pairs, vocab_size)
-
-            logits = model(data)
-            B, L, V = logits.shape
-            loss = criterion(logits.view(B*L, V), targets.view(B*L))
-
-            optimizer.zero_grad()
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            optimizer.step()
-
-            if (epoch + 1) % 200 == 0:
-                model.eval()
-                with torch.no_grad():
-                    data, targets = generate_associative_recall(500, n_pairs, vocab_size)
-                    logits = model(data)
-                    preds = logits.argmax(dim=-1)
-                    acc = (preds[:, query_pos] == targets[:, query_pos]).float().mean().item() * 100
-                    if acc > best_acc:
-                        best_acc = acc
-                print(f'    Epoch {epoch+1}: acc={acc:.1f}%, best={best_acc:.1f}%')
-
-        random_baseline = 100.0 / vocab_size
-        status = 'WORKS' if best_acc > 90 else 'PARTIAL' if best_acc > 20 else 'FAILS'
-        print(f'  Final: {best_acc:.1f}% (random={random_baseline:.1f}%) [{status}]')
-
-
-if __name__ == '__main__':
-    test_phase_binding()
+# Backwards compatibility alias
+PhaseSpaceIntegrator = PhaseBindingLanguageModel

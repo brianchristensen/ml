@@ -16,7 +16,7 @@ import time
 from typing import List, Tuple
 import numpy as np
 
-from psi import PhaseSpaceIntegrator
+from phase_binding_memory import PhaseBindingLanguageModel
 
 
 # ============================================================================
@@ -335,7 +335,7 @@ def main():
     print("=" * 80)
     print()
 
-    phase_model = PhaseSpaceIntegrator(
+    phase_model = PhaseBindingLanguageModel(
         vocab_size=vocab_size,
         dim=128,
         num_layers=8,

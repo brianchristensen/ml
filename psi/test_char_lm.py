@@ -19,7 +19,7 @@ import os
 import urllib.request
 import zipfile
 
-from psi import PhaseSpaceIntegrator
+from phase_binding_memory import PhaseBindingLanguageModel
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
@@ -380,7 +380,7 @@ def main():
     print("=" * 80)
     print()
 
-    novel_model = PhaseSpaceIntegrator(
+    novel_model = PhaseBindingLanguageModel(
         vocab_size=vocab_size,
         dim=128,
         num_layers=8,

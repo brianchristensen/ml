@@ -11,7 +11,7 @@ class PureOrthoPhasor(nn.Module):
     Orthogonal phasor with random fixed phases.
 
     Key insight: Random phases are approximately orthogonal in high dimensions.
-    This enables O(n) associative retrieval via interference.
+    This enables O(n) positional retrieval via interference.
     """
     def __init__(self, dim, max_seq_len=2048):
         super().__init__()

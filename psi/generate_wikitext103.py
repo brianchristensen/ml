@@ -11,7 +11,7 @@ import torch.nn.functional as F
 import argparse
 from pathlib import Path
 
-from psi import PhaseSpaceIntegrator
+from phase_binding_memory import PhaseBindingLanguageModel
 
 
 class CharacterTokenizer:
@@ -57,7 +57,7 @@ def load_model(checkpoint_path, device='cuda'):
     # Create model
     # Use 'max_len' if available, fall back to 'seq_len' for backwards compatibility
     max_len = config.get('max_len', config.get('seq_len', 1024))
-    model = PhaseSpaceIntegrator(
+    model = PhaseBindingLanguageModel(
         vocab_size=config['vocab_size'],
         dim=config['dim'],
         num_layers=config['num_layers'],

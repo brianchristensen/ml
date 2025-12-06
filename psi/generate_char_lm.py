@@ -8,7 +8,7 @@ to verify it has learned coherent language patterns.
 import torch
 import torch.nn as nn
 import numpy as np
-from psi import PhaseSpaceIntegrator
+from phase_binding_memory import PhaseBindingLanguageModel
 
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -184,7 +184,7 @@ def test_generation():
     try:
         checkpoint = torch.load('tempo_charlm_final.pt', map_location=device)
 
-        novel_model = PhaseSpaceIntegrator(
+        novel_model = PhaseBindingLanguageModel(
             vocab_size=256,
             dim=128,
             num_layers=8,

@@ -22,7 +22,7 @@ from torch.utils.data import Dataset, DataLoader
 import time
 import numpy as np
 
-from psi import PhaseSpaceIntegrator
+from phase_binding_memory import PhaseBindingRecall
 
 
 # Special tokens
@@ -406,11 +406,11 @@ def main():
     print("=" * 80)
     print()
 
-    phase_model = PhaseSpaceIntegrator(
+    phase_model = PhaseBindingRecall(
         vocab_size=vocab_size,
         dim=128,
-        num_layers=8,
-        device=device
+        n_oscillators=64,
+        query_token=QUERY  # QUERY=3 in this benchmark
     ).to(device)
 
     print(f"Parameters: {phase_model.count_parameters():,}")

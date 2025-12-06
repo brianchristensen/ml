@@ -36,7 +36,8 @@
       "WebFetch(domain:paperswithcode.com)",
       "Bash(dir \"C:\\Projects\\ml\\phi\\data\\nuscenes\" /ad)",
       "Bash(dir:*)",
-      "Bash(cd:*)"
+      "Bash(cd:*)",
+      "Bash(pip show:*)"
     ],
     "deny": [],
     "ask": []

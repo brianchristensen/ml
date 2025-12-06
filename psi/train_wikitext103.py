@@ -1,31 +1,10 @@
 """
-WikiText-103 Language Modeling with TPI - CHARACTER LEVEL
+WikiText-103 Language Modeling with Phase Binding Memory - CHARACTER LEVEL
 
 Dataset: WikiText-103 (~103M BPE tokens → ~400M+ characters!)
 Tokenization: CHARACTER LEVEL (vocab=256)
 Context: 512 characters
 Metrics: Bits-per-character + generation quality
-
-THE BIG TEST: Can TPI scale character-level to 400M+ characters?
-
-This tests TPI's unique strength:
-- Parallelizable (unlike RNNs)
-- Character-level efficient (O(n), unlike transformers' O(n²))
-- Sequential composition learning (characters → words → semantics)
-- 99.5% of params in computation (not embeddings)
-
-Expected advantages:
-- No embedding overhead (256 vocab vs 50K)
-- Better compositional generalization
-- More parameters for actual learning
-- Handles rare words via spelling
-
-WikiText-2 character-level success (12L/256D, 12.7M params):
-- Train: 3.16 PPL, Val: 3.62 PPL (1.66 BPC)
-- Learned proper spelling, grammar, semantics in 20 epochs
-- No train/val gap
-
-Now scaling to 50x more data!
 """
 
 import torch
@@ -36,11 +15,12 @@ import numpy as np
 import time
 import math
 import os
+import argparse
 from pathlib import Path
 
 from datasets import load_dataset
 
-from psi import PhaseSpaceIntegrator
+from phase_binding_memory import PhaseBindingLanguageModel
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
@@ -175,8 +155,8 @@ def collate_fn(batch):
 # Training and Evaluation
 # ============================================================================
 
-def train_epoch(model, dataloader, optimizer, scheduler, criterion, device, grad_clip=1.0):
-    """Train one epoch."""
+def train_iteration(model, dataloader, optimizer, scheduler, criterion, device, grad_clip=1.0):
+    """Train for one pass through the dataloader."""
     model.train()
     total_loss = 0.0
     total_tokens = 0
@@ -305,8 +285,20 @@ def generate_samples(model, tokenizer, prompts, max_length=100, temperature=0.8,
 # ============================================================================
 
 def main():
+    parser = argparse.ArgumentParser(description='Train WikiText-103 Character LM')
+    parser.add_argument('--epochs', type=int, default=4, help='Number of epochs')
+    parser.add_argument('--batch-size', type=int, default=16, help='Batch size')
+    parser.add_argument('--seq-len', type=int, default=512, help='Sequence length')
+    parser.add_argument('--lr', type=float, default=1e-3, help='Learning rate')
+    parser.add_argument('--dim', type=int, default=256, help='Model dimension')
+    parser.add_argument('--layers', type=int, default=12, help='Number of layers')
+    parser.add_argument('--subset-size', type=int, default=40_000_000, help='Subset size (0 for full)')
+    parser.add_argument('--eval-every', type=int, default=1, help='Evaluate every N epochs')
+    parser.add_argument('--generate-every', type=int, default=1, help='Generate samples every N epochs')
+    args = parser.parse_args()
+
     print("=" * 80)
-    print("WikiText-103 Language Modeling with TPI - CHARACTER LEVEL")
+    print("WikiText-103 Language Modeling with Phase Binding Memory - CHARACTER LEVEL")
     print("=" * 80)
     print()
 
@@ -315,49 +307,21 @@ def main():
         print(f"GPU: {torch.cuda.get_device_name(0)}")
     print()
 
-    # Hyperparameters (CHARACTER-LEVEL WITH CURRICULUM LEARNING)
-    batch_size = 16        # Same batch size across all stages
-    learning_rate = 1e-3   # Same learning rate
-    warmup_steps = 0
-
-    # CURRICULUM LEARNING: Gradually increase sequence length
-    # Start short (learn basic patterns fast) → extend long (learn coherence)
-    # Each stage builds on the previous one's learned representations
-    curriculum_stages = [
-        {'name': 'Stage 1: Characters→Words', 'seq_len': 128, 'epochs': 5},
-        {'name': 'Stage 2: Words→Phrases', 'seq_len': 256, 'epochs': 5},
-        {'name': 'Stage 3: Phrases→Sentences', 'seq_len': 512, 'epochs': 5},
-        {'name': 'Stage 4: Sentences→Paragraphs', 'seq_len': 1024, 'epochs': 10},
-    ]
-
-    # Model config (CHARACTER-LEVEL needs more depth!)
-    # Character→word composition requires learning lower-level patterns
-    # TPI's cheap layers make deeper networks affordable
-    # WikiText-2 success: 12L/256D learned proper language
-    dim = 256              # Moderate width
-    num_layers = 12        # More depth for character-level (vs 8 for BPE)
-
-    # Use subset of data for faster iteration
-    # Full WikiText-103 is ~400M+ characters (huge!)
-    use_subset = True      # Set to False for full training
-    subset_size = 40_000_000  # 10M characters for initial test
-
-    print("=" * 80)
-    print("CURRICULUM LEARNING SCHEDULE:")
-    print("=" * 80)
-    total_epochs = sum(stage['epochs'] for stage in curriculum_stages)
-    for i, stage in enumerate(curriculum_stages, 1):
-        print(f"{i}. {stage['name']}")
-        print(f"   - Sequence length: {stage['seq_len']} characters")
-        print(f"   - Epochs: {stage['epochs']}")
-    print(f"\nTotal epochs: {total_epochs}")
-    print("=" * 80)
-    print()
+    # Hyperparameters
+    batch_size = args.batch_size
+    seq_len = args.seq_len
+    learning_rate = args.lr
+    n_epochs = args.epochs
+    dim = args.dim
+    num_layers = args.layers
+    subset_size = args.subset_size
 
     print("Hyperparameters:")
+    print(f"  Epochs: {n_epochs}")
     print(f"  Batch size: {batch_size}")
+    print(f"  Sequence length: {seq_len}")
     print(f"  Learning rate: {learning_rate}")
-    print(f"  Model: {num_layers}L / {dim}D (CHAR + TIED EMBEDDINGS)")
+    print(f"  Model: {num_layers}L / {dim}D")
     print()
 
     # Load data
@@ -365,108 +329,90 @@ def main():
     vocab_size = tokenizer.n_vocab
 
     # Use subset for faster iteration
-    if use_subset:
+    if subset_size > 0:
         print(f"Using subset of data: {subset_size:,} characters")
         train_tokens = train_tokens[:subset_size]
         print(f"Train characters (subset): {len(train_tokens):,}")
         print()
 
-    # Create model with max_len = longest sequence in curriculum
-    max_seq_len = max(stage['seq_len'] for stage in curriculum_stages)
+    # Create datasets
+    train_dataset = TokenDataset(train_tokens, seq_len=seq_len)
+    val_dataset = TokenDataset(val_tokens, seq_len=seq_len)
+
+    print(f"Train sequences: {len(train_dataset):,}")
+    print(f"Val sequences: {len(val_dataset):,}")
+    print()
+
+    # Create dataloaders
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        collate_fn=collate_fn,
+        num_workers=0
+    )
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        collate_fn=collate_fn,
+        num_workers=0
+    )
+
+    print(f"Train batches: {len(train_loader):,}")
+    print(f"Val batches: {len(val_loader):,}")
+    print()
+
+    # Create model
     print("Creating model...")
-    model = PhaseSpaceIntegrator(
+    model = PhaseBindingLanguageModel(
         vocab_size=vocab_size,
         dim=dim,
         num_layers=num_layers,
-        max_len=max_seq_len,
+        max_len=seq_len,
         device=device
     ).to(device)
 
     print(f"Parameters: {model.count_parameters():,} ({model.count_parameters()/1e6:.2f}M)")
     print()
 
-    # Optimizer (reused across curriculum stages)
+    # Optimizer and scheduler
     optimizer = optim.AdamW(model.parameters(), lr=learning_rate, betas=(0.9, 0.95))
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=len(train_loader) * n_epochs, eta_min=learning_rate * 0.1
+    )
     criterion = nn.CrossEntropyLoss()
 
-    # Curriculum training loop
+    # Training loop
     print("=" * 80)
-    print("CURRICULUM TRAINING")
+    print("TRAINING")
     print("=" * 80)
     print()
 
     best_val_ppl = float('inf')
-    total_epoch_counter = 0
 
-    for stage_idx, stage in enumerate(curriculum_stages, 1):
-        stage_name = stage['name']
-        seq_len = stage['seq_len']
-        n_epochs = stage['epochs']
+    for epoch in range(n_epochs):
+        print(f"Epoch {epoch+1}/{n_epochs}")
+        print("-" * 80)
 
-        print("=" * 80)
-        print(f"{stage_name}")
-        print(f"Sequence length: {seq_len}, Epochs: {n_epochs}")
-        print("=" * 80)
+        # Train
+        train_loss = train_iteration(model, train_loader, optimizer, scheduler, criterion, device)
+        train_ppl = math.exp(train_loss)
+
         print()
+        print(f"Train Loss: {train_loss:.4f} - Train PPL: {train_ppl:.2f}")
+        print(f"Learning rate: {optimizer.param_groups[0]['lr']:.6f}")
 
-        # Create datasets for this stage
-        train_dataset = TokenDataset(train_tokens, seq_len=seq_len)
-        val_dataset = TokenDataset(val_tokens, seq_len=seq_len)
-
-        print(f"Train sequences: {len(train_dataset):,}")
-        print(f"Val sequences: {len(val_dataset):,}")
-        print()
-
-        # Create dataloaders for this stage
-        train_loader = DataLoader(
-            train_dataset,
-            batch_size=batch_size,
-            shuffle=True,
-            collate_fn=collate_fn,
-            num_workers=0
-        )
-        val_loader = DataLoader(
-            val_dataset,
-            batch_size=batch_size,
-            shuffle=False,
-            collate_fn=collate_fn,
-            num_workers=0
-        )
-
-        print(f"Train batches: {len(train_loader):,}")
-        print(f"Val batches: {len(val_loader):,}")
-        print()
-
-        # Learning rate scheduler for this stage
-        scheduler = optim.lr_scheduler.CosineAnnealingLR(
-            optimizer, T_max=len(train_loader) * n_epochs, eta_min=learning_rate * 0.1
-        )
-
-        # Training loop for this stage
-        for epoch in range(n_epochs):
-            total_epoch_counter += 1
-            print(f"Stage {stage_idx}/{len(curriculum_stages)}, Epoch {epoch+1}/{n_epochs} (Total: {total_epoch_counter}/{total_epochs})")
-            print("-" * 80)
-
-            # Train
-            train_loss = train_epoch(model, train_loader, optimizer, scheduler, criterion, device)
-            train_ppl = math.exp(train_loss)
-
-            # Evaluate
+        # Evaluate
+        if (epoch + 1) % args.eval_every == 0:
             val_ppl = evaluate(model, val_loader, device)
-
-            print()
-            print(f"Train PPL: {train_ppl:.2f} - Val PPL: {val_ppl:.2f}")
-            print(f"Learning rate: {optimizer.param_groups[0]['lr']:.6f}")
-            print()
+            print(f"Val PPL: {val_ppl:.2f}")
 
             # Save best model
             if val_ppl < best_val_ppl:
                 best_val_ppl = val_ppl
                 torch.save({
-                    'total_epoch': total_epoch_counter,
-                    'stage': stage_idx,
-                    'stage_name': stage_name,
+                    'epoch': epoch + 1,
                     'model_state_dict': model.state_dict(),
                     'optimizer_state_dict': optimizer.state_dict(),
                     'val_ppl': val_ppl,
@@ -474,41 +420,46 @@ def main():
                         'vocab_size': vocab_size,
                         'dim': dim,
                         'num_layers': num_layers,
-                        'seq_len': seq_len,
-                        'max_len': max_seq_len
+                        'max_len': seq_len
                     }
                 }, 'wikitext103_best.pt')
                 print(f"  → Saved best model (Val PPL: {val_ppl:.2f})")
-                print()
 
-            # Generate samples every epoch
-            if (epoch + 1) % 1 == 0:
-                print("-" * 80)
-                print("Generation Samples:")
-                print("-" * 80)
+        # Generate samples
+        if (epoch + 1) % args.generate_every == 0:
+            print()
+            print("-" * 80)
+            print("Generation Samples:")
+            print("-" * 80)
 
-                prompts = [
-                    "The history of",
-                    "In computer science,",
-                    "The theory of",
-                ]
+            prompts = [
+                "The history of",
+                "In computer science,",
+                "The theory of",
+            ]
 
-                samples = generate_samples(model, tokenizer, prompts, max_length=50, temperature=0.8)
+            samples = generate_samples(model, tokenizer, prompts, max_length=50, temperature=0.8)
 
-                for prompt, sample in zip(prompts, samples):
-                    print(f"\nPrompt: {prompt}")
-                    print(f"Generated: {sample}")
+            for prompt, sample in zip(prompts, samples):
+                print(f"\nPrompt: {prompt}")
+                print(f"Generated: {sample}")
 
-                print()
-                print("=" * 80)
-                print()
-
-        print()
-        print(f"Stage {stage_idx} complete!")
-        print(f"Best validation PPL so far: {best_val_ppl:.2f}")
         print()
         print("=" * 80)
         print()
+
+    # Save final model
+    torch.save({
+        'epoch': n_epochs,
+        'model_state_dict': model.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+        'config': {
+            'vocab_size': vocab_size,
+            'dim': dim,
+            'num_layers': num_layers,
+            'max_len': seq_len
+        }
+    }, 'wikitext103_final.pt')
 
     # Final test evaluation
     print("=" * 80)
@@ -516,33 +467,7 @@ def main():
     print("=" * 80)
     print()
 
-    # Save final model state (after all curriculum stages complete)
-    torch.save({
-        'total_epoch': total_epoch_counter,
-        'stage': len(curriculum_stages),
-        'stage_name': 'Final (all stages complete)',
-        'model_state_dict': model.state_dict(),
-        'optimizer_state_dict': optimizer.state_dict(),
-        'config': {
-            'vocab_size': vocab_size,
-            'dim': dim,
-            'num_layers': num_layers,
-            'max_len': max_seq_len
-        }
-    }, 'wikitext103_final.pt')
-
-    # Test with FINAL model (not "best" which might be from early stage!)
-    print("Testing FINAL model (after all curriculum stages)...")
-    final_seq_len = curriculum_stages[-1]['seq_len']
-
-    # DIAGNOSTIC: Print data sizes
-    print(f"Data sizes:")
-    print(f"  Train tokens: {len(train_tokens):,}")
-    print(f"  Val tokens: {len(val_tokens):,}")
-    print(f"  Test tokens: {len(test_tokens):,}")
-    print()
-
-    test_dataset = TokenDataset(test_tokens, seq_len=final_seq_len)
+    test_dataset = TokenDataset(test_tokens, seq_len=seq_len)
     test_loader = DataLoader(
         test_dataset,
         batch_size=batch_size,
@@ -551,63 +476,15 @@ def main():
         num_workers=0
     )
 
-    print(f"Test sequences ({final_seq_len} seq_len): {len(test_dataset):,}")
+    print(f"Test sequences: {len(test_dataset):,}")
+
+    test_ppl = evaluate(model, test_loader, device)
+    print(f"Test Perplexity: {test_ppl:.2f}")
     print()
 
-    # DIAGNOSTIC: Also evaluate on validation set with test code
-    print("=" * 80)
-    print("DIAGNOSTIC: Re-evaluating validation set with test code...")
-    print("(Should match final stage validation PPL ~3.30 if code is correct)")
-    print("=" * 80)
-    val_dataset_test = TokenDataset(val_tokens, seq_len=final_seq_len)
-    val_loader_test = DataLoader(
-        val_dataset_test,
-        batch_size=batch_size,
-        shuffle=False,
-        collate_fn=collate_fn,
-        num_workers=0
-    )
-    val_ppl_test = evaluate(model, val_loader_test, device)
-    print(f"Validation PPL (re-evaluated): {val_ppl_test:.2f}")
-    print()
-
-    test_ppl_final = evaluate(model, test_loader, device)
-    print(f"Test Perplexity (FINAL model): {test_ppl_final:.2f}")
-    print()
-
-    if abs(val_ppl_test - 3.30) > 0.5:
-        print("⚠️  WARNING: Val PPL re-evaluation doesn't match! Possible evaluation bug.")
-    if test_ppl_final > 10.0:
-        print("⚠️  WARNING: Test PPL is very high! Possible data distribution issue.")
-    print()
-
-    # Also test "best" model for comparison
+    # Final generation samples
     print("-" * 80)
-    print("Testing BEST validation model (for comparison)...")
-    checkpoint = torch.load('wikitext103_best.pt')
-    print(f"  Best model from: {checkpoint.get('stage_name', 'unknown')}")
-    print(f"  Best model seq_len: {checkpoint['config'].get('seq_len', 'unknown')}")
-    print(f"  Best validation PPL: {best_val_ppl:.2f}")
-    model.load_state_dict(checkpoint['model_state_dict'])
-
-    test_ppl_best = evaluate(model, test_loader, device)
-    print(f"Test Perplexity (BEST model on {final_seq_len} seq_len): {test_ppl_best:.2f}")
-    print()
-
-    print("=" * 80)
-    print("IMPORTANT: If test PPL is much worse for 'BEST' model,")
-    print("it means best model was from early curriculum stage!")
-    print("Always use FINAL model for deployment.")
-    print("=" * 80)
-    print()
-
-    # Final generation samples (using FINAL model, which is currently loaded)
-    # Note: Currently loaded model is "best" from above, reload final
-    final_checkpoint = torch.load('wikitext103_final.pt')
-    model.load_state_dict(final_checkpoint['model_state_dict'])
-
-    print("-" * 80)
-    print("Final Generation Samples (using FINAL model after all stages):")
+    print("Final Generation Samples:")
     print("-" * 80)
 
     prompts = [
@@ -627,17 +504,11 @@ def main():
 
     print()
     print("=" * 80)
-    print("CURRICULUM TRAINING COMPLETE!")
+    print("TRAINING COMPLETE!")
     print("=" * 80)
     print()
-    print(f"Best validation PPL (across all stages): {best_val_ppl:.2f}")
-    print(f"Final model test PPL: {test_ppl_final:.2f}")
-    print(f"Best model test PPL: {test_ppl_best:.2f}")
-    print()
-    print("=" * 80)
-    print("Use 'wikitext103_final.pt' for generation/deployment")
-    print("(not 'wikitext103_best.pt' which may be from early stage)")
-    print("=" * 80)
+    print(f"Best validation PPL: {best_val_ppl:.2f}")
+    print(f"Final test PPL: {test_ppl:.2f}")
     print()
 
 
