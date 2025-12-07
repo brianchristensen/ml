@@ -8,7 +8,7 @@ import torch.nn as nn
 import numpy as np
 
 # Import Clifford model from the canonical source
-from clifford_memory_v2 import OrthogonalModel as OrthogonalCliffordModel
+from clifford_memory import OrthogonalModel as OrthogonalCliffordModel
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
