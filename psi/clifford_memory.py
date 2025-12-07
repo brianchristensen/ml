@@ -24,6 +24,39 @@ import math
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 
+def decayed_cumsum(x, retention):
+    """
+    Compute decayed cumulative sum: each step retains `retention` fraction of history.
+
+    For retention=1.0, this is standard cumsum.
+    For retention<1.0, older entries decay exponentially.
+
+    Args:
+        x: [B, L, ...] tensor to accumulate
+        retention: scalar in (0, 1], the retention rate per step
+
+    Returns:
+        [B, L, ...] tensor where output[t] = sum_{i=0}^{t} retention^(t-i) * x[i]
+    """
+    if retention >= 0.9999:
+        # Effectively no decay - use efficient cumsum
+        return torch.cumsum(x, dim=1)
+
+    B, L = x.shape[:2]
+    rest_shape = x.shape[2:]
+
+    # Compute via recurrence: h[t] = retention * h[t-1] + x[t]
+    # This is O(L) sequential but necessary for proper decay
+    output = torch.zeros_like(x)
+    h = torch.zeros(B, *rest_shape, device=x.device, dtype=x.dtype)
+
+    for t in range(L):
+        h = retention * h + x[:, t]
+        output[:, t] = h
+
+    return output
+
+
 class OrthogonalBivectorBlock(nn.Module):
     """
     Use mathematically orthogonal bivector planes from Cl(8,0).
@@ -78,6 +111,12 @@ class OrthogonalBivectorBlock(nn.Module):
         # Learnable mixing weights for content sets
         self.set_weights = nn.Parameter(torch.ones(n_orthogonal_sets))
 
+        # MIRAS-inspired learnable retention gates (per set)
+        # Initialized to ~0.98 retention (slow decay) via sigmoid(4.0)
+        self.retention_logits = nn.Parameter(torch.ones(n_orthogonal_sets) * 4.0)
+        # Positional memory retention
+        self.pos_retention_logit = nn.Parameter(torch.tensor(4.0))
+
         # Positional phase plane (Option B)
         if use_positional_plane:
             # Store frequencies for on-the-fly computation (supports any sequence length)
@@ -122,7 +161,9 @@ class OrthogonalBivectorBlock(nn.Module):
             query_s = query_phasor[:, :, s, :]
 
             bound = key_s.unsqueeze(-1) * V.unsqueeze(-2)
-            memory = torch.cumsum(bound, dim=1)
+            # Use learnable retention rate for this set
+            retention = torch.sigmoid(self.retention_logits[s])
+            memory = decayed_cumsum(bound, retention)
             retrieved = memory * query_s.conj().unsqueeze(-1)
             retrieved = retrieved.sum(dim=2).real
 
@@ -139,7 +180,9 @@ class OrthogonalBivectorBlock(nn.Module):
 
         # Bind and retrieve with positional phases
         bound_pos = pos_key.unsqueeze(-1) * V.unsqueeze(-2)  # [B, L, pos_planes, D]
-        memory_pos = torch.cumsum(bound_pos, dim=1)
+        # Use learnable retention rate for positional memory
+        pos_retention = torch.sigmoid(self.pos_retention_logit)
+        memory_pos = decayed_cumsum(bound_pos, pos_retention)
         retrieved_pos = memory_pos * pos_query.conj().unsqueeze(-1)
         retrieved_pos = retrieved_pos.sum(dim=2).real  # [B, L, D]
 

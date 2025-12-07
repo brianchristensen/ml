@@ -14,7 +14,7 @@ device = 'cuda' if torch.cuda.is_available() else 'cpu'
 # ============================================================================
 # Model 1: Clifford PSI
 # ============================================================================
-from clifford_memory_v2 import OrthogonalModel as CliffordModel
+from clifford_memory import OrthogonalModel as CliffordModel
 
 # ============================================================================
 # Model 2: Optimal Phasor
@@ -161,8 +161,7 @@ def main():
         print(f'Random baseline: {100/vocab_size:.1f}%')
 
         # Clifford
-        cliff = CliffordModel(vocab_size + 1, dim, 2, n_orthogonal_sets=4, planes_per_set=16,
-                             use_positional_plane=True, pos_planes=16).to(device)
+        cliff = CliffordModel(vocab_size + 1, dim, 2, n_orthogonal_sets=4, planes_per_set=16, pos_planes=16).to(device)
         c_params = sum(p.numel() for p in cliff.parameters())
         c_acc = train_and_eval(cliff, vocab_size, n_pairs, n_queries, epochs)
         print(f'  Clifford:      {c_acc:5.1f}% ({c_params:,} params)')

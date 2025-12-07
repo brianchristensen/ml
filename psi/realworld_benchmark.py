@@ -27,8 +27,8 @@ print(f"Device: {device}")
 # Import models
 # ============================================================================
 
-from clifford_memory_v2 import OrthogonalModel as CliffordModel
-from clifford_memory_v2 import OrthogonalBivectorBlock
+from clifford_memory import OrthogonalModel as CliffordModel
+from clifford_memory import OrthogonalBivectorBlock
 
 # Mamba block
 class MambaBlock(nn.Module):

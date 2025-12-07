@@ -121,23 +121,6 @@ def main():
     print(f'  Best: {t_acc:.1f}%')
     print()
 
-    # Clifford PSI (imported from clifford_memory_v2.py)
-    # Now supports use_positional_plane=True for dedicated positional phases
-    print('Training Clifford PSI (4 sets x 16 planes)...')
-    clifford = OrthogonalCliffordModel(
-        vocab_size + 1,
-        dim=128,
-        n_layers=2,
-        n_orthogonal_sets=4,
-        planes_per_set=16,
-        use_positional_plane=False  # Set to True to test positional plane
-    ).to(device)
-    c_params = sum(p.numel() for p in clifford.parameters())
-    print(f'  Parameters: {c_params:,}')
-    c_acc = train_and_eval(clifford, vocab_size, n_pairs, n_queries, epochs)
-    print(f'  Best: {c_acc:.1f}%')
-    print()
-
     # Clifford PSI with positional plane
     print('Training Clifford PSI with Positional Plane...')
     clifford_pos = OrthogonalCliffordModel(
@@ -146,7 +129,6 @@ def main():
         n_layers=2,
         n_orthogonal_sets=4,
         planes_per_set=16,
-        use_positional_plane=True,
         pos_planes=16
     ).to(device)
     cp_params = sum(p.numel() for p in clifford_pos.parameters())
@@ -160,12 +142,9 @@ def main():
     print('='*70)
     print(f'Random:              {100/vocab_size:.1f}%')
     print(f'Transformer:         {t_acc:.1f}%  ({t_params:,} params)')
-    print(f'Clifford:            {c_acc:.1f}%  ({c_params:,} params)')
     print(f'Clifford + PosPlane: {cp_acc:.1f}%  ({cp_params:,} params)')
     print()
-    print(f'Gap to transformer (Clifford):     {t_acc - c_acc:.1f}%')
     print(f'Gap to transformer (Clifford+Pos): {t_acc - cp_acc:.1f}%')
-    print(f'Positional plane improvement:      {cp_acc - c_acc:.1f}%')
 
 if __name__ == "__main__":
     main()
