@@ -181,19 +181,24 @@ class OrthogonalBivectorBlock(nn.Module):
     - Set B: (13, 24, 57, 68)
     - Set C: (14, 23, 58, 67)
     - etc.
+
+    Option B: Dedicated positional phase plane
+    - One set uses fixed sinusoidal phases based on position
+    - Provides temporal/positional addressing alongside content addressing
     """
 
-    def __init__(self, dim, n_orthogonal_sets=4, planes_per_set=4):
+    def __init__(self, dim, n_orthogonal_sets=4, planes_per_set=4,
+                 use_positional_plane=False, max_len=None, pos_planes=16):
+        # Note: max_len is deprecated and ignored - positional phases computed on-the-fly
         super().__init__()
         self.dim = dim
         self.n_sets = n_orthogonal_sets
         self.planes_per_set = planes_per_set
         self.total_planes = n_orthogonal_sets * planes_per_set
+        self.use_positional_plane = use_positional_plane
+        self.pos_planes = pos_planes
 
-        # Each set has perfectly orthogonal planes
-        # Within a set: no interference
-        # Between sets: potential interference (but reduced)
-
+        # Content-based phase encoders
         self.key_encoder = nn.Sequential(
             nn.Linear(dim, dim),
             nn.GELU(),
@@ -208,12 +213,32 @@ class OrthogonalBivectorBlock(nn.Module):
         self.to_value = nn.Linear(dim, dim)
         self.to_out = nn.Sequential(nn.LayerNorm(dim), nn.Linear(dim, dim))
 
-        # Learnable mixing weights for each set
+        # Learnable mixing weights for content sets
         self.set_weights = nn.Parameter(torch.ones(n_orthogonal_sets))
+
+        # Positional phase plane (Option B)
+        if use_positional_plane:
+            # Store frequencies for on-the-fly computation (supports any sequence length)
+            freqs = torch.exp(torch.arange(0, pos_planes).float() *
+                            (-math.log(10000.0) / pos_planes))
+            self.register_buffer('pos_freqs', freqs)
+
+            # Learnable weight for positional set (relative to content sets)
+            self.pos_weight = nn.Parameter(torch.ones(1))
+
+            # Nonlinear mixing: content and position interact through gating
+            # Gate determines how much position influences the final address
+            self.content_pos_gate = nn.Sequential(
+                nn.Linear(dim, dim // 2),
+                nn.GELU(),
+                nn.Linear(dim // 2, 1),
+                nn.Sigmoid()  # Output in [0, 1] to blend content vs position
+            )
 
     def forward(self, x):
         B, L, D = x.shape
 
+        # Content-based phases
         key_phase = torch.tanh(self.key_encoder(x)) * math.pi
         query_phase = torch.tanh(self.query_encoder(x)) * math.pi
 
@@ -222,25 +247,51 @@ class OrthogonalBivectorBlock(nn.Module):
 
         V = self.to_value(x).to(torch.complex64)
 
-        # Process each orthogonal set separately, then combine
+        # Process content sets
         key_phasor = key_phasor.view(B, L, self.n_sets, self.planes_per_set)
         query_phasor = query_phasor.view(B, L, self.n_sets, self.planes_per_set)
 
-        # Weighted retrieval from each set
-        weights = F.softmax(self.set_weights, dim=0)  # [n_sets]
+        weights = F.softmax(self.set_weights, dim=0)
 
         total_retrieved = torch.zeros(B, L, D, device=x.device)
 
         for s in range(self.n_sets):
-            key_s = key_phasor[:, :, s, :]  # [B, L, planes_per_set]
+            key_s = key_phasor[:, :, s, :]
             query_s = query_phasor[:, :, s, :]
 
-            bound = key_s.unsqueeze(-1) * V.unsqueeze(-2)  # [B, L, K, D]
+            bound = key_s.unsqueeze(-1) * V.unsqueeze(-2)
             memory = torch.cumsum(bound, dim=1)
             retrieved = memory * query_s.conj().unsqueeze(-1)
             retrieved = retrieved.sum(dim=2).real
 
             total_retrieved = total_retrieved + weights[s] * retrieved
+
+        # Positional plane contribution
+        if self.use_positional_plane:
+            # Compute positional phases on-the-fly for any sequence length
+            pos = torch.arange(L, device=x.device, dtype=torch.float32).unsqueeze(1)  # [L, 1]
+            pos_phase = pos * self.pos_freqs * 2 * math.pi  # [L, pos_planes]
+            pos_phasor = torch.exp(1j * pos_phase)  # [L, pos_planes]
+
+            # Expand for batch
+            pos_key = pos_phasor.unsqueeze(0).expand(B, -1, -1)  # [B, L, pos_planes]
+            pos_query = pos_phasor.unsqueeze(0).expand(B, -1, -1)
+
+            # Bind and retrieve with positional phases
+            bound_pos = pos_key.unsqueeze(-1) * V.unsqueeze(-2)  # [B, L, pos_planes, D]
+            memory_pos = torch.cumsum(bound_pos, dim=1)
+            retrieved_pos = memory_pos * pos_query.conj().unsqueeze(-1)
+            retrieved_pos = retrieved_pos.sum(dim=2).real  # [B, L, D]
+
+            # Nonlinear gating: how much does position matter at each timestep?
+            gate = self.content_pos_gate(x)  # [B, L, 1]
+
+            # Weighted position contribution
+            pos_contribution = torch.sigmoid(self.pos_weight) * retrieved_pos
+
+            # Gate blends content-retrieval with position-retrieval
+            # High gate = more content, low gate = more position
+            total_retrieved = gate * total_retrieved + (1 - gate) * pos_contribution
 
         positions = torch.arange(1, L + 1, device=x.device, dtype=torch.float32)
         norm = torch.sqrt(positions * self.planes_per_set).view(1, L, 1)
@@ -291,12 +342,15 @@ class HierarchicalModel(nn.Module):
 
 
 class OrthogonalModel(nn.Module):
-    def __init__(self, vocab_size, dim=64, n_layers=2, n_sets=4, planes_per_set=16):
+    def __init__(self, vocab_size, dim=64, n_layers=2, n_orthogonal_sets=4, planes_per_set=16,
+                 use_positional_plane=False, max_len=512, pos_planes=16):
         super().__init__()
         self.vocab_size = vocab_size
         self.embed = nn.Embedding(vocab_size, dim)
         self.blocks = nn.ModuleList([
-            OrthogonalBivectorBlock(dim, n_sets, planes_per_set) for _ in range(n_layers)
+            OrthogonalBivectorBlock(dim, n_orthogonal_sets, planes_per_set,
+                                   use_positional_plane, max_len, pos_planes)
+            for _ in range(n_layers)
         ])
         self.norms = nn.ModuleList([nn.LayerNorm(dim) for _ in range(n_layers)])
         self.norm_out = nn.LayerNorm(dim)

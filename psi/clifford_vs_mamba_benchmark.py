@@ -5,6 +5,10 @@ Tests on:
 1. Multi-query associative recall (where Clifford showed 28.1%)
 2. Lorenz dynamics prediction (PSI's strength domain)
 3. Scaling with number of pairs/sequence length
+
+Mamba implementation verified against:
+- Original paper: https://arxiv.org/abs/2312.00752
+- Visual guide: https://newsletter.maartengrootendorst.com/p/a-visual-guide-to-mamba-and-state
 """
 
 import torch
@@ -19,94 +23,23 @@ print(f"Using device: {device}")
 
 
 # ============================================================================
-# Orthogonal Clifford PSI (our best approach)
+# Import Orthogonal Clifford PSI from canonical source
 # ============================================================================
 
-class OrthogonalBivectorBlock(nn.Module):
-    """
-    Orthogonal phase sets inspired by Clifford algebra bivector planes.
-
-    Key insight: Organize phases into independent orthogonal groups,
-    each with its own cumsum memory and learned mixing weights.
-    """
-    def __init__(self, dim, n_sets=4, planes_per_set=16):
-        super().__init__()
-        self.dim = dim
-        self.n_sets = n_sets
-        self.planes_per_set = planes_per_set
-        self.total_planes = n_sets * planes_per_set
-
-        self.key_encoder = nn.Sequential(
-            nn.Linear(dim, dim), nn.GELU(), nn.Linear(dim, self.total_planes)
-        )
-        self.query_encoder = nn.Sequential(
-            nn.Linear(dim, dim), nn.GELU(), nn.Linear(dim, self.total_planes)
-        )
-        self.to_value = nn.Linear(dim, dim)
-        self.to_out = nn.Sequential(nn.LayerNorm(dim), nn.Linear(dim, dim))
-        self.set_weights = nn.Parameter(torch.ones(n_sets))
-
-    def forward(self, x):
-        B, L, D = x.shape
-
-        key_phase = torch.tanh(self.key_encoder(x)) * math.pi
-        query_phase = torch.tanh(self.query_encoder(x)) * math.pi
-
-        key_phasor = torch.exp(1j * key_phase)
-        query_phasor = torch.exp(1j * query_phase)
-
-        V = self.to_value(x).to(torch.complex64)
-
-        key_phasor = key_phasor.view(B, L, self.n_sets, self.planes_per_set)
-        query_phasor = query_phasor.view(B, L, self.n_sets, self.planes_per_set)
-
-        weights = F.softmax(self.set_weights, dim=0)
-        total_retrieved = torch.zeros(B, L, D, device=x.device)
-
-        for s in range(self.n_sets):
-            key_s = key_phasor[:, :, s, :]
-            query_s = query_phasor[:, :, s, :]
-
-            bound = key_s.unsqueeze(-1) * V.unsqueeze(-2)
-            memory = torch.cumsum(bound, dim=1)
-            retrieved = memory * query_s.conj().unsqueeze(-1)
-            retrieved = retrieved.sum(dim=2).real
-
-            total_retrieved = total_retrieved + weights[s] * retrieved
-
-        positions = torch.arange(1, L + 1, device=x.device, dtype=torch.float32)
-        norm = torch.sqrt(positions * self.planes_per_set).view(1, L, 1)
-
-        return x + self.to_out(total_retrieved / norm)
-
-
-class OrthogonalCliffordModel(nn.Module):
-    """Language model with Orthogonal Clifford blocks."""
-    def __init__(self, vocab_size, dim=64, n_layers=2, n_sets=4, planes_per_set=16):
-        super().__init__()
-        self.vocab_size = vocab_size
-        self.embed = nn.Embedding(vocab_size, dim)
-        self.blocks = nn.ModuleList([
-            OrthogonalBivectorBlock(dim, n_sets, planes_per_set) for _ in range(n_layers)
-        ])
-        self.norms = nn.ModuleList([nn.LayerNorm(dim) for _ in range(n_layers)])
-        self.norm_out = nn.LayerNorm(dim)
-        self.head = nn.Linear(dim, vocab_size)
-
-    def forward(self, x):
-        h = self.embed(x)
-        for norm, block in zip(self.norms, self.blocks):
-            h = block(norm(h))
-        return self.head(self.norm_out(h))
+from clifford_memory_v2 import OrthogonalModel as OrthogonalCliffordModel
+from clifford_memory_v2 import OrthogonalBivectorBlock
 
 
 class OrthogonalCliffordDynamics(nn.Module):
     """Dynamics predictor with Orthogonal Clifford blocks."""
-    def __init__(self, state_dim, dim=128, n_layers=4, n_sets=4, planes_per_set=16):
+    def __init__(self, state_dim, dim=128, n_layers=4, n_orthogonal_sets=4, planes_per_set=16,
+                 use_positional_plane=False, max_len=512, pos_planes=16):
         super().__init__()
         self.input_proj = nn.Linear(state_dim, dim)
         self.blocks = nn.ModuleList([
-            OrthogonalBivectorBlock(dim, n_sets, planes_per_set) for _ in range(n_layers)
+            OrthogonalBivectorBlock(dim, n_orthogonal_sets, planes_per_set,
+                                   use_positional_plane, max_len, pos_planes)
+            for _ in range(n_layers)
         ])
         self.norms = nn.ModuleList([nn.LayerNorm(dim) for _ in range(n_layers)])
         self.output_proj = nn.Sequential(
@@ -449,11 +382,12 @@ def main():
     print(f'Random baseline: {100/vocab_size:.1f}%')
     print()
 
-    # Orthogonal Clifford
+    # Orthogonal Clifford (baseline - no positional plane)
     print('-' * 70)
     print('Orthogonal Clifford PSI (4 sets x 16 planes)')
     print('-' * 70)
-    clifford = OrthogonalCliffordModel(vocab_size + 1, dim, n_layers, n_sets=4, planes_per_set=16).to(device)
+    clifford = OrthogonalCliffordModel(vocab_size + 1, dim, n_layers,
+                                       n_orthogonal_sets=4, planes_per_set=16).to(device)
     cliff_params = sum(p.numel() for p in clifford.parameters())
     print(f'Parameters: {cliff_params:,}')
 
@@ -461,6 +395,22 @@ def main():
     clifford_recall = train_recall(clifford, vocab_size, n_pairs, n_queries, epochs)
     cliff_time = time.time() - start
     print(f'Best accuracy: {clifford_recall:.1f}% (trained in {cliff_time:.1f}s)')
+    print()
+
+    # Orthogonal Clifford + Positional Plane (our best variant)
+    print('-' * 70)
+    print('Clifford PSI + Positional Plane (4 sets x 16 planes + 16 pos planes)')
+    print('-' * 70)
+    clifford_pos = OrthogonalCliffordModel(vocab_size + 1, dim, n_layers,
+                                           n_orthogonal_sets=4, planes_per_set=16,
+                                           use_positional_plane=True, pos_planes=16).to(device)
+    cliff_pos_params = sum(p.numel() for p in clifford_pos.parameters())
+    print(f'Parameters: {cliff_pos_params:,}')
+
+    start = time.time()
+    clifford_pos_recall = train_recall(clifford_pos, vocab_size, n_pairs, n_queries, epochs)
+    cliff_pos_time = time.time() - start
+    print(f'Best accuracy: {clifford_pos_recall:.1f}% (trained in {cliff_pos_time:.1f}s)')
     print()
 
     # Mamba
@@ -486,8 +436,10 @@ def main():
     for test_pairs in [4, 8, 12, 16]:
         test_queries = min(4, test_pairs)
 
-        # Clifford
-        cliff = OrthogonalCliffordModel(vocab_size + 1, dim, n_layers, n_sets=4, planes_per_set=16).to(device)
+        # Clifford + PosPlane (best variant)
+        cliff = OrthogonalCliffordModel(vocab_size + 1, dim, n_layers,
+                                        n_orthogonal_sets=4, planes_per_set=16,
+                                        use_positional_plane=True, pos_planes=16).to(device)
         cliff_acc = train_recall(cliff, vocab_size, test_pairs, test_queries, 300)
 
         # Mamba
@@ -495,7 +447,7 @@ def main():
         mam_acc = train_recall(mam, vocab_size, test_pairs, test_queries, 300)
 
         scaling_results.append((test_pairs, cliff_acc, mam_acc))
-        print(f'  {test_pairs} pairs: Clifford={cliff_acc:.1f}%, Mamba={mam_acc:.1f}%')
+        print(f'  {test_pairs} pairs: Clifford+Pos={cliff_acc:.1f}%, Mamba={mam_acc:.1f}%')
 
     print()
 
@@ -516,11 +468,13 @@ def main():
     dyn_layers = 4
     dyn_epochs = 15
 
-    # Orthogonal Clifford Dynamics
+    # Orthogonal Clifford Dynamics + Positional Plane
     print('-' * 70)
-    print('Orthogonal Clifford Dynamics')
+    print('Orthogonal Clifford Dynamics + Positional Plane')
     print('-' * 70)
-    cliff_dyn = OrthogonalCliffordDynamics(3, dyn_dim, dyn_layers, n_sets=4, planes_per_set=16).to(device)
+    cliff_dyn = OrthogonalCliffordDynamics(3, dyn_dim, dyn_layers,
+                                           n_orthogonal_sets=4, planes_per_set=16,
+                                           use_positional_plane=True, pos_planes=16).to(device)
     cliff_dyn_params = sum(p.numel() for p in cliff_dyn.parameters())
     print(f'Parameters: {cliff_dyn_params:,}')
 
@@ -553,13 +507,16 @@ def main():
     print()
 
     print('ASSOCIATIVE RECALL (higher is better):')
-    print(f'  Orthogonal Clifford: {clifford_recall:.1f}%')
-    print(f'  Mamba:               {mamba_recall:.1f}%')
-    diff = clifford_recall - mamba_recall
+    print(f'  Clifford (baseline):   {clifford_recall:.1f}%')
+    print(f'  Clifford + PosPlane:   {clifford_pos_recall:.1f}%')
+    print(f'  Mamba:                 {mamba_recall:.1f}%')
+    diff = clifford_pos_recall - mamba_recall
     if diff > 0:
-        print(f'  -> Clifford wins by {diff:.1f}%')
+        print(f'  -> Clifford+Pos wins by {diff:.1f}%')
     else:
         print(f'  -> Mamba wins by {-diff:.1f}%')
+    pos_improvement = clifford_pos_recall - clifford_recall
+    print(f'  -> Positional plane improvement: +{pos_improvement:.1f}%')
     print()
 
     print('LORENZ DYNAMICS (lower MSE is better):')

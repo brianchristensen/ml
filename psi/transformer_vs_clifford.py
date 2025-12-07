@@ -5,9 +5,10 @@ Also test: position-encoded dynamics with dedicated phase planes.
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import numpy as np
-import math
+
+# Import Clifford model from the canonical source
+from clifford_memory_v2 import OrthogonalModel as OrthogonalCliffordModel
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
@@ -32,68 +33,6 @@ class TransformerModel(nn.Module):
         mask = torch.triu(torch.ones(L, L, device=x.device), diagonal=1).bool()
         h = self.transformer(h, mask=mask, is_causal=True)
         return self.head(h)
-
-# ============================================================================
-# Clifford PSI (from benchmark)
-# ============================================================================
-
-class OrthogonalBivectorBlock(nn.Module):
-    def __init__(self, dim, n_orthogonal_sets=4, planes_per_set=16):
-        super().__init__()
-        self.dim = dim
-        self.n_sets = n_orthogonal_sets
-        self.planes_per_set = planes_per_set
-        self.total_planes = n_orthogonal_sets * planes_per_set
-
-        self.set_weights = nn.Parameter(torch.ones(n_orthogonal_sets))
-        self.key_encoder = nn.Sequential(
-            nn.Linear(dim, dim), nn.GELU(), nn.Linear(dim, self.total_planes)
-        )
-        self.query_encoder = nn.Sequential(
-            nn.Linear(dim, dim), nn.GELU(), nn.Linear(dim, self.total_planes)
-        )
-        self.to_value = nn.Linear(dim, dim)
-        self.to_out = nn.Sequential(nn.LayerNorm(dim), nn.Linear(dim, dim))
-
-    def forward(self, x):
-        B, L, D = x.shape
-        key_phase = torch.tanh(self.key_encoder(x)) * math.pi
-        query_phase = torch.tanh(self.query_encoder(x)) * math.pi
-        key_phase = key_phase.view(B, L, self.n_sets, self.planes_per_set)
-        query_phase = query_phase.view(B, L, self.n_sets, self.planes_per_set)
-        key_phasor = torch.exp(1j * key_phase)
-        query_phasor = torch.exp(1j * query_phase)
-        V = self.to_value(x).to(torch.complex64)
-        weights = F.softmax(self.set_weights, dim=0)
-        total_retrieved = torch.zeros(B, L, D, device=x.device, dtype=torch.float32)
-
-        for s in range(self.n_sets):
-            key_s = key_phasor[:, :, s, :]
-            query_s = query_phasor[:, :, s, :]
-            bound = key_s.unsqueeze(-1) * V.unsqueeze(-2)
-            memory = torch.cumsum(bound, dim=1)
-            retrieved = memory * query_s.conj().unsqueeze(-1)
-            retrieved = retrieved.sum(dim=2).real
-            total_retrieved = total_retrieved + weights[s] * retrieved
-
-        positions = torch.arange(1, L + 1, device=x.device, dtype=torch.float32)
-        norm = torch.sqrt(positions * self.planes_per_set).view(1, L, 1)
-        return x + self.to_out(total_retrieved / norm)
-
-class OrthogonalCliffordModel(nn.Module):
-    def __init__(self, vocab_size, dim=64, n_layers=2):
-        super().__init__()
-        self.embed = nn.Embedding(vocab_size, dim)
-        self.blocks = nn.ModuleList([OrthogonalBivectorBlock(dim) for _ in range(n_layers)])
-        self.norms = nn.ModuleList([nn.LayerNorm(dim) for _ in range(n_layers)])
-        self.norm_out = nn.LayerNorm(dim)
-        self.head = nn.Linear(dim, vocab_size)
-
-    def forward(self, x):
-        h = self.embed(x)
-        for norm, block in zip(self.norms, self.blocks):
-            h = block(norm(h))
-        return self.head(self.norm_out(h))
 
 # ============================================================================
 # Task generation
@@ -182,23 +121,51 @@ def main():
     print(f'  Best: {t_acc:.1f}%')
     print()
 
-    # Clifford PSI with more epochs
-    print('Training Clifford PSI (4 sets x 16 planes, 500 epochs)...')
-    clifford = OrthogonalCliffordModel(vocab_size + 1, dim=128, n_layers=2).to(device)
+    # Clifford PSI (imported from clifford_memory_v2.py)
+    # Now supports use_positional_plane=True for dedicated positional phases
+    print('Training Clifford PSI (4 sets x 16 planes)...')
+    clifford = OrthogonalCliffordModel(
+        vocab_size + 1,
+        dim=128,
+        n_layers=2,
+        n_orthogonal_sets=4,
+        planes_per_set=16,
+        use_positional_plane=False  # Set to True to test positional plane
+    ).to(device)
     c_params = sum(p.numel() for p in clifford.parameters())
     print(f'  Parameters: {c_params:,}')
     c_acc = train_and_eval(clifford, vocab_size, n_pairs, n_queries, epochs)
     print(f'  Best: {c_acc:.1f}%')
     print()
 
+    # Clifford PSI with positional plane
+    print('Training Clifford PSI with Positional Plane...')
+    clifford_pos = OrthogonalCliffordModel(
+        vocab_size + 1,
+        dim=96,
+        n_layers=2,
+        n_orthogonal_sets=4,
+        planes_per_set=16,
+        use_positional_plane=True,
+        pos_planes=16
+    ).to(device)
+    cp_params = sum(p.numel() for p in clifford_pos.parameters())
+    print(f'  Parameters: {cp_params:,}')
+    cp_acc = train_and_eval(clifford_pos, vocab_size, n_pairs, n_queries, epochs)
+    print(f'  Best: {cp_acc:.1f}%')
+    print()
+
     print('='*70)
     print('SUMMARY')
     print('='*70)
-    print(f'Random:      {100/vocab_size:.1f}%')
-    print(f'Transformer: {t_acc:.1f}%  ({t_params:,} params)')
-    print(f'Clifford:    {c_acc:.1f}%  ({c_params:,} params)')
+    print(f'Random:              {100/vocab_size:.1f}%')
+    print(f'Transformer:         {t_acc:.1f}%  ({t_params:,} params)')
+    print(f'Clifford:            {c_acc:.1f}%  ({c_params:,} params)')
+    print(f'Clifford + PosPlane: {cp_acc:.1f}%  ({cp_params:,} params)')
     print()
-    print(f'Gap to transformer: {t_acc - c_acc:.1f}%')
+    print(f'Gap to transformer (Clifford):     {t_acc - c_acc:.1f}%')
+    print(f'Gap to transformer (Clifford+Pos): {t_acc - cp_acc:.1f}%')
+    print(f'Positional plane improvement:      {cp_acc - c_acc:.1f}%')
 
 if __name__ == "__main__":
     main()
