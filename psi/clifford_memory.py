@@ -61,7 +61,7 @@ class OrthogonalBivectorBlock(nn.Module):
 
     def __init__(self, dim, n_orthogonal_sets=4, planes_per_set=4,
                  use_positional_plane=False, max_len=None, pos_planes=16,
-                 use_ltm=False, ltm_slots=64):
+                 use_ltm=False, ltm_slots=64, use_cross_bank_binding=False):
         # Note: max_len is deprecated and ignored - positional phases computed on-the-fly
         super().__init__()
         self.dim = dim
@@ -72,6 +72,7 @@ class OrthogonalBivectorBlock(nn.Module):
         self.pos_planes = pos_planes
         self.use_ltm = use_ltm
         self.ltm_slots = ltm_slots
+        self.use_cross_bank_binding = use_cross_bank_binding
 
         # Content-based phase encoders
         self.key_encoder = nn.Sequential(
@@ -170,18 +171,62 @@ class OrthogonalBivectorBlock(nn.Module):
 
         total_retrieved = torch.zeros(B, L, D, device=x.device)
 
-        for s in range(self.n_sets):
-            key_s = key_phasor[:, :, s, :]
-            query_s = query_phasor[:, :, s, :]
+        if self.use_cross_bank_binding and self.n_sets > 1:
+            # Cross-bank binding: multiply phasors across banks to create joint address
+            # key_phasor: [B, L, n_sets, planes_per_set]
 
-            bound = key_s.unsqueeze(-1) * V.unsqueeze(-2)
-            # Use learnable retention rate for this set
-            retention = torch.sigmoid(self.retention_logits[s])
-            memory = decayed_cumsum(bound, retention)
-            retrieved = memory * query_s.conj().unsqueeze(-1)
-            retrieved = retrieved.sum(dim=2).real
+            # PARALLEL: Compute joint key/query by taking product across all banks (dim=2)
+            joint_key = torch.prod(key_phasor, dim=2)  # [B, L, planes_per_set]
+            joint_query = torch.prod(query_phasor, dim=2)  # [B, L, planes_per_set]
 
-            total_retrieved = total_retrieved + weights[s] * retrieved
+            # Bind with joint key
+            bound = joint_key.unsqueeze(-1) * V.unsqueeze(-2)  # [B, L, planes_per_set, D]
+            memory = decayed_cumsum(bound, None)
+            retrieved = memory * joint_query.conj().unsqueeze(-1)
+            cross_bank_retrieved = retrieved.sum(dim=2).real  # [B, L, D]
+
+            # PARALLEL: Also compute individual bank retrievals
+            # key_phasor: [B, L, n_sets, planes_per_set], V: [B, L, D]
+            # Bind all banks at once: [B, L, n_sets, planes_per_set, D]
+            bound_all = key_phasor.unsqueeze(-1) * V.unsqueeze(2).unsqueeze(3)  # [B, L, n_sets, planes_per_set, D]
+
+            # Cumsum along sequence for each bank (need to reshape for cumsum)
+            B, L_seq, n_s, pp, D_dim = bound_all.shape
+            bound_flat = bound_all.view(B, L_seq, n_s * pp, D_dim)  # [B, L, n_sets*planes_per_set, D]
+            memory_flat = decayed_cumsum(bound_flat, None)  # [B, L, n_sets*planes_per_set, D]
+            memory_all = memory_flat.view(B, L_seq, n_s, pp, D_dim)  # [B, L, n_sets, planes_per_set, D]
+
+            # Retrieve with conjugate queries
+            retrieved_all = memory_all * query_phasor.conj().unsqueeze(-1)  # [B, L, n_sets, planes_per_set, D]
+            retrieved_per_bank = retrieved_all.sum(dim=3).real  # [B, L, n_sets, D]
+
+            # Apply weights and sum across banks
+            # weights: [n_sets], retrieved_per_bank: [B, L, n_sets, D]
+            weighted_retrieved = retrieved_per_bank * weights.view(1, 1, -1, 1)  # [B, L, n_sets, D]
+            total_retrieved = weighted_retrieved.sum(dim=2)  # [B, L, D]
+
+            # Add cross-bank contribution (weighted equally with individual banks)
+            cross_weight = 1.0 / (self.n_sets + 1)  # Equal weight to cross-bank term
+            total_retrieved = cross_weight * (total_retrieved + cross_bank_retrieved)
+        else:
+            # PARALLEL: Process all banks at once
+            # key_phasor: [B, L, n_sets, planes_per_set], V: [B, L, D]
+            # Bind all banks: [B, L, n_sets, planes_per_set, D]
+            bound_all = key_phasor.unsqueeze(-1) * V.unsqueeze(2).unsqueeze(3)
+
+            # Cumsum along sequence (flatten banks/planes, then reshape)
+            B, L_seq, n_s, pp, D_dim = bound_all.shape
+            bound_flat = bound_all.view(B, L_seq, n_s * pp, D_dim)
+            memory_flat = decayed_cumsum(bound_flat, None)
+            memory_all = memory_flat.view(B, L_seq, n_s, pp, D_dim)
+
+            # Retrieve with conjugate queries
+            retrieved_all = memory_all * query_phasor.conj().unsqueeze(-1)  # [B, L, n_sets, planes_per_set, D]
+            retrieved_per_bank = retrieved_all.sum(dim=3).real  # [B, L, n_sets, D]
+
+            # Apply weights and sum across banks
+            weighted_retrieved = retrieved_per_bank * weights.view(1, 1, -1, 1)
+            total_retrieved = weighted_retrieved.sum(dim=2)  # [B, L, D]
 
         # Compute positional phases on-the-fly for any sequence length
         pos = torch.arange(L, device=x.device, dtype=torch.float32).unsqueeze(1)  # [L, 1]
@@ -347,7 +392,7 @@ class ContinuousDynamicsModel(nn.Module):
     def __init__(self, input_dim=3, hidden_dim=128, n_layers=4,
                  n_orthogonal_sets=4, planes_per_set=16,
                  use_positional_plane=True, pos_planes=16,
-                 use_ltm=False, ltm_slots=64):
+                 use_ltm=False, ltm_slots=64, use_cross_bank_binding=False):
         super().__init__()
         self.input_dim = input_dim
         self.hidden_dim = hidden_dim
@@ -364,7 +409,8 @@ class ContinuousDynamicsModel(nn.Module):
             OrthogonalBivectorBlock(hidden_dim, n_orthogonal_sets, planes_per_set,
                                    use_positional_plane=use_positional_plane,
                                    pos_planes=pos_planes,
-                                   use_ltm=use_ltm, ltm_slots=ltm_slots)
+                                   use_ltm=use_ltm, ltm_slots=ltm_slots,
+                                   use_cross_bank_binding=use_cross_bank_binding)
             for _ in range(n_layers)
         ])
         self.norms = nn.ModuleList([nn.LayerNorm(hidden_dim) for _ in range(n_layers)])

@@ -313,6 +313,7 @@ def run_continual_learning_experiment():
             n_orthogonal_sets=4,
             planes_per_set=16,
             use_ltm=True,
+            use_cross_bank_binding=True,
             ltm_slots=64
         ).to(device)
 
