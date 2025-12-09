@@ -119,9 +119,16 @@ class OrthogonalBivectorBlock(nn.Module):
         # - Low surprise -> less write (redundant, already know this)
         self.ltm_planes = pos_planes  # Use same number as positional planes
 
-        # LTM key encoder (separate from working memory keys for task separation)
+        # LTM key encoder with SEQUENCE-LEVEL CONTEXT
+        # Problem: Per-timestep hidden states are too similar across different dynamics
+        # Solution: Combine per-timestep state with sequence-level statistics
+        # This creates a "task fingerprint" that differs between dynamical systems
+        #
+        # Input: per-timestep hidden state (dim) + sequence context (dim*2)
+        # - seq_mean: mean of hidden states so far (global context)
+        # - seq_std: std of hidden states so far (variance signature)
         self.ltm_key_encoder = nn.Sequential(
-            nn.Linear(dim, dim),
+            nn.Linear(dim * 3, dim),  # Combine timestep + mean + std
             nn.GELU(),
             nn.Linear(dim, self.ltm_planes)
         )
@@ -339,8 +346,24 @@ class OrthogonalBivectorBlock(nn.Module):
         # across sequences. This is the TRUE long-term memory.
         # =======================================================================
 
-        # Encode LTM keys and values
-        ltm_key_phase = torch.tanh(self.ltm_key_encoder(x)) * math.pi  # [B, L, ltm_planes]
+        # Encode LTM keys with SEQUENCE-LEVEL CONTEXT
+        # Compute running mean and std of hidden states for task fingerprinting
+        # This creates a "signature" that differs between dynamical systems
+
+        # Running cumulative sum for mean computation
+        cumsum = torch.cumsum(x, dim=1)  # [B, L, D]
+        positions_for_mean = torch.arange(1, L + 1, device=x.device, dtype=torch.float32).view(1, -1, 1)
+        running_mean = cumsum / positions_for_mean  # [B, L, D]
+
+        # Running variance (using E[X^2] - E[X]^2)
+        cumsum_sq = torch.cumsum(x ** 2, dim=1)  # [B, L, D]
+        running_var = (cumsum_sq / positions_for_mean) - (running_mean ** 2)
+        running_std = (running_var.clamp(min=1e-8)).sqrt()  # [B, L, D]
+
+        # Concatenate: [timestep_state, sequence_mean, sequence_std]
+        ltm_key_input = torch.cat([x, running_mean, running_std], dim=-1)  # [B, L, D*3]
+
+        ltm_key_phase = torch.tanh(self.ltm_key_encoder(ltm_key_input)) * math.pi  # [B, L, ltm_planes]
         ltm_key_phasor = torch.exp(1j * ltm_key_phase)
         ltm_value = self.ltm_value_proj(x)  # [B, L, D]
 
