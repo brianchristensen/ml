@@ -130,18 +130,65 @@ class OrthogonalBivectorBlock(nn.Module):
         self.ltm_value_proj = nn.Linear(dim, dim)
 
         # Learnable surprise scaling (how much surprise affects write gate)
-        # surprise_gate = sigmoid(surprise_scale * surprise + surprise_bias)
-        self.surprise_scale = nn.Parameter(torch.tensor(1.0))
+        # surprise_gate = sigmoid(surprise_scale * (surprise - 0.5) + surprise_bias)
+        # Initialize scale=5.0 for good differentiation:
+        #   surprise 0.1 -> gate 0.12 (low write for familiar)
+        #   surprise 0.5 -> gate 0.50 (neutral)
+        #   surprise 0.9 -> gate 0.88 (high write for novel)
+        self.surprise_scale = nn.Parameter(torch.tensor(5.0))
         self.surprise_bias = nn.Parameter(torch.tensor(0.0))
+
+        # Learnable resonance parameters for key-based familiarity detection
+        # resonance_scale: how sharply to distinguish novel from familiar (higher = sharper)
+        # resonance_threshold: what resonance level counts as "familiar" (lower = more sensitive)
+        # WORKING MEMORY resonance params (for within-sequence surprise)
+        self.resonance_scale = nn.Parameter(torch.tensor(5.0))
+        self.resonance_threshold = nn.Parameter(torch.tensor(0.3))
+
+        # LTM-SPECIFIC resonance params (for cross-sequence surprise)
+        # LTM may need different sensitivity since it sees patterns across many sequences
+        # Initialize same as working memory but let them diverge during training
+        self.ltm_resonance_scale = nn.Parameter(torch.tensor(5.0))
+        self.ltm_resonance_threshold = nn.Parameter(torch.tensor(0.3))
+        # LTM-specific surprise->gate conversion (may need different sensitivity)
+        self.ltm_surprise_scale = nn.Parameter(torch.tensor(5.0))
+        self.ltm_surprise_bias = nn.Parameter(torch.tensor(0.0))
 
         # LTM retrieval weight (how much LTM contributes to output)
         self.ltm_weight = nn.Parameter(torch.tensor(0.5))
 
+        # PERSISTENT LTM STATE - survives across sequences!
+        # This is the key difference from per-sequence memory.
+        # ltm_key_memory: accumulated key phasors for familiarity detection
+        # ltm_binding_memory: accumulated key*value bindings for retrieval
+        # ltm_count: number of items written (for normalization)
+        # Using register_buffer so they move with the model but aren't parameters
+        self.register_buffer('ltm_key_memory', torch.zeros(self.ltm_planes, dtype=torch.complex64))
+        self.register_buffer('ltm_binding_memory', torch.zeros(self.ltm_planes, dim, dtype=torch.complex64))
+        self.register_buffer('ltm_count', torch.tensor(0.0))
+
+        # LTM decay rate - prevents unbounded growth over long training
+        self.ltm_decay = nn.Parameter(torch.tensor(0.999))
+
         # Momentum for surprise (Titans uses momentum for stable surprise metric)
         self.surprise_momentum = nn.Parameter(torch.tensor(0.9))
 
+        # Pending LTM update - stored during forward, applied after backward
+        self._pending_ltm_update = None
+
     def forward(self, x):
         B, L, D = x.shape
+
+        # Apply any pending LTM updates from previous forward pass (training mode only)
+        # This is done at the START of forward to avoid inplace modification during autograd
+        if self._pending_ltm_update is not None:
+            update = self._pending_ltm_update
+            self.ltm_key_memory.mul_(update['decay'])
+            self.ltm_binding_memory.mul_(update['decay'])
+            self.ltm_key_memory.add_(update['new_keys'])
+            self.ltm_binding_memory.add_(update['new_bindings'])
+            self.ltm_count.add_(update['count_delta'])
+            self._pending_ltm_update = None
 
         # Content-based phases
         key_phase = torch.tanh(self.key_encoder(x)) * math.pi
@@ -171,40 +218,38 @@ class OrthogonalBivectorBlock(nn.Module):
             # Get value in real space for surprise computation
             V_real = self.to_value(x)  # [B, L, D] - real values
 
-            # SURPRISE-GATED WRITING for cross-bank memory via PHASE RESONANCE
-            # Key insight: Use the same phase interference that makes retrieval work!
-            # Query memory with current key - if key matches stored keys, phases align
-            # High resonance = familiar, low resonance = novel
+            # SURPRISE-GATED WRITING via KEY RESONANCE MAGNITUDE
+            # O(n) approach: Strong resonance with prior memory = familiar = low surprise
+            # Weak resonance = novel = high surprise
+            #
+            # Key insight: When querying memory with a key that matches stored keys,
+            # the phase alignment produces large magnitude. Novel keys get random phases
+            # that partially cancel, producing smaller magnitude.
 
-            # Accumulate joint keys (shifted to exclude current timestep)
-            # key_memory[t] = sum of joint_keys from 0..t-1
-            key_memory_shifted = torch.zeros_like(joint_key)  # [B, L, planes_per_set]
-            key_memory_shifted[:, 1:, :] = torch.cumsum(joint_key[:, :-1, :], dim=1)
+            # Build memory of keys only (no values) shifted by 1 position
+            # memory_keys[t] = sum of keys from 0..t-1
+            key_memory = torch.zeros_like(joint_key)
+            key_memory[:, 1:, :] = torch.cumsum(joint_key[:, :-1, :], dim=1)  # [B, L, P]
 
-            # Query the key memory with current key (conjugate for retrieval)
-            # resonance = joint_key† · Σjoint_keys = Σ(joint_key† · joint_key_i)
-            # When current key matches a stored key: joint_key† · joint_key_i ≈ 1
-            # When keys differ: phases cancel out (destructive interference)
-            key_resonance_cb = key_memory_shifted * joint_key.conj()  # [B, L, planes_per_set]
+            # Query key memory with current key to get resonance
+            # High resonance = current key aligns with stored keys = familiar
+            resonance = key_memory * joint_query.conj()  # [B, L, P]
+            resonance_magnitude = resonance.abs().mean(dim=-1, keepdim=True)  # [B, L, 1]
 
-            # Sum across planes and take magnitude
-            # High magnitude = phases aligned = familiar key
-            # Low magnitude = phases cancelled = novel key
-            total_resonance_cb = key_resonance_cb.sum(dim=-1)  # [B, L] complex
-            resonance_magnitude_cb = total_resonance_cb.abs()  # [B, L]
+            # Normalize by position (expected magnitude grows with sqrt(n) for random phases)
+            positions = torch.arange(L, device=x.device, dtype=torch.float32).clamp(min=1.0)
+            normalized_resonance = resonance_magnitude / positions.view(1, -1, 1).sqrt()
 
-            # Normalize by number of items in memory (position) and sqrt(planes)
-            positions_cb = torch.arange(L, device=x.device, dtype=torch.float32)
-            positions_cb = positions_cb.clamp(min=1.0)  # Avoid div by 0
-            normalized_resonance_cb = resonance_magnitude_cb / (positions_cb * math.sqrt(self.planes_per_set))
-
-            # Clamp to [0, 1] for stability
-            familiarity_cb = normalized_resonance_cb.clamp(0.0, 1.0).unsqueeze(-1)  # [B, L, 1]
-
-            # Surprise = 1 - familiarity
-            # Novel key -> low familiarity -> high surprise -> write more
-            # Seen key -> high familiarity -> low surprise -> write less
-            surprise = 1.0 - familiarity_cb  # [B, L, 1]
+            # High resonance = familiar = LOW surprise
+            # Low resonance = novel = HIGH surprise
+            # Invert and scale to get surprise
+            # Use tanh for sharper cutoff, with learnable scale and threshold
+            # When normalized_resonance is ~0 (novel), surprise is high
+            # When normalized_resonance is ~1 (familiar), surprise is low
+            # Clamp scale to prevent explosion/collapse
+            scale = self.resonance_scale.clamp(min=1.0, max=20.0)
+            threshold = self.resonance_threshold.clamp(min=0.1, max=0.9)
+            surprise = 0.5 * (1.0 - torch.tanh(scale * (normalized_resonance - threshold)))  # [B, L, 1]
 
             # Convert to write gate: sigmoid centered at 0.5 surprise
             # Higher surprise -> higher gate -> more writing
@@ -289,78 +334,82 @@ class OrthogonalBivectorBlock(nn.Module):
 
         positions = torch.arange(1, L + 1, device=x.device, dtype=torch.float32)
 
-        # LTM: Titans-style surprise-gated phase memory
+        # =======================================================================
+        # PERSISTENT LTM: Titans-style surprise-gated memory that survives
+        # across sequences. This is the TRUE long-term memory.
+        # =======================================================================
+
         # Encode LTM keys and values
         ltm_key_phase = torch.tanh(self.ltm_key_encoder(x)) * math.pi  # [B, L, ltm_planes]
         ltm_key_phasor = torch.exp(1j * ltm_key_phase)
-        ltm_value = self.ltm_value_proj(x)  # [B, L, D] - keep real for surprise computation
+        ltm_value = self.ltm_value_proj(x)  # [B, L, D]
 
-        # PHASE RESONANCE SURPRISE
-        # Key insight: Use the RETRIEVAL MAGNITUDE as familiarity signal.
-        # When current key matches stored keys, phase interference is constructive
-        # -> high retrieval magnitude = familiar. Low magnitude = novel.
-        #
-        # This leverages the same phase interference that makes retrieval work!
+        # SURPRISE COMPUTATION: Query the PERSISTENT LTM key memory
+        # The persistent memory accumulates keys across ALL sequences seen during training
+        # High resonance with persistent memory = familiar pattern across training
+        # Low resonance = novel pattern never seen before
 
-        # Build a "key-only" memory to measure key familiarity
-        # Store just the keys (unit phasors), query with current key
-        # High resonance = seen this key before
-
-        # Accumulate keys (shifted to exclude current)
-        # key_memory[t] = sum of keys from 0..t-1
-        key_memory_shifted = torch.zeros_like(ltm_key_phasor)  # [B, L, ltm_planes]
-        key_memory_shifted[:, 1:, :] = torch.cumsum(ltm_key_phasor[:, :-1, :], dim=1)
-
-        # Query the key memory with current key (conjugate)
-        # resonance = key† · Σkeys = Σ(key† · key_i)
-        # When current key matches a stored key: key† · key_i ≈ 1 (phases align)
-        # When keys differ: phases cancel out (interference)
-        key_resonance = key_memory_shifted * ltm_key_phasor.conj()  # [B, L, ltm_planes]
+        # Query persistent key memory with current keys
+        # self.ltm_key_memory: [ltm_planes] - accumulated keys from all past sequences
+        # ltm_key_phasor: [B, L, ltm_planes]
+        # IMPORTANT: detach persistent memory to avoid inplace modification errors during backward
+        key_resonance = self.ltm_key_memory.detach().unsqueeze(0).unsqueeze(0) * ltm_key_phasor.conj()  # [B, L, ltm_planes]
 
         # Sum across planes and take magnitude
-        # High magnitude = phases aligned = familiar key
-        # Low magnitude = phases cancelled = novel key
         total_resonance = key_resonance.sum(dim=-1)  # [B, L] complex
         resonance_magnitude = total_resonance.abs()  # [B, L]
 
-        # Normalize by number of items in memory (position - 1)
-        # This gives us "average match strength" rather than absolute
-        positions_shifted = torch.arange(L, device=x.device, dtype=torch.float32)
-        positions_shifted = positions_shifted.clamp(min=1.0)  # Avoid div by 0
-        normalized_resonance = resonance_magnitude / (positions_shifted * math.sqrt(self.ltm_planes))
+        # Normalize by count of items in persistent memory
+        count_norm = (self.ltm_count.detach().clamp(min=1.0) * math.sqrt(self.ltm_planes))
+        normalized_resonance = resonance_magnitude / count_norm
 
-        # normalized_resonance is now in roughly [0, 1] where:
-        # - 1.0 = perfect match (current key identical to a stored key)
-        # - 0.0 = no match (random interference)
-        # - Values > 1 possible if multiple similar keys stored
+        # Apply LTM-specific learned resonance transformation
+        # Use separate scale/threshold so LTM can learn different sensitivity than working memory
+        ltm_scale = self.ltm_resonance_scale.clamp(min=1.0, max=20.0)
+        ltm_threshold = self.ltm_resonance_threshold.clamp(min=0.1, max=0.9)
 
-        # Clamp to [0, 1] for stability
-        familiarity = normalized_resonance.clamp(0.0, 1.0).unsqueeze(-1)  # [B, L, 1]
+        # Transform raw resonance magnitude through learned scale and threshold
+        # High resonance relative to threshold -> familiar -> low surprise
+        # Low resonance relative to threshold -> novel -> high surprise
+        ltm_surprise = 0.5 * (1.0 - torch.tanh(ltm_scale * (normalized_resonance - ltm_threshold)))
+        ltm_surprise = ltm_surprise.unsqueeze(-1)  # [B, L, 1]
 
-        # Surprise = 1 - familiarity
-        # Novel key -> low familiarity -> high surprise -> write more
-        # Seen key -> high familiarity -> low surprise -> write less
-        ltm_surprise = 1.0 - familiarity  # [B, L, 1]
-
-        # Convert surprise to write gate
-        # Scale so that 0.5 surprise gives 0.5 gate (centered sigmoid)
-        ltm_write_gate = torch.sigmoid(self.surprise_scale * (ltm_surprise - 0.5) + self.surprise_bias)
+        # Convert surprise to write gate using LTM-specific learnable scale
+        ltm_write_gate = torch.sigmoid(self.ltm_surprise_scale * (ltm_surprise - 0.5) + self.ltm_surprise_bias)
 
         # Bind with write gate: gated_binding = gate * key * value
         ltm_value_complex = ltm_value.to(torch.complex64)
         gated_binding = ltm_write_gate.unsqueeze(-2) * ltm_key_phasor.unsqueeze(-1) * ltm_value_complex.unsqueeze(-2)
         # gated_binding: [B, L, ltm_planes, D]
 
-        # Cumulative LTM (accumulates bindings over sequence)
-        ltm_memory = torch.cumsum(gated_binding, dim=1)  # [B, L, ltm_planes, D]
+        # RETRIEVAL: Query persistent binding memory ONLY
+        # The per-sequence memory is already handled by the cross-bank surprise-gated memory above
+        # This LTM is purely for knowledge from PAST sequences
+        # IMPORTANT: detach persistent memory to avoid inplace modification errors during backward
+        persistent_retrieved = self.ltm_binding_memory.detach().unsqueeze(0).unsqueeze(0) * ltm_key_phasor.conj().unsqueeze(-1)
+        persistent_retrieved = persistent_retrieved.sum(dim=2).real  # [B, L, D]
+        persistent_norm = (self.ltm_count.detach().clamp(min=1.0) * self.ltm_planes).sqrt()
+        ltm_retrieved = persistent_retrieved / persistent_norm
 
-        # Retrieve from LTM using same key (content-addressable)
-        ltm_retrieved = ltm_memory * ltm_key_phasor.conj().unsqueeze(-1)
-        ltm_retrieved = ltm_retrieved.sum(dim=2).real  # [B, L, D]
+        # STORE PENDING LTM UPDATE (only during training!)
+        # We store the update and apply it at the END of the forward pass
+        # to avoid inplace modification during autograd graph construction
+        if self.training:
+            with torch.no_grad():
+                # Compute the updates but don't apply yet
+                decay = self.ltm_decay.detach().clamp(min=0.9, max=0.9999)
+                # ltm_write_gate: [B, L, 1], ltm_key_phasor: [B, L, ltm_planes]
+                new_keys = (ltm_write_gate.detach() * ltm_key_phasor.detach()).mean(dim=(0, 1))  # [ltm_planes]
+                new_bindings = gated_binding.detach().mean(dim=(0, 1))  # [ltm_planes, D]
+                avg_gate = ltm_write_gate.detach().mean().item()
 
-        # Normalize by position
-        ltm_norm = torch.sqrt(positions * self.ltm_planes).view(1, L, 1)
-        ltm_retrieved = ltm_retrieved / ltm_norm
+                # Store for delayed application (after backward)
+                self._pending_ltm_update = {
+                    'decay': decay,
+                    'new_keys': new_keys,
+                    'new_bindings': new_bindings,
+                    'count_delta': avg_gate * B * L * (1 - decay)
+                }
 
         # Add LTM contribution
         total_retrieved = total_retrieved + torch.sigmoid(self.ltm_weight) * ltm_retrieved
@@ -373,7 +422,24 @@ class OrthogonalBivectorBlock(nn.Module):
         """Return LTM parameters for selective gradient scaling"""
         return list(self.ltm_key_encoder.parameters()) + \
                list(self.ltm_value_proj.parameters()) + \
-               [self.surprise_scale, self.surprise_bias, self.ltm_weight, self.surprise_momentum]
+               [self.ltm_resonance_scale, self.ltm_resonance_threshold,
+                self.ltm_surprise_scale, self.ltm_surprise_bias,
+                self.ltm_weight, self.surprise_momentum, self.ltm_decay]
+
+    def reset_ltm(self):
+        """Reset persistent LTM state (call between unrelated tasks or for ablation)"""
+        self.ltm_key_memory.zero_()
+        self.ltm_binding_memory.zero_()
+        self.ltm_count.zero_()
+
+    def get_ltm_stats(self):
+        """Return LTM statistics for monitoring"""
+        return {
+            'ltm_count': self.ltm_count.item(),
+            'ltm_key_norm': self.ltm_key_memory.abs().mean().item(),
+            'ltm_binding_norm': self.ltm_binding_memory.abs().mean().item(),
+            'ltm_decay': self.ltm_decay.item()
+        }
 
 class OrthogonalModel(nn.Module):
     def __init__(self, vocab_size, dim=64, n_layers=2, n_orthogonal_sets=4, planes_per_set=16,
