@@ -311,10 +311,7 @@ def run_continual_learning_experiment():
             hidden_dim=128,
             n_layers=4,
             n_orthogonal_sets=4,
-            planes_per_set=16,
-            use_ltm=True,
-            use_cross_bank_binding=True,
-            ltm_slots=64
+            planes_per_set=16
         ).to(device)
 
         optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=0.01)
@@ -331,10 +328,9 @@ def run_continual_learning_experiment():
         lorenz_multistep_A = multi_step_evaluate(model, lorenz_test, context_len, horizon=30)
         print(f"\n  Lorenz after Task A: MSE={lorenz_after_A:.6f}, Multi-step={lorenz_multistep_A:.6f}")
 
-        # Enable/disable surprise gating for Task B
+        # Note: Surprise gating is always on in this version
         if use_gating:
-            model.enable_surprise_gating()
-            print("\n  [Surprise gating ENABLED for Task B]")
+            print("\n  [Surprise gating is always ENABLED]")
 
         # Phase 2: Train on Chen attractor
         print("\nPhase 2: Learning Chen attractor...")
@@ -345,8 +341,7 @@ def run_continual_learning_experiment():
                 lorenz_val = evaluate(model, lorenz_ctx_test, lorenz_tgt_test)
                 print(f"  Epoch {epoch+1}: Chen={chen_val:.6f}, Lorenz={lorenz_val:.6f}")
 
-        if use_gating:
-            model.disable_surprise_gating()
+        # Note: Surprise gating stays enabled throughout
 
         # Final evaluation
         lorenz_after_B = evaluate(model, lorenz_ctx_test, lorenz_tgt_test)

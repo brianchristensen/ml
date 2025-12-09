@@ -59,20 +59,14 @@ class OrthogonalBivectorBlock(nn.Module):
     - Provides temporal/positional addressing alongside content addressing
     """
 
-    def __init__(self, dim, n_orthogonal_sets=4, planes_per_set=4,
-                 use_positional_plane=False, max_len=None, pos_planes=16,
-                 use_ltm=False, ltm_slots=64, use_cross_bank_binding=False):
-        # Note: max_len is deprecated and ignored - positional phases computed on-the-fly
+    def __init__(self, dim, n_orthogonal_sets=4, planes_per_set=4, pos_planes=16):
+        # Note: LTM, cross-bank binding, surprise gating, and positional planes are always enabled
         super().__init__()
         self.dim = dim
         self.n_sets = n_orthogonal_sets
         self.planes_per_set = planes_per_set
         self.total_planes = n_orthogonal_sets * planes_per_set
-        self.use_positional_plane = use_positional_plane
         self.pos_planes = pos_planes
-        self.use_ltm = use_ltm
-        self.ltm_slots = ltm_slots
-        self.use_cross_bank_binding = use_cross_bank_binding
 
         # Content-based phase encoders
         self.key_encoder = nn.Sequential(
@@ -99,24 +93,23 @@ class OrthogonalBivectorBlock(nn.Module):
         # Positional memory retention
         self.pos_retention_logit = nn.Parameter(torch.tensor(9.2))
 
-        # Positional phase plane (Option B)
-        if use_positional_plane:
-            # Store frequencies for on-the-fly computation (supports any sequence length)
-            freqs = torch.exp(torch.arange(0, pos_planes).float() *
-                            (-math.log(10000.0) / pos_planes))
-            self.register_buffer('pos_freqs', freqs)
+        # Positional phase plane - provides temporal/positional addressing
+        # Store frequencies for on-the-fly computation (supports any sequence length)
+        freqs = torch.exp(torch.arange(0, pos_planes).float() *
+                        (-math.log(10000.0) / pos_planes))
+        self.register_buffer('pos_freqs', freqs)
 
-            # Learnable weight for positional set (relative to content sets)
-            self.pos_weight = nn.Parameter(torch.ones(1))
+        # Learnable weight for positional set (relative to content sets)
+        self.pos_weight = nn.Parameter(torch.ones(1))
 
-            # Nonlinear mixing: content and position interact through gating
-            # Gate determines how much position influences the final address
-            self.content_pos_gate = nn.Sequential(
-                nn.Linear(dim, dim // 2),
-                nn.GELU(),
-                nn.Linear(dim // 2, 1),
-                nn.Sigmoid()  # Output in [0, 1] to blend content vs position
-            )
+        # Nonlinear mixing: content and position interact through gating
+        # Gate determines how much position influences the final address
+        self.content_pos_gate = nn.Sequential(
+            nn.Linear(dim, dim // 2),
+            nn.GELU(),
+            nn.Linear(dim // 2, 1),
+            nn.Sigmoid()  # Output in [0, 1] to blend content vs position
+        )
 
         # Long-Term Memory: Titans-style surprise-gated memory
         # Key insight from Titans (Google, 2025):
@@ -124,32 +117,28 @@ class OrthogonalBivectorBlock(nn.Module):
         # - surprise_t = ||M_{t-1}(k_t) - v_t||^2  (what memory predicts vs actual)
         # - High surprise -> more write to LTM (consolidate unexpected information)
         # - Low surprise -> less write (redundant, already know this)
-        if use_ltm:
-            self.ltm_planes = pos_planes  # Use same number as positional planes
+        self.ltm_planes = pos_planes  # Use same number as positional planes
 
-            # LTM key encoder (separate from working memory keys for task separation)
-            self.ltm_key_encoder = nn.Sequential(
-                nn.Linear(dim, dim),
-                nn.GELU(),
-                nn.Linear(dim, self.ltm_planes)
-            )
+        # LTM key encoder (separate from working memory keys for task separation)
+        self.ltm_key_encoder = nn.Sequential(
+            nn.Linear(dim, dim),
+            nn.GELU(),
+            nn.Linear(dim, self.ltm_planes)
+        )
 
-            # LTM value projection
-            self.ltm_value_proj = nn.Linear(dim, dim)
+        # LTM value projection
+        self.ltm_value_proj = nn.Linear(dim, dim)
 
-            # Learnable surprise scaling (how much surprise affects write gate)
-            # surprise_gate = sigmoid(surprise_scale * surprise + surprise_bias)
-            self.surprise_scale = nn.Parameter(torch.tensor(1.0))
-            self.surprise_bias = nn.Parameter(torch.tensor(0.0))
+        # Learnable surprise scaling (how much surprise affects write gate)
+        # surprise_gate = sigmoid(surprise_scale * surprise + surprise_bias)
+        self.surprise_scale = nn.Parameter(torch.tensor(1.0))
+        self.surprise_bias = nn.Parameter(torch.tensor(0.0))
 
-            # LTM retrieval weight (how much LTM contributes to output)
-            self.ltm_weight = nn.Parameter(torch.tensor(0.5))
+        # LTM retrieval weight (how much LTM contributes to output)
+        self.ltm_weight = nn.Parameter(torch.tensor(0.5))
 
-            # Momentum for surprise (Titans uses momentum for stable surprise metric)
-            self.surprise_momentum = nn.Parameter(torch.tensor(0.9))
-
-            # Flag for whether surprise gating is active (set during continual learning)
-            self._surprise_gating_enabled = False
+        # Momentum for surprise (Titans uses momentum for stable surprise metric)
+        self.surprise_momentum = nn.Parameter(torch.tensor(0.9))
 
     def forward(self, x):
         B, L, D = x.shape
@@ -171,7 +160,7 @@ class OrthogonalBivectorBlock(nn.Module):
 
         total_retrieved = torch.zeros(B, L, D, device=x.device)
 
-        if self.use_cross_bank_binding and self.n_sets > 1:
+        if self.n_sets > 1:
             # Cross-bank binding: multiply phasors across banks to create joint address
             # key_phasor: [B, L, n_sets, planes_per_set]
 
@@ -179,16 +168,55 @@ class OrthogonalBivectorBlock(nn.Module):
             joint_key = torch.prod(key_phasor, dim=2)  # [B, L, planes_per_set]
             joint_query = torch.prod(query_phasor, dim=2)  # [B, L, planes_per_set]
 
-            # Bind with joint key
-            bound = joint_key.unsqueeze(-1) * V.unsqueeze(-2)  # [B, L, planes_per_set, D]
+            # Get value in real space for surprise computation
+            V_real = self.to_value(x)  # [B, L, D] - real values
+
+            # SURPRISE-GATED WRITING for cross-bank memory
+            # Compute surprise: how well does current memory predict the current value?
+            # We need M_{t-1}(k_t) - what the memory predicts for key k_t
+
+            # Build shifted memory (exclude current timestep)
+            # Use V_real (not complex V) for surprise prediction
+            binding_for_pred = joint_key.unsqueeze(-1) * V_real.unsqueeze(-2).to(joint_key.dtype)  # [B, L, planes_per_set, D]
+            memory_shifted = torch.zeros_like(binding_for_pred)
+            memory_shifted[:, 1:, :, :] = torch.cumsum(binding_for_pred[:, :-1, :, :], dim=1)
+
+            # Retrieve prediction from M_{t-1}
+            prediction = memory_shifted * joint_key.conj().unsqueeze(-1)
+            prediction = prediction.sum(dim=2).real  # [B, L, D]
+
+            # CONTENT-BASED SURPRISE via Cosine Similarity
+            # Same approach as LTM: use direction, not magnitude
+            pred_norm_cb = F.normalize(prediction, dim=-1, eps=1e-8)  # [B, L, D]
+            value_norm_cb = F.normalize(V_real, dim=-1, eps=1e-8)  # [B, L, D]
+
+            # Cosine similarity for familiarity
+            familiarity_cb = (pred_norm_cb * value_norm_cb).sum(dim=-1, keepdim=True)  # [B, L, 1]
+
+            # Handle empty memory (position 0)
+            pred_mag_cb = prediction.norm(dim=-1, keepdim=True)
+            has_mem_cb = (pred_mag_cb > 1e-6).float()
+            familiarity_cb = familiarity_cb * has_mem_cb
+
+            # Convert familiarity to surprise: [-1, 1] -> [0, 1]
+            surprise = (1.0 - familiarity_cb) / 2.0  # [B, L, 1]
+
+            # Convert to write gate: sigmoid centered at 0.5 surprise
+            # Higher surprise -> higher gate -> more writing
+            write_gate = torch.sigmoid(self.surprise_scale * (surprise - 0.5) + self.surprise_bias)
+
+            # Gate the binding (gate real values, then convert to complex)
+            V_real_gated = V_real * write_gate
+            V_gated = V_real_gated.to(torch.complex64)
+
+            # Bind with joint key (using gated values)
+            bound = joint_key.unsqueeze(-1) * V_gated.unsqueeze(-2)  # [B, L, planes_per_set, D]
             memory = decayed_cumsum(bound, None)
             retrieved = memory * joint_query.conj().unsqueeze(-1)
             cross_bank_retrieved = retrieved.sum(dim=2).real  # [B, L, D]
 
-            # PARALLEL: Also compute individual bank retrievals
-            # key_phasor: [B, L, n_sets, planes_per_set], V: [B, L, D]
-            # Bind all banks at once: [B, L, n_sets, planes_per_set, D]
-            bound_all = key_phasor.unsqueeze(-1) * V.unsqueeze(2).unsqueeze(3)  # [B, L, n_sets, planes_per_set, D]
+            # PARALLEL: Also compute individual bank retrievals (also gated)
+            bound_all = key_phasor.unsqueeze(-1) * V_gated.unsqueeze(2).unsqueeze(3)  # [B, L, n_sets, planes_per_set, D]
 
             # Cumsum along sequence for each bank (need to reshape for cumsum)
             B, L_seq, n_s, pp, D_dim = bound_all.shape
@@ -201,7 +229,6 @@ class OrthogonalBivectorBlock(nn.Module):
             retrieved_per_bank = retrieved_all.sum(dim=3).real  # [B, L, n_sets, D]
 
             # Apply weights and sum across banks
-            # weights: [n_sets], retrieved_per_bank: [B, L, n_sets, D]
             weighted_retrieved = retrieved_per_bank * weights.view(1, 1, -1, 1)  # [B, L, n_sets, D]
             total_retrieved = weighted_retrieved.sum(dim=2)  # [B, L, D]
 
@@ -258,67 +285,80 @@ class OrthogonalBivectorBlock(nn.Module):
         positions = torch.arange(1, L + 1, device=x.device, dtype=torch.float32)
 
         # LTM: Titans-style surprise-gated phase memory
-        if self.use_ltm:
-            # Encode LTM keys and values
-            ltm_key_phase = torch.tanh(self.ltm_key_encoder(x)) * math.pi  # [B, L, ltm_planes]
-            ltm_key_phasor = torch.exp(1j * ltm_key_phase)
-            ltm_value = self.ltm_value_proj(x)  # [B, L, D] - keep real for surprise computation
+        # Encode LTM keys and values
+        ltm_key_phase = torch.tanh(self.ltm_key_encoder(x)) * math.pi  # [B, L, ltm_planes]
+        ltm_key_phasor = torch.exp(1j * ltm_key_phase)
+        ltm_value = self.ltm_value_proj(x)  # [B, L, D] - keep real for surprise computation
 
-            # Titans-style surprise computation:
-            # 1. First retrieve from LTM to get prediction
-            # 2. Compute prediction error as surprise
-            # 3. Use surprise to gate the write
+        # PHASE RESONANCE SURPRISE
+        # Key insight: Use the RETRIEVAL MAGNITUDE as familiarity signal.
+        # When current key matches stored keys, phase interference is constructive
+        # -> high retrieval magnitude = familiar. Low magnitude = novel.
+        #
+        # This leverages the same phase interference that makes retrieval work!
 
-            if self._surprise_gating_enabled:
-                # Build shifted memory for prediction (exclude current timestep)
-                # We need M_{t-1} to predict v_t
-                ltm_value_complex = ltm_value.to(torch.complex64)
-                binding = ltm_key_phasor.unsqueeze(-1) * ltm_value_complex.unsqueeze(-2)
-                # binding: [B, L, ltm_planes, D]
+        # Build a "key-only" memory to measure key familiarity
+        # Store just the keys (unit phasors), query with current key
+        # High resonance = seen this key before
 
-                # Shift memory: M_t uses only bindings from 0..t-1
-                ltm_memory_shifted = torch.zeros_like(binding)
-                ltm_memory_shifted[:, 1:, :, :] = torch.cumsum(binding[:, :-1, :, :], dim=1)
+        # Accumulate keys (shifted to exclude current)
+        # key_memory[t] = sum of keys from 0..t-1
+        key_memory_shifted = torch.zeros_like(ltm_key_phasor)  # [B, L, ltm_planes]
+        key_memory_shifted[:, 1:, :] = torch.cumsum(ltm_key_phasor[:, :-1, :], dim=1)
 
-                # Retrieve prediction from M_{t-1}
-                ltm_prediction = ltm_memory_shifted * ltm_key_phasor.conj().unsqueeze(-1)
-                ltm_prediction = ltm_prediction.sum(dim=2).real  # [B, L, D]
+        # Query the key memory with current key (conjugate)
+        # resonance = key† · Σkeys = Σ(key† · key_i)
+        # When current key matches a stored key: key† · key_i ≈ 1 (phases align)
+        # When keys differ: phases cancel out (interference)
+        key_resonance = key_memory_shifted * ltm_key_phasor.conj()  # [B, L, ltm_planes]
 
-                # Normalize prediction
-                positions_for_pred = positions.clone()
-                positions_for_pred[0] = 1.0  # Avoid div by 0
-                pred_norm = torch.sqrt(positions_for_pred * self.ltm_planes).view(1, L, 1)
-                ltm_prediction = ltm_prediction / pred_norm
+        # Sum across planes and take magnitude
+        # High magnitude = phases aligned = familiar key
+        # Low magnitude = phases cancelled = novel key
+        total_resonance = key_resonance.sum(dim=-1)  # [B, L] complex
+        resonance_magnitude = total_resonance.abs()  # [B, L]
 
-                # Surprise = MSE between prediction and actual value
-                # ℓ(M_{t-1}; x_t) = ||M_{t-1}(k_t) - v_t||_2^2
-                surprise = ((ltm_prediction - ltm_value) ** 2).mean(dim=-1, keepdim=True)  # [B, L, 1]
+        # Normalize by number of items in memory (position - 1)
+        # This gives us "average match strength" rather than absolute
+        positions_shifted = torch.arange(L, device=x.device, dtype=torch.float32)
+        positions_shifted = positions_shifted.clamp(min=1.0)  # Avoid div by 0
+        normalized_resonance = resonance_magnitude / (positions_shifted * math.sqrt(self.ltm_planes))
 
-                # Convert surprise to write gate using learnable scaling
-                # Higher surprise -> higher gate -> more writing
-                write_gate = torch.sigmoid(self.surprise_scale * surprise + self.surprise_bias)
-            else:
-                # During initial training, write everything (no gating)
-                write_gate = torch.ones(B, L, 1, device=x.device)
+        # normalized_resonance is now in roughly [0, 1] where:
+        # - 1.0 = perfect match (current key identical to a stored key)
+        # - 0.0 = no match (random interference)
+        # - Values > 1 possible if multiple similar keys stored
 
-            # Bind with write gate: gated_binding = gate * key * value
-            ltm_value_complex = ltm_value.to(torch.complex64)
-            gated_binding = write_gate.unsqueeze(-2) * ltm_key_phasor.unsqueeze(-1) * ltm_value_complex.unsqueeze(-2)
-            # gated_binding: [B, L, ltm_planes, D]
+        # Clamp to [0, 1] for stability
+        familiarity = normalized_resonance.clamp(0.0, 1.0).unsqueeze(-1)  # [B, L, 1]
 
-            # Cumulative LTM (accumulates bindings over sequence)
-            ltm_memory = torch.cumsum(gated_binding, dim=1)  # [B, L, ltm_planes, D]
+        # Surprise = 1 - familiarity
+        # Novel key -> low familiarity -> high surprise -> write more
+        # Seen key -> high familiarity -> low surprise -> write less
+        ltm_surprise = 1.0 - familiarity  # [B, L, 1]
 
-            # Retrieve from LTM using same key (content-addressable)
-            ltm_retrieved = ltm_memory * ltm_key_phasor.conj().unsqueeze(-1)
-            ltm_retrieved = ltm_retrieved.sum(dim=2).real  # [B, L, D]
+        # Convert surprise to write gate
+        # Scale so that 0.5 surprise gives 0.5 gate (centered sigmoid)
+        ltm_write_gate = torch.sigmoid(self.surprise_scale * (ltm_surprise - 0.5) + self.surprise_bias)
 
-            # Normalize by position
-            ltm_norm = torch.sqrt(positions * self.ltm_planes).view(1, L, 1)
-            ltm_retrieved = ltm_retrieved / ltm_norm
+        # Bind with write gate: gated_binding = gate * key * value
+        ltm_value_complex = ltm_value.to(torch.complex64)
+        gated_binding = ltm_write_gate.unsqueeze(-2) * ltm_key_phasor.unsqueeze(-1) * ltm_value_complex.unsqueeze(-2)
+        # gated_binding: [B, L, ltm_planes, D]
 
-            # Add LTM contribution
-            total_retrieved = total_retrieved + torch.sigmoid(self.ltm_weight) * ltm_retrieved
+        # Cumulative LTM (accumulates bindings over sequence)
+        ltm_memory = torch.cumsum(gated_binding, dim=1)  # [B, L, ltm_planes, D]
+
+        # Retrieve from LTM using same key (content-addressable)
+        ltm_retrieved = ltm_memory * ltm_key_phasor.conj().unsqueeze(-1)
+        ltm_retrieved = ltm_retrieved.sum(dim=2).real  # [B, L, D]
+
+        # Normalize by position
+        ltm_norm = torch.sqrt(positions * self.ltm_planes).view(1, L, 1)
+        ltm_retrieved = ltm_retrieved / ltm_norm
+
+        # Add LTM contribution
+        total_retrieved = total_retrieved + torch.sigmoid(self.ltm_weight) * ltm_retrieved
 
         norm = torch.sqrt(positions * self.planes_per_set).view(1, L, 1)
 
@@ -326,35 +366,18 @@ class OrthogonalBivectorBlock(nn.Module):
 
     def get_ltm_params(self):
         """Return LTM parameters for selective gradient scaling"""
-        if self.use_ltm:
-            return list(self.ltm_key_encoder.parameters()) + \
-                   list(self.ltm_value_proj.parameters()) + \
-                   [self.surprise_scale, self.surprise_bias, self.ltm_weight, self.surprise_momentum]
-        return []
-
-    def enable_surprise_gating(self):
-        """Enable surprise gating for LTM writes"""
-        if self.use_ltm:
-            self._surprise_gating_enabled = True
-
-    def disable_surprise_gating(self):
-        """Disable surprise gating (all writes go to LTM)"""
-        if self.use_ltm:
-            self._surprise_gating_enabled = False
+        return list(self.ltm_key_encoder.parameters()) + \
+               list(self.ltm_value_proj.parameters()) + \
+               [self.surprise_scale, self.surprise_bias, self.ltm_weight, self.surprise_momentum]
 
 class OrthogonalModel(nn.Module):
     def __init__(self, vocab_size, dim=64, n_layers=2, n_orthogonal_sets=4, planes_per_set=16,
-                 use_positional_plane=True, max_len=512, pos_planes=16,
-                 use_ltm=False, ltm_slots=64):
+                 pos_planes=16):
         super().__init__()
         self.vocab_size = vocab_size
-        self.use_ltm = use_ltm
         self.embed = nn.Embedding(vocab_size, dim)
         self.blocks = nn.ModuleList([
-            OrthogonalBivectorBlock(dim, n_orthogonal_sets, planes_per_set,
-                                   use_positional_plane=use_positional_plane,
-                                   max_len=max_len, pos_planes=pos_planes,
-                                   use_ltm=use_ltm, ltm_slots=ltm_slots)
+            OrthogonalBivectorBlock(dim, n_orthogonal_sets, planes_per_set, pos_planes=pos_planes)
             for _ in range(n_layers)
         ])
         self.norms = nn.ModuleList([nn.LayerNorm(dim) for _ in range(n_layers)])
@@ -374,29 +397,14 @@ class OrthogonalModel(nn.Module):
             params.extend(block.get_ltm_params())
         return params
 
-    def enable_surprise_gating(self):
-        """Enable surprise gating for continual learning"""
-        self._surprise_gating = True
-        for block in self.blocks:
-            block.enable_surprise_gating()
-
-    def disable_surprise_gating(self):
-        """Disable surprise gating"""
-        self._surprise_gating = False
-        for block in self.blocks:
-            block.disable_surprise_gating()
-
 
 class ContinuousDynamicsModel(nn.Module):
     """Clifford model for continuous dynamics (float inputs rather than tokens)"""
     def __init__(self, input_dim=3, hidden_dim=128, n_layers=4,
-                 n_orthogonal_sets=4, planes_per_set=16,
-                 use_positional_plane=True, pos_planes=16,
-                 use_ltm=False, ltm_slots=64, use_cross_bank_binding=False):
+                 n_orthogonal_sets=4, planes_per_set=16, pos_planes=16):
         super().__init__()
         self.input_dim = input_dim
         self.hidden_dim = hidden_dim
-        self.use_ltm = use_ltm
 
         # Project continuous input to hidden dim
         self.input_proj = nn.Sequential(
@@ -407,10 +415,7 @@ class ContinuousDynamicsModel(nn.Module):
 
         self.blocks = nn.ModuleList([
             OrthogonalBivectorBlock(hidden_dim, n_orthogonal_sets, planes_per_set,
-                                   use_positional_plane=use_positional_plane,
-                                   pos_planes=pos_planes,
-                                   use_ltm=use_ltm, ltm_slots=ltm_slots,
-                                   use_cross_bank_binding=use_cross_bank_binding)
+                                   pos_planes=pos_planes)
             for _ in range(n_layers)
         ])
         self.norms = nn.ModuleList([nn.LayerNorm(hidden_dim) for _ in range(n_layers)])
@@ -441,17 +446,5 @@ class ContinuousDynamicsModel(nn.Module):
         for block in self.blocks:
             params.extend(block.get_ltm_params())
         return params
-
-    def enable_surprise_gating(self):
-        """Enable surprise gating for continual learning"""
-        self._surprise_gating = True
-        for block in self.blocks:
-            block.enable_surprise_gating()
-
-    def disable_surprise_gating(self):
-        """Disable surprise gating"""
-        self._surprise_gating = False
-        for block in self.blocks:
-            block.disable_surprise_gating()
 
 

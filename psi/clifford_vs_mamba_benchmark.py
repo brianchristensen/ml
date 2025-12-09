@@ -26,8 +26,8 @@ print(f"Using device: {device}")
 # Import Orthogonal Clifford PSI from canonical source
 # ============================================================================
 
-from clifford_memory_v2 import OrthogonalModel as OrthogonalCliffordModel
-from clifford_memory_v2 import OrthogonalBivectorBlock
+from clifford_memory import OrthogonalModel as OrthogonalCliffordModel
+from clifford_memory import OrthogonalBivectorBlock
 
 
 class OrthogonalCliffordDynamics(nn.Module):
