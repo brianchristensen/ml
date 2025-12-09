@@ -493,7 +493,18 @@ class OrthogonalModel(nn.Module):
 
 
 class ContinuousDynamicsModel(nn.Module):
-    """Clifford model for continuous dynamics (float inputs rather than tokens)"""
+    """
+    Clifford model for continuous dynamics (float inputs rather than tokens).
+
+    Note on data preprocessing:
+        For continual learning, use light normalization (divide by constant scale)
+        rather than standardization (zero mean, unit variance). Standardization
+        destroys task-specific statistics that help the LTM discriminate between
+        different dynamical systems.
+
+        Example: trajs / 100.0  (light normalization)
+        Avoid: (trajs - mean) / std  (standardization)
+    """
     def __init__(self, input_dim=3, hidden_dim=128, n_layers=4,
                  n_orthogonal_sets=4, planes_per_set=16, pos_planes=16):
         super().__init__()
@@ -515,12 +526,10 @@ class ContinuousDynamicsModel(nn.Module):
         self.norms = nn.ModuleList([nn.LayerNorm(hidden_dim) for _ in range(n_layers)])
 
         # Output projection back to input dim
-        self.output_proj = nn.Sequential(
-            nn.LayerNorm(hidden_dim),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.GELU(),
-            nn.Linear(hidden_dim, input_dim)
-        )
+        # Using linear + orthogonal init for better geometry preservation
+        # and reduced catastrophic forgetting
+        self.output_proj = nn.Linear(hidden_dim, input_dim)
+        nn.init.orthogonal_(self.output_proj.weight)
 
     def forward(self, x):
         """

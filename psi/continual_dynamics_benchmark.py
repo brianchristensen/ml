@@ -1,16 +1,13 @@
 """
-Continual Learning Benchmark: Lorenz -> Turbulence -> Test Lorenz Retention
+Continual Learning Benchmark: Lorenz -> Chen -> Test Lorenz Retention
 
-Tests whether surprise-gated Clifford LTM can:
-1. Learn Lorenz attractor dynamics
-2. Learn turbulent flow dynamics (related chaotic system)
-3. Retain Lorenz knowledge due to shared dynamical structure
+Compares Clifford phasor-based memory vs standard MLP baseline on:
+1. Learning Lorenz attractor dynamics
+2. Learning Chen attractor dynamics (related chaotic system)
+3. Retaining Lorenz knowledge after learning Chen
 
-Both systems share:
-- Chaotic attractor dynamics
-- Sensitivity to initial conditions
-- Nonlinear coupling between variables
-- Conservation-like properties
+Goal: Demonstrate that Clifford's phasor-based memory provides
+better continual learning than standard MLP approaches.
 """
 
 import torch
@@ -156,14 +153,60 @@ def generate_kolmogorov_flow(batch_size, seq_len, dt=0.01):
     return trajectories
 
 
-def normalize_trajectories(trajs):
-    """Normalize to zero mean, unit variance per dimension"""
-    mean = trajs.mean(axis=(0, 1), keepdims=True)
-    std = trajs.std(axis=(0, 1), keepdims=True) + 1e-8
-    return (trajs - mean) / std
+def normalize_trajectories(trajs, scale=100.0):
+    """
+    Light normalization: divide by constant scale.
+
+    Note: Previously used zero-mean, unit-variance normalization, but this
+    destroys task-specific statistics that help the LTM discriminate between
+    different dynamical systems. Light normalization preserves these differences.
+    """
+    return trajs / scale
 
 
 # Model imported from clifford_memory.py (source of truth)
+
+
+# ============================================================================
+# MLP Baseline Model
+# ============================================================================
+
+class MLPDynamicsModel(nn.Module):
+    """
+    Standard MLP baseline for dynamics prediction.
+    Matches parameter count roughly to ContinuousDynamicsModel for fair comparison.
+    """
+    def __init__(self, input_dim=3, hidden_dim=128, n_layers=4, context_len=20):
+        super().__init__()
+        self.input_dim = input_dim
+        self.hidden_dim = hidden_dim
+        self.context_len = context_len
+
+        # Flatten context into single input
+        flat_dim = input_dim * context_len
+
+        layers = [nn.Linear(flat_dim, hidden_dim), nn.GELU()]
+        for _ in range(n_layers - 1):
+            layers.extend([nn.Linear(hidden_dim, hidden_dim), nn.GELU()])
+        layers.append(nn.Linear(hidden_dim, input_dim))
+
+        self.net = nn.Sequential(*layers)
+
+    def forward(self, x):
+        """
+        Args:
+            x: [B, L, input_dim] context sequence
+        Returns:
+            [B, L, input_dim] predictions (only last position is meaningful for this model)
+        """
+        B, L, D = x.shape
+        # Flatten the context
+        x_flat = x.view(B, -1)  # [B, L*D]
+        # Predict next state
+        pred = self.net(x_flat)  # [B, input_dim]
+        # Return in same shape as Clifford model for compatibility
+        # Repeat prediction across sequence length (only last matters)
+        return pred.unsqueeze(1).expand(-1, L, -1)
 
 
 # ============================================================================
@@ -274,22 +317,30 @@ def run_continual_learning_experiment():
     print("CONTINUAL DYNAMICS LEARNING: Lorenz -> Chen -> Test Lorenz Retention")
     print("=" * 70)
     print()
-    print("Hypothesis: Surprise-gated LTM preserves shared chaotic dynamics knowledge")
+
+    # Set seeds for reproducibility
+    np.random.seed(42)
+    torch.manual_seed(42)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(42)
+
+    print("Comparison: Clifford phasor-based memory vs standard MLP baseline")
     print()
 
-    # Generate datasets
+    # Generate datasets (reduced for fast iteration)
     print("Generating datasets...")
     context_len = 20
+    n_epochs = 15  # Increased to give Clifford more time to learn
 
     # Task A: Lorenz attractor
-    lorenz_train = normalize_trajectories(generate_lorenz(500, 200))
-    lorenz_test = normalize_trajectories(generate_lorenz(100, 200))
+    lorenz_train = normalize_trajectories(generate_lorenz(100, 100))
+    lorenz_test = normalize_trajectories(generate_lorenz(30, 100))
     lorenz_ctx_train, lorenz_tgt_train = create_sequences(lorenz_train, context_len)
     lorenz_ctx_test, lorenz_tgt_test = create_sequences(lorenz_test, context_len)
 
     # Task B: Chen attractor (similar chaotic structure to Lorenz)
-    chen_train = normalize_trajectories(generate_chen(500, 200))
-    chen_test = normalize_trajectories(generate_chen(100, 200))
+    chen_train = normalize_trajectories(generate_chen(100, 100))
+    chen_test = normalize_trajectories(generate_chen(30, 100))
     chen_ctx_train, chen_tgt_train = create_sequences(chen_train, context_len)
     chen_ctx_test, chen_tgt_test = create_sequences(chen_test, context_len)
 
@@ -297,57 +348,69 @@ def run_continual_learning_experiment():
     print(f"  Chen: {len(chen_ctx_train)} train, {len(chen_ctx_test)} test sequences")
     print()
 
-    # Create two models: with and without surprise gating
+    # Create models: Clifford variants vs MLP baseline
     results = {}
 
-    for use_gating in [True, False]:
-        name = "Surprise-Gated" if use_gating else "Baseline (No Gating)"
-        print(f"\n{'='*60}")
-        print(f"Testing: {name}")
-        print('='*60)
-
-        model = ContinuousDynamicsModel(
+    models = {
+        'Clifford-128': ContinuousDynamicsModel(
             input_dim=3,
             hidden_dim=128,
             n_layers=4,
             n_orthogonal_sets=4,
             planes_per_set=16
+        ).to(device),
+        'Clifford-32': ContinuousDynamicsModel(
+            input_dim=3,
+            hidden_dim=32,
+            n_layers=4,
+            n_orthogonal_sets=4,
+            planes_per_set=8
+        ).to(device),
+        'MLP': MLPDynamicsModel(
+            input_dim=3,
+            hidden_dim=128,
+            n_layers=4,
+            context_len=context_len
         ).to(device)
+    }
+
+    for name, model in models.items():
+        print(f"\n{'='*60}")
+        print(f"Testing: {name}")
+        print('='*60)
+
+        # Count parameters
+        n_params = sum(p.numel() for p in model.parameters())
+        print(f"  Parameters: {n_params:,}")
 
         optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=0.01)
 
         # Phase 1: Train on Lorenz
         print("\nPhase 1: Learning Lorenz attractor...")
-        for epoch in range(10):
+        for epoch in range(n_epochs):
             loss = train_epoch(model, lorenz_ctx_train, lorenz_tgt_train, optimizer, batch_size=128)
-            if (epoch + 1) % 2 == 0:
+            if (epoch + 1) % 5 == 0 or epoch == n_epochs - 1:
                 val_loss = evaluate(model, lorenz_ctx_test, lorenz_tgt_test)
-                print(f"  Epoch {epoch+1}: train={loss:.6f}, val={val_loss:.6f}")
+                print(f"  Epoch {epoch+1}: train={loss:.2e}, val={val_loss:.2e}")
 
         lorenz_after_A = evaluate(model, lorenz_ctx_test, lorenz_tgt_test)
-        lorenz_multistep_A = multi_step_evaluate(model, lorenz_test, context_len, horizon=30)
-        print(f"\n  Lorenz after Task A: MSE={lorenz_after_A:.6f}, Multi-step={lorenz_multistep_A:.6f}")
-
-        # Note: Surprise gating is always on in this version
-        if use_gating:
-            print("\n  [Surprise gating is always ENABLED]")
+        lorenz_multistep_A = multi_step_evaluate(model, lorenz_test, context_len, horizon=20, n_samples=50)
+        print(f"\n  Lorenz after Task A: MSE={lorenz_after_A:.2e}, Multi-step={lorenz_multistep_A:.2e}")
 
         # Phase 2: Train on Chen attractor
         print("\nPhase 2: Learning Chen attractor...")
-        for epoch in range(10):
+        for epoch in range(n_epochs):
             loss = train_epoch(model, chen_ctx_train, chen_tgt_train, optimizer, batch_size=128)
-            if (epoch + 1) % 2 == 0:
+            if (epoch + 1) % 5 == 0 or epoch == n_epochs - 1:
                 chen_val = evaluate(model, chen_ctx_test, chen_tgt_test)
                 lorenz_val = evaluate(model, lorenz_ctx_test, lorenz_tgt_test)
-                print(f"  Epoch {epoch+1}: Chen={chen_val:.6f}, Lorenz={lorenz_val:.6f}")
-
-        # Note: Surprise gating stays enabled throughout
+                print(f"  Epoch {epoch+1}: Chen={chen_val:.2e}, Lorenz={lorenz_val:.2e}")
 
         # Final evaluation
         lorenz_after_B = evaluate(model, lorenz_ctx_test, lorenz_tgt_test)
-        lorenz_multistep_B = multi_step_evaluate(model, lorenz_test, context_len, horizon=30)
+        lorenz_multistep_B = multi_step_evaluate(model, lorenz_test, context_len, horizon=20, n_samples=50)
         chen_final = evaluate(model, chen_ctx_test, chen_tgt_test)
-        chen_multistep = multi_step_evaluate(model, chen_test, context_len, horizon=30)
+        chen_multistep = multi_step_evaluate(model, chen_test, context_len, horizon=20, n_samples=50)
 
         # Calculate forgetting
         forgetting = (lorenz_after_B - lorenz_after_A) / lorenz_after_A * 100
@@ -365,25 +428,26 @@ def run_continual_learning_experiment():
         }
 
         print(f"\n  Final Results for {name}:")
-        print(f"    Lorenz after A: {lorenz_after_A:.6f}")
-        print(f"    Lorenz after B: {lorenz_after_B:.6f}")
+        print(f"    Lorenz after A: {lorenz_after_A:.2e}")
+        print(f"    Lorenz after B: {lorenz_after_B:.2e}")
         print(f"    Lorenz forgetting: {forgetting:+.1f}%")
         print(f"    Multi-step forgetting: {multistep_forgetting:+.1f}%")
-        print(f"    Chen final: {chen_final:.6f}")
+        print(f"    Chen final: {chen_final:.2e}")
 
     # Summary comparison
-    print("\n" + "=" * 70)
+    print("\n" + "=" * 80)
     print("SUMMARY: Continual Dynamics Learning")
-    print("=" * 70)
+    print("=" * 80)
     print()
     print("Task A: Lorenz attractor (chaotic, 3D)")
     print("Task B: Chen attractor (chaotic, 3D, similar structure)")
     print()
-    print(f"{'Metric':<30} {'Baseline':>15} {'Gated':>15} {'Diff':>12}")
-    print("-" * 72)
+    print(f"{'Metric':<26} {'MLP':>14} {'Clifford-128':>14} {'Clifford-32':>14}")
+    print("-" * 68)
 
-    baseline = results['Baseline (No Gating)']
-    gated = results['Surprise-Gated']
+    mlp = results['MLP']
+    cliff128 = results['Clifford-128']
+    cliff32 = results['Clifford-32']
 
     metrics = [
         ('Lorenz after Task A', 'lorenz_A', False),
@@ -394,26 +458,35 @@ def run_continual_learning_experiment():
     ]
 
     for label, key, is_pct in metrics:
-        b_val = baseline[key]
-        g_val = gated[key]
-        diff = g_val - b_val
+        m_val = mlp[key]
+        c128_val = cliff128[key]
+        c32_val = cliff32[key]
 
         if is_pct:
-            print(f"{label:<30} {b_val:>14.1f}% {g_val:>14.1f}% {diff:>+11.1f}%")
+            print(f"{label:<26} {m_val:>13.0f}% {c128_val:>13.0f}% {c32_val:>13.0f}%")
         else:
-            print(f"{label:<30} {b_val:>15.6f} {g_val:>15.6f} {diff:>+12.6f}")
+            print(f"{label:<26} {m_val:>14.2e} {c128_val:>14.2e} {c32_val:>14.2e}")
 
     print()
 
     # Interpretation
-    forget_diff = gated['forgetting'] - baseline['forgetting']
-    if forget_diff < -5:
-        print("✓ SIGNIFICANT: Surprise-gated LTM reduces forgetting on related dynamics!")
-        print(f"  Gated model shows {-forget_diff:.1f}% less forgetting than baseline")
-    elif forget_diff < 0:
-        print("~ MODEST: Some reduction in forgetting with surprise gating")
-    else:
-        print("✗ No benefit from surprise gating on this task")
+    print("Analysis:")
+    # Find best forgetting
+    forget_scores = {'MLP': mlp['forgetting'], 'Clifford-128': cliff128['forgetting'], 'Clifford-32': cliff32['forgetting']}
+    best_forget = min(forget_scores, key=forget_scores.get)
+    worst_forget = max(forget_scores, key=forget_scores.get)
+    print(f"  Best forgetting: {best_forget} ({forget_scores[best_forget]:.0f}%)")
+    print(f"  Worst forgetting: {worst_forget} ({forget_scores[worst_forget]:.0f}%)")
+
+    # Find best learning
+    learn_scores = {'MLP': mlp['lorenz_A'], 'Clifford-128': cliff128['lorenz_A'], 'Clifford-32': cliff32['lorenz_A']}
+    best_learn = min(learn_scores, key=learn_scores.get)
+    print(f"  Best initial learning: {best_learn} ({learn_scores[best_learn]:.2e})")
+
+    # Find best final performance
+    final_scores = {'MLP': mlp['lorenz_B'], 'Clifford-128': cliff128['lorenz_B'], 'Clifford-32': cliff32['lorenz_B']}
+    best_final = min(final_scores, key=final_scores.get)
+    print(f"  Best final Lorenz: {best_final} ({final_scores[best_final]:.2e})")
 
     return results
 
