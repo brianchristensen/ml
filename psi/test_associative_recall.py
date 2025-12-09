@@ -32,7 +32,7 @@ EOS = 2
 QUERY = 3
 FIRST_TOKEN = 4  # Keys and values start from here
 
-device = 'cuda' if torch.cuda.is_available() else 'cpu'
+device = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu'
 
 
 # ============================================================================

@@ -30,7 +30,7 @@ from dataclasses import dataclass
 from typing import Optional, Dict, List
 import json
 
-device = 'cuda' if torch.cuda.is_available() else 'cpu'
+device = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu'
 
 
 # ============================================================================

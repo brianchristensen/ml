@@ -10,7 +10,7 @@ import numpy as np
 # Import Clifford model from the canonical source
 from clifford_memory import OrthogonalModel as OrthogonalCliffordModel
 
-device = 'cuda' if torch.cuda.is_available() else 'cpu'
+device = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu'
 
 # ============================================================================
 # Transformer baseline

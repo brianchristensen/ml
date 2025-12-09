@@ -13,7 +13,7 @@ from sklearn.decomposition import PCA
 from scipy.spatial.distance import pdist, squareform
 from scipy.stats import spearmanr
 
-device = 'cuda' if torch.cuda.is_available() else 'cpu'
+device = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu'
 
 
 # =============================================================================

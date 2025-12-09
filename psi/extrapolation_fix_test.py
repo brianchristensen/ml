@@ -15,7 +15,7 @@ import numpy as np
 from torch.utils.data import DataLoader, TensorDataset
 import time
 
-device = 'cuda' if torch.cuda.is_available() else 'cpu'
+device = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu'
 
 
 # =============================================================================

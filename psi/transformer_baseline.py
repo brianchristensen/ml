@@ -22,7 +22,7 @@ import numpy as np
 import math
 from tqdm import tqdm
 
-device = 'cuda' if torch.cuda.is_available() else 'cpu'
+device = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu'
 
 
 class TransformerBlock(nn.Module):

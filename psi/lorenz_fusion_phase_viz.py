@@ -25,7 +25,7 @@ from lorenz_fusion_experiment import (
     compute_input_dim,
 )
 
-device = 'cuda' if torch.cuda.is_available() else 'cpu'
+device = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu'
 
 
 class LorenzFusionPSIWithHooks(nn.Module):

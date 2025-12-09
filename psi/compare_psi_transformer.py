@@ -44,7 +44,7 @@ from lorenz_fusion_phase_viz import (
     extract_phase_data
 )
 
-device = 'cuda' if torch.cuda.is_available() else 'cpu'
+device = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu'
 
 
 def extract_psi_final_layer(model, dataset, device, n_samples=500):
