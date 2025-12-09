@@ -366,6 +366,13 @@ def run_continual_learning_experiment():
             n_orthogonal_sets=4,
             planes_per_set=8
         ).to(device),
+        'Clifford-3': ContinuousDynamicsModel(
+            input_dim=3,
+            hidden_dim=3,
+            n_layers=4,
+            n_orthogonal_sets=1,
+            planes_per_set=1
+        ).to(device),
         'MLP': MLPDynamicsModel(
             input_dim=3,
             hidden_dim=128,
@@ -397,6 +404,11 @@ def run_continual_learning_experiment():
         lorenz_multistep_A = multi_step_evaluate(model, lorenz_test, context_len, horizon=20, n_samples=50)
         print(f"\n  Lorenz after Task A: MSE={lorenz_after_A:.2e}, Multi-step={lorenz_multistep_A:.2e}")
 
+        # Diagnostics for Clifford models after Task A
+        if hasattr(model, 'blocks'):
+            ltm_stats = model.blocks[0].get_ltm_stats()
+            print(f"  LTM stats: count={ltm_stats['ltm_count']:.0f}, key_norm={ltm_stats['ltm_key_norm']:.3f}, bind_norm={ltm_stats['ltm_binding_norm']:.3f}")
+
         # Phase 2: Train on Chen attractor
         print("\nPhase 2: Learning Chen attractor...")
         for epoch in range(n_epochs):
@@ -411,6 +423,11 @@ def run_continual_learning_experiment():
         lorenz_multistep_B = multi_step_evaluate(model, lorenz_test, context_len, horizon=20, n_samples=50)
         chen_final = evaluate(model, chen_ctx_test, chen_tgt_test)
         chen_multistep = multi_step_evaluate(model, chen_test, context_len, horizon=20, n_samples=50)
+
+        # Diagnostics for Clifford models after Task B
+        if hasattr(model, 'blocks'):
+            ltm_stats = model.blocks[0].get_ltm_stats()
+            print(f"  LTM stats: count={ltm_stats['ltm_count']:.0f}, key_norm={ltm_stats['ltm_key_norm']:.3f}, bind_norm={ltm_stats['ltm_binding_norm']:.3f}")
 
         # Calculate forgetting
         forgetting = (lorenz_after_B - lorenz_after_A) / lorenz_after_A * 100
@@ -435,19 +452,20 @@ def run_continual_learning_experiment():
         print(f"    Chen final: {chen_final:.2e}")
 
     # Summary comparison
-    print("\n" + "=" * 80)
+    print("\n" + "=" * 90)
     print("SUMMARY: Continual Dynamics Learning")
-    print("=" * 80)
+    print("=" * 90)
     print()
     print("Task A: Lorenz attractor (chaotic, 3D)")
     print("Task B: Chen attractor (chaotic, 3D, similar structure)")
     print()
-    print(f"{'Metric':<26} {'MLP':>14} {'Clifford-128':>14} {'Clifford-32':>14}")
-    print("-" * 68)
+    print(f"{'Metric':<26} {'MLP':>12} {'Cliff-128':>12} {'Cliff-32':>12} {'Cliff-3':>12}")
+    print("-" * 78)
 
     mlp = results['MLP']
     cliff128 = results['Clifford-128']
     cliff32 = results['Clifford-32']
+    cliff3 = results['Clifford-3']
 
     metrics = [
         ('Lorenz after Task A', 'lorenz_A', False),
@@ -461,32 +479,42 @@ def run_continual_learning_experiment():
         m_val = mlp[key]
         c128_val = cliff128[key]
         c32_val = cliff32[key]
+        c3_val = cliff3[key]
 
         if is_pct:
-            print(f"{label:<26} {m_val:>13.0f}% {c128_val:>13.0f}% {c32_val:>13.0f}%")
+            print(f"{label:<26} {m_val:>11.0f}% {c128_val:>11.0f}% {c32_val:>11.0f}% {c3_val:>11.0f}%")
         else:
-            print(f"{label:<26} {m_val:>14.2e} {c128_val:>14.2e} {c32_val:>14.2e}")
+            print(f"{label:<26} {m_val:>12.2e} {c128_val:>12.2e} {c32_val:>12.2e} {c3_val:>12.2e}")
 
     print()
 
     # Interpretation
     print("Analysis:")
+    all_models = {'MLP': mlp, 'Clifford-128': cliff128, 'Clifford-32': cliff32, 'Clifford-3': cliff3}
+
     # Find best forgetting
-    forget_scores = {'MLP': mlp['forgetting'], 'Clifford-128': cliff128['forgetting'], 'Clifford-32': cliff32['forgetting']}
+    forget_scores = {k: v['forgetting'] for k, v in all_models.items()}
     best_forget = min(forget_scores, key=forget_scores.get)
     worst_forget = max(forget_scores, key=forget_scores.get)
     print(f"  Best forgetting: {best_forget} ({forget_scores[best_forget]:.0f}%)")
     print(f"  Worst forgetting: {worst_forget} ({forget_scores[worst_forget]:.0f}%)")
 
     # Find best learning
-    learn_scores = {'MLP': mlp['lorenz_A'], 'Clifford-128': cliff128['lorenz_A'], 'Clifford-32': cliff32['lorenz_A']}
+    learn_scores = {k: v['lorenz_A'] for k, v in all_models.items()}
     best_learn = min(learn_scores, key=learn_scores.get)
     print(f"  Best initial learning: {best_learn} ({learn_scores[best_learn]:.2e})")
 
     # Find best final performance
-    final_scores = {'MLP': mlp['lorenz_B'], 'Clifford-128': cliff128['lorenz_B'], 'Clifford-32': cliff32['lorenz_B']}
+    final_scores = {k: v['lorenz_B'] for k, v in all_models.items()}
     best_final = min(final_scores, key=final_scores.get)
     print(f"  Best final Lorenz: {best_final} ({final_scores[best_final]:.2e})")
+
+    # Find best Chen learning (to diagnose collapse)
+    chen_scores = {k: v['chen'] for k, v in all_models.items()}
+    best_chen = min(chen_scores, key=chen_scores.get)
+    worst_chen = max(chen_scores, key=chen_scores.get)
+    print(f"  Best Chen learning: {best_chen} ({chen_scores[best_chen]:.2e})")
+    print(f"  Worst Chen learning: {worst_chen} ({chen_scores[worst_chen]:.2e})")
 
     return results
 
