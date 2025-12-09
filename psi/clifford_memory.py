@@ -171,35 +171,40 @@ class OrthogonalBivectorBlock(nn.Module):
             # Get value in real space for surprise computation
             V_real = self.to_value(x)  # [B, L, D] - real values
 
-            # SURPRISE-GATED WRITING for cross-bank memory
-            # Compute surprise: how well does current memory predict the current value?
-            # We need M_{t-1}(k_t) - what the memory predicts for key k_t
+            # SURPRISE-GATED WRITING for cross-bank memory via PHASE RESONANCE
+            # Key insight: Use the same phase interference that makes retrieval work!
+            # Query memory with current key - if key matches stored keys, phases align
+            # High resonance = familiar, low resonance = novel
 
-            # Build shifted memory (exclude current timestep)
-            # Use V_real (not complex V) for surprise prediction
-            binding_for_pred = joint_key.unsqueeze(-1) * V_real.unsqueeze(-2).to(joint_key.dtype)  # [B, L, planes_per_set, D]
-            memory_shifted = torch.zeros_like(binding_for_pred)
-            memory_shifted[:, 1:, :, :] = torch.cumsum(binding_for_pred[:, :-1, :, :], dim=1)
+            # Accumulate joint keys (shifted to exclude current timestep)
+            # key_memory[t] = sum of joint_keys from 0..t-1
+            key_memory_shifted = torch.zeros_like(joint_key)  # [B, L, planes_per_set]
+            key_memory_shifted[:, 1:, :] = torch.cumsum(joint_key[:, :-1, :], dim=1)
 
-            # Retrieve prediction from M_{t-1}
-            prediction = memory_shifted * joint_key.conj().unsqueeze(-1)
-            prediction = prediction.sum(dim=2).real  # [B, L, D]
+            # Query the key memory with current key (conjugate for retrieval)
+            # resonance = joint_key† · Σjoint_keys = Σ(joint_key† · joint_key_i)
+            # When current key matches a stored key: joint_key† · joint_key_i ≈ 1
+            # When keys differ: phases cancel out (destructive interference)
+            key_resonance_cb = key_memory_shifted * joint_key.conj()  # [B, L, planes_per_set]
 
-            # CONTENT-BASED SURPRISE via Cosine Similarity
-            # Same approach as LTM: use direction, not magnitude
-            pred_norm_cb = F.normalize(prediction, dim=-1, eps=1e-8)  # [B, L, D]
-            value_norm_cb = F.normalize(V_real, dim=-1, eps=1e-8)  # [B, L, D]
+            # Sum across planes and take magnitude
+            # High magnitude = phases aligned = familiar key
+            # Low magnitude = phases cancelled = novel key
+            total_resonance_cb = key_resonance_cb.sum(dim=-1)  # [B, L] complex
+            resonance_magnitude_cb = total_resonance_cb.abs()  # [B, L]
 
-            # Cosine similarity for familiarity
-            familiarity_cb = (pred_norm_cb * value_norm_cb).sum(dim=-1, keepdim=True)  # [B, L, 1]
+            # Normalize by number of items in memory (position) and sqrt(planes)
+            positions_cb = torch.arange(L, device=x.device, dtype=torch.float32)
+            positions_cb = positions_cb.clamp(min=1.0)  # Avoid div by 0
+            normalized_resonance_cb = resonance_magnitude_cb / (positions_cb * math.sqrt(self.planes_per_set))
 
-            # Handle empty memory (position 0)
-            pred_mag_cb = prediction.norm(dim=-1, keepdim=True)
-            has_mem_cb = (pred_mag_cb > 1e-6).float()
-            familiarity_cb = familiarity_cb * has_mem_cb
+            # Clamp to [0, 1] for stability
+            familiarity_cb = normalized_resonance_cb.clamp(0.0, 1.0).unsqueeze(-1)  # [B, L, 1]
 
-            # Convert familiarity to surprise: [-1, 1] -> [0, 1]
-            surprise = (1.0 - familiarity_cb) / 2.0  # [B, L, 1]
+            # Surprise = 1 - familiarity
+            # Novel key -> low familiarity -> high surprise -> write more
+            # Seen key -> high familiarity -> low surprise -> write less
+            surprise = 1.0 - familiarity_cb  # [B, L, 1]
 
             # Convert to write gate: sigmoid centered at 0.5 surprise
             # Higher surprise -> higher gate -> more writing
