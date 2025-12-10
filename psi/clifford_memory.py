@@ -44,152 +44,112 @@ device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 class OrthogonalBivectorBlock(nn.Module):
     """
-    Hybrid Clifford memory with separate content and positional planes.
+    Clifford memory with D-dimensional phase addressing.
 
-    Content planes: Learned phases from input for associative key->value retrieval
-    Positional planes: Fixed random phases per position for exact positional recall
+    Key insight: Use D phases (one per dimension) for BOTH content and position.
+    This gives us D parallel "planes" that all run through a single [B, L, D] cumsum.
 
-    The key insight from PhasorOpt: random phases in high dimensions are approximately
-    orthogonal, enabling O(n) positional retrieval via interference patterns.
+    Content addressing: learned D-dimensional phases from input (key/query)
+    Positional addressing: fixed random D-dimensional phases per position
 
-    Content addressing: query encodes "what content am I looking for?"
-    Positional addressing: query encodes "what position am I looking for?"
+    The D dimensions act like D independent memory banks (bloom filter style),
+    but computed in parallel via a single cumsum operation.
 
-    Both use cumsum for O(n) complexity, but:
-    - Content uses learned phases (content-dependent)
-    - Position uses fixed random phases (position-dependent only)
+    n_heads: number of independent attention heads (each gets its own phase projection)
     """
 
-    def __init__(self, dim, n_orthogonal_sets=4, planes_per_set=4, pos_planes=16, max_seq_len=8192):
+    def __init__(self, dim, max_seq_len=8192, dropout=0.1):
         super().__init__()
         self.dim = dim
-        self.n_sets = n_orthogonal_sets
-        self.planes_per_set = planes_per_set
-        self.total_planes = n_orthogonal_sets * planes_per_set
-        self.pos_planes = pos_planes
 
-        # Content-based phase encoders (linear + orthogonal init for speed)
-        self.key_encoder = nn.Linear(dim, self.total_planes)
-        nn.init.orthogonal_(self.key_encoder.weight)
-        self.query_encoder = nn.Linear(dim, self.total_planes)
-        nn.init.orthogonal_(self.query_encoder.weight)
+        # Content-based phase encoders: project to D phases (one per dimension)
+        # Multiple heads give us multiple independent addressing patterns
+        self.key_phase = nn.Linear(dim, dim)  # Output D phases
+        self.query_phase = nn.Linear(dim, dim)
+        nn.init.orthogonal_(self.key_phase.weight)
+        nn.init.orthogonal_(self.query_phase.weight)
 
         self.to_value = nn.Linear(dim, dim)
-        self.to_out = nn.Sequential(nn.LayerNorm(dim), nn.Linear(dim, dim))
+        self.to_out = nn.Sequential(
+            nn.LayerNorm(dim),
+            nn.Linear(dim, dim)
+        )
 
-        # Learnable mixing weights for content sets
-        self.set_weights = nn.Parameter(torch.ones(n_orthogonal_sets))
+        # Dropout for regularization
+        self.dropout = nn.Dropout(dropout)
 
-        # FIXED random phases for positional addressing (like PhasorOpt)
-        # Each position gets a unique random signature that's approximately orthogonal
-        # to other positions in high dimensions
-        pos_phases = torch.randn(max_seq_len, pos_planes) * math.pi
+        # FIXED random phases for positional addressing: [max_seq_len, D]
+        # Each position gets D random phases - approximately orthogonal in high D
+        pos_phases = torch.randn(max_seq_len, dim) * math.pi
         self.register_buffer('pos_phases', pos_phases)
 
-        # Learnable weight for positional set (relative to content sets)
-        self.pos_weight = nn.Parameter(torch.ones(1))
-
-        # Gate determines how much position influences the final address
-        self.content_pos_gate = nn.Sequential(
-            nn.Linear(dim, dim // 2),
+        # Learnable gate: blend content vs positional retrieval
+        self.gate = nn.Sequential(
+            nn.Linear(dim, dim // 4),
             nn.GELU(),
-            nn.Linear(dim // 2, 1),
-            nn.Sigmoid()  # Output in [0, 1] to blend content vs position
+            nn.Linear(dim // 4, 1),
+            nn.Sigmoid()
         )
 
     def forward(self, x):
         B, L, D = x.shape
 
-        # Content-based phases
-        key_phase = torch.tanh(self.key_encoder(x)) * math.pi
-        query_phase = torch.tanh(self.query_encoder(x)) * math.pi
+        # === CONTENT ADDRESSING with D-dimensional phases ===
+        key_phases = torch.tanh(self.key_phase(x)) * math.pi    # [B, L, D]
+        query_phases = torch.tanh(self.query_phase(x)) * math.pi  # [B, L, D]
 
-        key_phasor = torch.exp(1j * key_phase)
-        query_phasor = torch.exp(1j * query_phase)
+        V = self.to_value(x)  # [B, L, D]
+        V = self.dropout(V)  # Dropout on values
 
-        V = self.to_value(x).to(torch.complex64)
+        # Phasor binding with real arithmetic (faster than complex on GPU)
+        cos_key = torch.cos(key_phases)
+        sin_key = torch.sin(key_phases)
+        cos_query = torch.cos(query_phases)
+        sin_query = torch.sin(query_phases)
 
-        # Process all content sets in parallel
-        key_phasor = key_phasor.view(B, L, self.n_sets, self.planes_per_set)
-        query_phasor = query_phasor.view(B, L, self.n_sets, self.planes_per_set)
+        # Bind: V * e^(i*key_phase)
+        bound_real = V * cos_key
+        bound_imag = V * sin_key
 
-        # === RESONANCE-BASED RETRIEVAL (Optimized) ===
-        # Flatten all planes: [B, L, total_planes]
-        total_planes = self.n_sets * self.planes_per_set
-        key_phasor_flat = key_phasor.view(B, L, total_planes)
-        query_phasor_flat = query_phasor.view(B, L, total_planes)
-
-        # Store: bind value with key phasor for each plane
-        bound = key_phasor_flat.unsqueeze(-1) * V.unsqueeze(2)  # [B, L, total_planes, D]
-
-        # Accumulate memory
-        memory = torch.cumsum(bound, dim=1)  # [B, L, total_planes, D]
-
-        # Raw retrieval per plane
-        retrieved_per_plane = memory * query_phasor_flat.conj().unsqueeze(-1)  # [B, L, total_planes, D]
-
-        # === FAST RESONANCE via phase coherence ===
-        # Instead of comparing retrieval vectors, measure phase alignment directly
-        # When phases align: key_phasor * query_phasor.conj() ≈ 1 (real, positive)
-        # When misaligned: key_phasor * query_phasor.conj() ≈ random phase
-
-        # Phase alignment per plane: [B, L, total_planes]
-        phase_alignment = (key_phasor_flat * query_phasor_flat.conj()).real
-
-        # Resonance = mean alignment across planes (1 = perfect, 0 = random, -1 = anti)
-        resonance = phase_alignment.mean(dim=-1, keepdim=True)  # [B, L, 1]
-
-        # Sum retrieval across planes (interference pattern)
-        summed_retrieval = retrieved_per_plane.sum(dim=2).real  # [B, L, D]
-
-        # Amplify by resonance: high coherence = strong signal
-        # Scale factor: resonance in [-1, 1], we want positive amplification
-        resonance_gain = F.softplus(resonance + 0.5)  # [B, L, 1]
-
-        total_retrieved = summed_retrieval * resonance_gain / total_planes
-
-        # Positional addressing with FIXED random phases (like PhasorOpt)
-        # Each position has a unique random phase signature that's approximately
-        # orthogonal to other positions in high dimensions
-        pos_phase = self.pos_phases[:L]  # [L, pos_planes]
-
-        # Bind: value * e^(i*phase) for each position
-        # Using real arithmetic for efficiency (equivalent to complex phasor)
-        V_real = V.real  # [B, L, D]
-        cos_phase = torch.cos(pos_phase).unsqueeze(0)  # [1, L, pos_planes]
-        sin_phase = torch.sin(pos_phase).unsqueeze(0)  # [1, L, pos_planes]
-
-        # Bind value with positional phase: [B, L, pos_planes, D]
-        bound_real = V_real.unsqueeze(2) * cos_phase.unsqueeze(-1)
-        bound_imag = V_real.unsqueeze(2) * sin_phase.unsqueeze(-1)
-
-        # Cumsum accumulates memory: [B, L, pos_planes, D]
+        # Cumsum memory
         mem_real = torch.cumsum(bound_real, dim=1)
         mem_imag = torch.cumsum(bound_imag, dim=1)
 
-        # Unbind: same phase retrieves original value at that position
-        # retrieved = mem_real * cos + mem_imag * sin (conjugate unbind)
-        retrieved_pos = (mem_real * cos_phase.unsqueeze(-1) +
-                        mem_imag * sin_phase.unsqueeze(-1))
-        retrieved_pos = retrieved_pos.sum(dim=2)  # [B, L, D] - sum over pos_planes
+        # Unbind: mem * e^(-i*query_phase) = mem * (cos_q - i*sin_q)
+        # Real part: mem_real*cos_q + mem_imag*sin_q
+        content_retrieved = mem_real * cos_query + mem_imag * sin_query
 
-        # Gating between content and positional
-        gate = self.content_pos_gate(x)  # [B, L, 1]
-        pos_contribution = torch.sigmoid(self.pos_weight) * retrieved_pos
-        total_retrieved = gate * total_retrieved + (1 - gate) * pos_contribution
+        # === POSITIONAL ADDRESSING with fixed D-dimensional phases ===
+        pos_phases = self.pos_phases[:L]  # [L, D]
+        cos_pos = torch.cos(pos_phases)
+        sin_pos = torch.sin(pos_phases)
 
+        pos_bound_real = V * cos_pos
+        pos_bound_imag = V * sin_pos
+
+        pos_mem_real = torch.cumsum(pos_bound_real, dim=1)
+        pos_mem_imag = torch.cumsum(pos_bound_imag, dim=1)
+
+        pos_retrieved = pos_mem_real * cos_pos + pos_mem_imag * sin_pos
+
+        # === COMBINE with learned gate ===
+        gate = self.gate(x)  # [B, L, 1]
+        combined = gate * content_retrieved + (1 - gate) * pos_retrieved
+
+        # Normalize by sqrt(position)
         positions = torch.arange(1, L + 1, device=x.device, dtype=torch.float32)
-        norm = torch.sqrt(positions * self.planes_per_set).view(1, L, 1)
+        norm = torch.sqrt(positions).view(1, L, 1)
 
-        return x + self.to_out(total_retrieved / norm)
+        # Dropout on output
+        return x + self.dropout(self.to_out(combined / norm))
 
 class OrthogonalModel(nn.Module):
-    def __init__(self, vocab_size, dim=64, n_layers=2, n_orthogonal_sets=4, planes_per_set=16, pos_planes=16):
+    def __init__(self, vocab_size, dim=64, n_layers=2, max_seq_len=8192):
         super().__init__()
         self.vocab_size = vocab_size
         self.embed = nn.Embedding(vocab_size, dim)
         self.blocks = nn.ModuleList([
-            OrthogonalBivectorBlock(dim, n_orthogonal_sets, planes_per_set, pos_planes)
+            OrthogonalBivectorBlock(dim, max_seq_len)
             for _ in range(n_layers)
         ])
         self.norms = nn.ModuleList([nn.LayerNorm(dim) for _ in range(n_layers)])

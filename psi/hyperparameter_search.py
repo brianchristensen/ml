@@ -202,10 +202,10 @@ def run_hyperparameter_search():
     return all_results
 
 
-def test_scaling_with_best_config(best_dim, best_n_sets, best_planes):
+def test_scaling_with_best_config(best_dim, best_n_sets, best_planes, n_epochs=30):
     """Test the best config against increasing KV pairs."""
     print("\n" + "=" * 80)
-    print(f"SCALING TEST: dim={best_dim}, n_sets={best_n_sets}, planes={best_planes}")
+    print(f"SCALING TEST: dim={best_dim}, n_sets={best_n_sets}, planes={best_planes}, epochs={n_epochs}")
     print("=" * 80)
 
     np.random.seed(42)
@@ -221,7 +221,6 @@ def test_scaling_with_best_config(best_dim, best_n_sets, best_planes):
         seq_len = max(128, n_kv * 4 + 32)
         n_train = 2000
         n_test = 500
-        n_epochs = 15
 
         # Transformer
         tf_model = TransformerBaseline(vocab_size=vocab_size, dim=64, n_layers=4).to(device)
@@ -265,7 +264,8 @@ if __name__ == "__main__":
         dim = int(sys.argv[2]) if len(sys.argv) > 2 else 128
         n_sets = int(sys.argv[3]) if len(sys.argv) > 3 else 2
         planes = int(sys.argv[4]) if len(sys.argv) > 4 else 8
-        test_scaling_with_best_config(dim, n_sets, planes)
+        n_epochs = int(sys.argv[5]) if len(sys.argv) > 5 else 30
+        test_scaling_with_best_config(dim, n_sets, planes, n_epochs)
     else:
         results = run_hyperparameter_search()
 

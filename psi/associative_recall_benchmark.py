@@ -290,11 +290,11 @@ def run_associative_recall_benchmark():
     # Config
     vocab_size = 64
     dim = 64
-    n_layers = 4
+    n_layers = 4  # More layers for Clifford
     seq_len = 128
     n_train = 2000
     n_test = 500
-    n_epochs = 10
+    n_epochs = 20  # More training
 
     # Create models
     models = {
@@ -307,9 +307,7 @@ def run_associative_recall_benchmark():
         'Clifford': OrthogonalModel(
             vocab_size=vocab_size,
             dim=dim,
-            n_layers=n_layers,
-            n_orthogonal_sets=4,
-            planes_per_set=8
+            n_layers=n_layers
         ).to(device),
         'PhasorOpt': OptimalPhasorModel(
             vocab_size=vocab_size,
@@ -486,7 +484,7 @@ def run_scaled_associative_test():
 
     vocab_size = 64  # Match main benchmark
     dim = 64
-    n_layers = 4
+    n_layers = 1
     n_train = 2000
     n_test = 500
     n_epochs = 15  # More epochs for harder tasks
