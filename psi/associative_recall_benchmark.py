@@ -101,7 +101,7 @@ def generate_copy_task(batch_size, seq_len, vocab_size, n_to_copy=8):
 # Task 2: Induction Heads (Simplified)
 # ============================================================================
 
-def generate_induction_task(batch_size, seq_len, vocab_size):
+def generate_induction_task(batch_size, seq_len, vocab_size, n_pairs=8):
     """
     Simplified induction head task.
 
@@ -113,9 +113,11 @@ def generate_induction_task(batch_size, seq_len, vocab_size):
     Uses a fixed pattern: sequence is pairs of (key, value) tokens,
     then later the keys repeat and model must predict values.
     """
-    n_pairs = 8  # Number of key-value pairs to remember
-    key_vocab = min(vocab_size // 2, 32)  # Keys from 0..31
-    val_vocab = min(vocab_size // 2, 32)  # Values from 32..63
+    # Split vocab in half: keys from first half, values from second half
+    key_vocab = vocab_size // 2  # Keys from 0..key_vocab-1
+    val_vocab = vocab_size // 2  # Values from key_vocab..vocab_size-1
+
+    assert n_pairs <= key_vocab, f"Need n_pairs ({n_pairs}) <= key_vocab ({key_vocab})"
 
     sequences = torch.zeros(batch_size, seq_len, dtype=torch.long)
     targets = torch.full((batch_size, seq_len), -100, dtype=torch.long)
@@ -464,5 +466,93 @@ def run_associative_recall_benchmark():
     return results, timing_results
 
 
+def run_scaled_associative_test():
+    """
+    Scale up associative recall to stress-test addressing capacity.
+
+    Key question: Where does each model break as we increase key-value pairs?
+    Transformer should degrade due to attention dilution.
+    Clifford should maintain performance due to exponential address space.
+    """
+    print("=" * 80)
+    print("SCALED ASSOCIATIVE RECALL: Testing Address Space Capacity")
+    print("=" * 80)
+    print()
+
+    np.random.seed(42)
+    torch.manual_seed(42)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(42)
+
+    vocab_size = 64  # Match main benchmark
+    dim = 64
+    n_layers = 4
+    n_train = 2000
+    n_test = 500
+    n_epochs = 15  # More epochs for harder tasks
+
+    # Test with increasing number of key-value pairs
+    # Max 32 pairs with vocab_size=64 (32 keys + 32 values)
+    kv_counts = [8, 16, 24, 32]
+
+    results = {'Transformer': {}, 'Clifford': {}}
+
+    for n_kv in kv_counts:
+        seq_len = max(128, n_kv * 4 + 32)  # Minimum 128 to match main benchmark
+        print(f"\n{'='*60}")
+        print(f"Testing {n_kv} Key-Value Pairs (seq_len={seq_len})")
+        print('='*60)
+
+        # Generate data for this KV count
+        train_seq, train_tgt = generate_induction_task(n_train, seq_len, vocab_size, n_pairs=n_kv)
+        test_seq, test_tgt = generate_induction_task(n_test, seq_len, vocab_size, n_pairs=n_kv)
+
+        for name, ModelClass, kwargs in [
+            ('Transformer', TransformerBaseline, {'vocab_size': vocab_size, 'dim': dim, 'n_layers': n_layers}),
+            ('Clifford', OrthogonalModel, {'vocab_size': vocab_size, 'dim': dim, 'n_layers': n_layers,
+                                           'n_orthogonal_sets': 4, 'planes_per_set': 8}),
+        ]:
+            model = ModelClass(**kwargs).to(device)
+            n_params = sum(p.numel() for p in model.parameters())
+            print(f"\n--- {name} ({n_params:,} params) ---")
+
+            optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+
+            best_acc = 0
+            for epoch in range(n_epochs):
+                train_loss, train_acc = train_epoch(model, train_seq, train_tgt, optimizer)
+
+                if (epoch + 1) % 5 == 0:
+                    val_loss, val_acc = evaluate(model, test_seq, test_tgt)
+                    print(f"  Epoch {epoch+1}: train_acc={train_acc:.3f}, val_acc={val_acc:.3f}")
+                    best_acc = max(best_acc, val_acc)
+
+            results[name][n_kv] = best_acc
+
+            del model
+            if device == 'cuda':
+                torch.cuda.empty_cache()
+
+    # Summary
+    print("\n" + "=" * 80)
+    print("SCALING SUMMARY: Associative Recall Accuracy vs # Key-Value Pairs")
+    print("=" * 80)
+    print()
+    print(f"{'# KV Pairs':<12} {'Transformer':>15} {'Clifford':>15} {'Winner':>12}")
+    print("-" * 54)
+
+    for n_kv in kv_counts:
+        t_acc = results['Transformer'][n_kv]
+        c_acc = results['Clifford'][n_kv]
+        winner = "Clifford" if c_acc > t_acc else "Transformer" if t_acc > c_acc else "Tie"
+        print(f"{n_kv:<12} {t_acc*100:>14.1f}% {c_acc*100:>14.1f}% {winner:>12}")
+
+    return results
+
+
 if __name__ == "__main__":
-    results, timing = run_associative_recall_benchmark()
+    import sys
+    if len(sys.argv) > 1 and sys.argv[1] == "scale":
+        results = run_scaled_associative_test()
+    else:
+        results, timing = run_associative_recall_benchmark()

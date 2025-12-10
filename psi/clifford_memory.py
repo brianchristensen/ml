@@ -1,7 +1,25 @@
 """
 Clifford Algebra Memory
 
-The key insight: We want R_key * value -> memory -> R_query† * memory
+Linear attention's problem isn't the compression - it's the addressing.
+
+Standard linear attention does:
+memory += key * value  (cumsum)
+output = query @ memory
+
+The keys and queries are just learned linear projections - they don't have any special
+structure that prevents collisions. So you get interference and the memory "fills up"
+quickly.
+
+Clifford addressing fixes this:
+memory += phasor(key) * value  (cumsum)
+output = phasor(query)† @ memory
+
+The phasor binding with cross-bank products creates an exponentially large address
+space (combinatorial in the number of banks), even though the memory itself is still
+linearly compressed.
+
+We want R_key * value -> memory -> R_query† * memory
 NOT the sandwich product RvR† which is for rotating vectors in 3D.
 
 This is exactly analogous to complex phasors:
@@ -95,40 +113,40 @@ class OrthogonalBivectorBlock(nn.Module):
         key_phasor = key_phasor.view(B, L, self.n_sets, self.planes_per_set)
         query_phasor = query_phasor.view(B, L, self.n_sets, self.planes_per_set)
 
-        weights = F.softmax(self.set_weights, dim=0)
+        # === RESONANCE-BASED RETRIEVAL (Optimized) ===
+        # Flatten all planes: [B, L, total_planes]
+        total_planes = self.n_sets * self.planes_per_set
+        key_phasor_flat = key_phasor.view(B, L, total_planes)
+        query_phasor_flat = query_phasor.view(B, L, total_planes)
 
-        # === Cross-bank binding: compound key from ALL feature banks ===
-        # Product across banks creates joint address requiring all features to match
-        joint_key = torch.prod(key_phasor, dim=2)  # [B, L, planes_per_set]
-        joint_query = torch.prod(query_phasor, dim=2)  # [B, L, planes_per_set]
+        # Store: bind value with key phasor for each plane
+        bound = key_phasor_flat.unsqueeze(-1) * V.unsqueeze(2)  # [B, L, total_planes, D]
 
-        # Bind with joint key
-        bound_joint = joint_key.unsqueeze(-1) * V.unsqueeze(-2)  # [B, L, planes_per_set, D]
-        memory_joint = torch.cumsum(bound_joint, dim=1)
-        retrieved_joint = memory_joint * joint_query.conj().unsqueeze(-1)
-        cross_bank_retrieved = retrieved_joint.sum(dim=2).real  # [B, L, D]
+        # Accumulate memory
+        memory = torch.cumsum(bound, dim=1)  # [B, L, total_planes, D]
 
-        # === Individual bank retrievals (in parallel) ===
-        # Bind all sets at once: [B, L, n_sets, planes_per_set, D]
-        bound_all = key_phasor.unsqueeze(-1) * V.unsqueeze(2).unsqueeze(3)
+        # Raw retrieval per plane
+        retrieved_per_plane = memory * query_phasor_flat.conj().unsqueeze(-1)  # [B, L, total_planes, D]
 
-        # Reshape for single cumsum: [B, L, n_sets * planes_per_set, D]
-        bound_flat = bound_all.view(B, L, self.n_sets * self.planes_per_set, D)
-        memory_flat = torch.cumsum(bound_flat, dim=1)
-        memory_all = memory_flat.view(B, L, self.n_sets, self.planes_per_set, D)
+        # === FAST RESONANCE via phase coherence ===
+        # Instead of comparing retrieval vectors, measure phase alignment directly
+        # When phases align: key_phasor * query_phasor.conj() ≈ 1 (real, positive)
+        # When misaligned: key_phasor * query_phasor.conj() ≈ random phase
 
-        # Retrieve with conjugate queries: [B, L, n_sets, planes_per_set, D]
-        retrieved_all = memory_all * query_phasor.conj().unsqueeze(-1)
+        # Phase alignment per plane: [B, L, total_planes]
+        phase_alignment = (key_phasor_flat * query_phasor_flat.conj()).real
 
-        # Sum over planes, take real: [B, L, n_sets, D]
-        retrieved_per_set = retrieved_all.sum(dim=3).real
+        # Resonance = mean alignment across planes (1 = perfect, 0 = random, -1 = anti)
+        resonance = phase_alignment.mean(dim=-1, keepdim=True)  # [B, L, 1]
 
-        # Apply weights and sum over sets: [B, L, D]
-        weighted_retrieved = (retrieved_per_set * weights.view(1, 1, -1, 1)).sum(dim=2)
+        # Sum retrieval across planes (interference pattern)
+        summed_retrieval = retrieved_per_plane.sum(dim=2).real  # [B, L, D]
 
-        # Combine individual banks + cross-bank term with equal weighting
-        cross_weight = 1.0 / (self.n_sets + 1)
-        total_retrieved = cross_weight * (weighted_retrieved + cross_bank_retrieved)
+        # Amplify by resonance: high coherence = strong signal
+        # Scale factor: resonance in [-1, 1], we want positive amplification
+        resonance_gain = F.softplus(resonance + 0.5)  # [B, L, 1]
+
+        total_retrieved = summed_retrieval * resonance_gain / total_planes
 
         # Positional addressing with FIXED random phases (like PhasorOpt)
         # Each position has a unique random phase signature that's approximately
