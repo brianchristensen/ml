@@ -97,6 +97,18 @@ class OrthogonalBivectorBlock(nn.Module):
 
         weights = F.softmax(self.set_weights, dim=0)
 
+        # === Cross-bank binding: compound key from ALL feature banks ===
+        # Product across banks creates joint address requiring all features to match
+        joint_key = torch.prod(key_phasor, dim=2)  # [B, L, planes_per_set]
+        joint_query = torch.prod(query_phasor, dim=2)  # [B, L, planes_per_set]
+
+        # Bind with joint key
+        bound_joint = joint_key.unsqueeze(-1) * V.unsqueeze(-2)  # [B, L, planes_per_set, D]
+        memory_joint = torch.cumsum(bound_joint, dim=1)
+        retrieved_joint = memory_joint * joint_query.conj().unsqueeze(-1)
+        cross_bank_retrieved = retrieved_joint.sum(dim=2).real  # [B, L, D]
+
+        # === Individual bank retrievals (in parallel) ===
         # Bind all sets at once: [B, L, n_sets, planes_per_set, D]
         bound_all = key_phasor.unsqueeze(-1) * V.unsqueeze(2).unsqueeze(3)
 
@@ -112,7 +124,11 @@ class OrthogonalBivectorBlock(nn.Module):
         retrieved_per_set = retrieved_all.sum(dim=3).real
 
         # Apply weights and sum over sets: [B, L, D]
-        total_retrieved = (retrieved_per_set * weights.view(1, 1, -1, 1)).sum(dim=2)
+        weighted_retrieved = (retrieved_per_set * weights.view(1, 1, -1, 1)).sum(dim=2)
+
+        # Combine individual banks + cross-bank term with equal weighting
+        cross_weight = 1.0 / (self.n_sets + 1)
+        total_retrieved = cross_weight * (weighted_retrieved + cross_bank_retrieved)
 
         # Positional addressing with FIXED random phases (like PhasorOpt)
         # Each position has a unique random phase signature that's approximately
