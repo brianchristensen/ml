@@ -32,13 +32,11 @@ from clifford_memory import OrthogonalBivectorBlock
 
 class OrthogonalCliffordDynamics(nn.Module):
     """Dynamics predictor with Orthogonal Clifford blocks."""
-    def __init__(self, state_dim, dim=128, n_layers=4, n_orthogonal_sets=4, planes_per_set=16,
-                 use_positional_plane=False, max_len=512, pos_planes=16):
+    def __init__(self, state_dim, dim=128, n_layers=4, n_orthogonal_sets=4, planes_per_set=16):
         super().__init__()
         self.input_proj = nn.Linear(state_dim, dim)
         self.blocks = nn.ModuleList([
-            OrthogonalBivectorBlock(dim, n_orthogonal_sets, planes_per_set,
-                                   use_positional_plane, max_len, pos_planes)
+            OrthogonalBivectorBlock(dim, n_orthogonal_sets, planes_per_set)
             for _ in range(n_layers)
         ])
         self.norms = nn.ModuleList([nn.LayerNorm(dim) for _ in range(n_layers)])
@@ -402,8 +400,7 @@ def main():
     print('Clifford PSI + Positional Plane (4 sets x 16 planes + 16 pos planes)')
     print('-' * 70)
     clifford_pos = OrthogonalCliffordModel(vocab_size + 1, dim, n_layers,
-                                           n_orthogonal_sets=4, planes_per_set=16,
-                                           use_positional_plane=True, pos_planes=16).to(device)
+                                           n_orthogonal_sets=4, planes_per_set=16).to(device)
     cliff_pos_params = sum(p.numel() for p in clifford_pos.parameters())
     print(f'Parameters: {cliff_pos_params:,}')
 
@@ -438,8 +435,7 @@ def main():
 
         # Clifford + PosPlane (best variant)
         cliff = OrthogonalCliffordModel(vocab_size + 1, dim, n_layers,
-                                        n_orthogonal_sets=4, planes_per_set=16,
-                                        use_positional_plane=True, pos_planes=16).to(device)
+                                        n_orthogonal_sets=4, planes_per_set=16).to(device)
         cliff_acc = train_recall(cliff, vocab_size, test_pairs, test_queries, 300)
 
         # Mamba
@@ -473,8 +469,7 @@ def main():
     print('Orthogonal Clifford Dynamics + Positional Plane')
     print('-' * 70)
     cliff_dyn = OrthogonalCliffordDynamics(3, dyn_dim, dyn_layers,
-                                           n_orthogonal_sets=4, planes_per_set=16,
-                                           use_positional_plane=True, pos_planes=16).to(device)
+                                           n_orthogonal_sets=4, planes_per_set=16).to(device)
     cliff_dyn_params = sum(p.numel() for p in cliff_dyn.parameters())
     print(f'Parameters: {cliff_dyn_params:,}')
 
