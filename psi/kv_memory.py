@@ -211,7 +211,126 @@ class HardcodedKVMemoryModel(nn.Module):
 
 
 # ============================================================================
-# Hybrid Memory: Positional + Content-Based
+# Streamlined Hybrid Memory: No refiner, full dim as phases
+# ============================================================================
+
+class FastHybridMemoryBlock(nn.Module):
+    """
+    Streamlined hybrid memory - no refiner, same n_phases approach.
+
+    Same as HybridMemoryBlock but without the refiner network.
+    """
+    def __init__(self, dim, n_phases=32, max_seq_len=16384):
+        super().__init__()
+        self.dim = dim
+        self.n_phases = n_phases
+
+        # ===== Positional Memory =====
+        pos_phases = torch.randn(max_seq_len, n_phases) * math.pi
+        self.register_buffer('pos_phases', pos_phases)
+        self.pos_value = nn.Linear(dim, dim)
+
+        # ===== Content-Based KV Memory =====
+        self.key_encoder = nn.Linear(dim, n_phases)
+        self.kv_value = nn.Linear(dim, dim)
+
+        # Learned gate: is this a value position?
+        self.value_gate = nn.Sequential(
+            nn.Linear(dim * 2, dim),
+            nn.GELU(),
+            nn.Linear(dim, 1),
+            nn.Sigmoid()
+        )
+
+        # ===== Blending =====
+        self.blend_gate = nn.Sequential(
+            nn.Linear(dim, dim // 2),
+            nn.GELU(),
+            nn.Linear(dim // 2, 2),
+        )
+
+        # Simple output (no refiner!)
+        self.to_out = nn.Sequential(
+            nn.LayerNorm(dim),
+            nn.Linear(dim, dim)
+        )
+
+    def forward(self, x):
+        B, L, D = x.shape
+
+        # ========== Positional Memory ==========
+        pos_phases = self.pos_phases[:L]
+        pos_phasors = torch.exp(1j * pos_phases)
+
+        pos_values = self.pos_value(x).to(torch.complex64)
+
+        pos_bound = pos_phasors.unsqueeze(0).unsqueeze(-1) * pos_values.unsqueeze(2)
+        pos_memory = torch.cumsum(pos_bound, dim=1)
+
+        pos_query = torch.exp(-1j * pos_phases)
+        pos_retrieved = (pos_memory * pos_query.unsqueeze(0).unsqueeze(-1)).sum(dim=2).real
+        pos_retrieved = pos_retrieved / math.sqrt(self.n_phases)
+
+        # ========== Content-Based KV Memory ==========
+        key_phases = torch.tanh(self.key_encoder(x)) * math.pi
+        key_phasors = torch.exp(1j * key_phases)
+
+        kv_values = self.kv_value(x).to(torch.complex64)
+
+        x_shifted = torch.roll(x, shifts=1, dims=1)
+        x_shifted[:, 0] = 0
+        gate_input = torch.cat([x, x_shifted], dim=-1)
+        value_gates = self.value_gate(gate_input)
+
+        key_phasors_shifted = torch.roll(key_phasors, shifts=1, dims=1)
+        key_phasors_shifted[:, 0] = 0
+
+        kv_bound = key_phasors_shifted.unsqueeze(-1) * kv_values.unsqueeze(2)
+        kv_bound = kv_bound * value_gates.view(B, L, 1, 1)
+
+        kv_memory = torch.cumsum(kv_bound, dim=1)
+
+        gate_cumsum = torch.cumsum(value_gates, dim=1).clamp(min=1)
+
+        kv_query = torch.exp(-1j * key_phases)
+        kv_retrieved = (kv_memory * kv_query.unsqueeze(-1)).sum(dim=2).real
+        kv_retrieved = kv_retrieved / (torch.sqrt(gate_cumsum) * math.sqrt(self.n_phases))
+
+        # ========== Blend ==========
+        blend_weights = F.softmax(self.blend_gate(x), dim=-1)
+
+        blended = (
+            blend_weights[..., 0:1] * pos_retrieved +
+            blend_weights[..., 1:2] * kv_retrieved
+        )
+
+        # No refiner - direct to output
+        return x + self.to_out(blended)
+
+
+class FastHybridMemoryModel(nn.Module):
+    """Streamlined hybrid memory - faster, fewer params."""
+    def __init__(self, vocab_size, dim=64, n_layers=2, n_phases=32, max_seq_len=16384):
+        super().__init__()
+        self.embed = nn.Embedding(vocab_size, dim)
+
+        self.blocks = nn.ModuleList([
+            FastHybridMemoryBlock(dim, n_phases, max_seq_len) for _ in range(n_layers)
+        ])
+        self.norms = nn.ModuleList([nn.LayerNorm(dim) for _ in range(n_layers)])
+
+        self.norm_out = nn.LayerNorm(dim)
+        self.head = nn.Linear(dim, vocab_size)
+
+    def forward(self, x):
+        h = self.embed(x)
+        for norm, block in zip(self.norms, self.blocks):
+            h = block(norm(h))
+        return self.head(self.norm_out(h))
+
+
+# ============================================================================
+# Hybrid Memory: Positional + Content-Based (Original with refiner)
 # ============================================================================
 
 class HybridMemoryBlock(nn.Module):
@@ -358,18 +477,24 @@ class HybridMemoryModel(nn.Module):
 
 if __name__ == "__main__":
     # Quick test
-    model = KVMemoryModel(vocab_size=64, dim=64, n_layers=2, n_phases=32).to(device)
     x = torch.randint(0, 64, (2, 32), device=device)
+
+    model = KVMemoryModel(vocab_size=64, dim=64, n_layers=2, n_phases=32).to(device)
     out = model(x)
     print(f"KVMemoryModel: {x.shape} -> {out.shape}")
-    print(f"Parameters: {sum(p.numel() for p in model.parameters()):,}")
+    print(f"  Parameters: {sum(p.numel() for p in model.parameters()):,}")
 
     model2 = HardcodedKVMemoryModel(vocab_size=64, dim=64, n_layers=2, n_phases=32).to(device)
     out2 = model2(x)
     print(f"HardcodedKVMemoryModel: {x.shape} -> {out2.shape}")
-    print(f"Parameters: {sum(p.numel() for p in model2.parameters()):,}")
+    print(f"  Parameters: {sum(p.numel() for p in model2.parameters()):,}")
 
-    model3 = HybridMemoryModel(vocab_size=64, dim=64, n_layers=2, n_phases=32).to(device)
+    model3 = FastHybridMemoryModel(vocab_size=64, dim=64, n_layers=2).to(device)
     out3 = model3(x)
-    print(f"HybridMemoryModel: {x.shape} -> {out3.shape}")
-    print(f"Parameters: {sum(p.numel() for p in model3.parameters()):,}")
+    print(f"FastHybridMemoryModel: {x.shape} -> {out3.shape}")
+    print(f"  Parameters: {sum(p.numel() for p in model3.parameters()):,}")
+
+    model4 = HybridMemoryModel(vocab_size=64, dim=64, n_layers=2, n_phases=32).to(device)
+    out4 = model4(x)
+    print(f"HybridMemoryModel: {x.shape} -> {out4.shape}")
+    print(f"  Parameters: {sum(p.numel() for p in model4.parameters()):,}")
