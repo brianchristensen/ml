@@ -39,6 +39,9 @@ class PhasorBlock(nn.Module):
         self.mem1_value = nn.Linear(dim, dim)
         self.mem1_out = nn.Linear(dim, dim)
         self.offset_predictor = nn.Linear(dim * 2, dim)
+        # Magnitude weighting (like PHI - key for LM performance)
+        self.to_magnitude = nn.Linear(dim, dim)
+        self.magnitude_scale = nn.Parameter(torch.tensor(5.0))
 
         # Memory 2: Content-based KV memory (full dimensions)
         self.key_encoder = nn.Linear(dim, dim)
@@ -72,12 +75,23 @@ class PhasorBlock(nn.Module):
         pos_cos = torch.cos(pos_phases)
         pos_sin = torch.sin(pos_phases)
 
-        # ========== Memory 1: Positional with learned offset (flat) ==========
+        # ========== Memory 1: Positional with learned offset + magnitude ==========
         v1 = self.mem1_value(x)  # [B, L, P]
 
-        # Build memory
-        mem1_cos = torch.cumsum(pos_cos.unsqueeze(0) * v1, dim=1)  # [B, L, P]
-        mem1_sin = torch.cumsum(pos_sin.unsqueeze(0) * v1, dim=1)
+        # Magnitude weighting (like PHI - learned importance per token)
+        magnitude = torch.sigmoid(self.to_magnitude(x)) * self.magnitude_scale.abs()  # [B, L, D]
+        weighted_v1 = magnitude * v1
+
+        # Build memory with magnitude-weighted values
+        mem1_cos = torch.cumsum(pos_cos.unsqueeze(0) * weighted_v1, dim=1)  # [B, L, P]
+        mem1_sin = torch.cumsum(pos_sin.unsqueeze(0) * weighted_v1, dim=1)
+
+        # Normalize by accumulated magnitude
+        accumulated_magnitude = torch.cumsum(magnitude, dim=1)
+        sqrt_magnitude = torch.sqrt(accumulated_magnitude + 1e-8)
+
+        mem1_cos = mem1_cos / sqrt_magnitude
+        mem1_sin = mem1_sin / sqrt_magnitude
 
         # Learned offset for retrieval
         offset_input = torch.cat([x, pos_phases.unsqueeze(0).expand(B, -1, -1)], dim=-1)

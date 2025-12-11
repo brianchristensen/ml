@@ -21,6 +21,7 @@ class PHI(nn.Module):
         self.integration_scale = nn.Parameter(torch.ones(dim) * 0.001)
 
         self.to_magnitude = nn.Linear(dim, dim)
+        self.magnitude_scale = nn.Parameter(torch.tensor(5.0))
 
         self.to_query_offset = nn.Linear(dim, dim)
 
@@ -35,8 +36,7 @@ class PHI(nn.Module):
     def forward(self, x):
         omega = self.to_omega(x)
 
-        magnitude_scale = 5.0
-        magnitude = torch.sigmoid(self.to_magnitude(x)) * magnitude_scale
+        magnitude = torch.sigmoid(self.to_magnitude(x)) * self.magnitude_scale.abs()
 
         phi_init = self.to_phase_init(x)
 
