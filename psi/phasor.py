@@ -1,15 +1,11 @@
 """
-Phasor Memory Model
+Phasor Memory Model - Two-Pass Architecture
 
-A hybrid memory architecture combining:
-1. Positional Memory - fixed random phases per position (for Copy/recall by position)
-2. Content-Based KV Memory - learned phases from content (for Associative Recall)
+Two-pass retrieval within a single layer:
+1. Pass 1: Query by content → retrieve position phase where content matched
+2. Pass 2: Use retrieved position + learned offset → retrieve value
 
-Both are O(n) complexity using cumsum accumulation.
-
-Key insight: For associative recall, we need to bind KEYS with VALUES,
-not bind each token with its own phase. The value gate learns which
-positions are values that should bind with the previous key's phase.
+This mimics transformer's induction head mechanism in O(n) time.
 """
 
 import torch
@@ -20,39 +16,60 @@ import math
 
 class PhasorBlock(nn.Module):
     """
-    Hybrid phasor memory block combining positional and content-based retrieval.
+    Two-pass phasor memory block with LEARNED positional offset.
 
-    - Positional: Fixed random phases per position, good for Copy task
-    - Content-Based: Learned phases from content with KV binding, good for Associative Recall
-    - Blend gate learns to mix both based on context
+    Pass 1 (Position → Content):
+        - Store content under position phases
+        - Query with current position + learned offset → retrieve content from relative position
+
+    Pass 2 (Content → Value):
+        - Store values under content phases
+        - Query with retrieved content → get associated value
+
+    The key innovation: learned phase offset allows model to learn WHERE to look
+    without hardcoded torch.roll. Uses rotation: query(θ + Δ) = rotation_matrix @ query(θ)
     """
     def __init__(self, dim, n_phases=32, max_seq_len=16384):
         super().__init__()
         self.dim = dim
         self.n_phases = n_phases
 
-        # ===== Positional Memory =====
+        # Fixed random positional phases
         pos_phases = torch.randn(max_seq_len, n_phases) * math.pi
         self.register_buffer('pos_phases', pos_phases)
-        self.pos_value = nn.Linear(dim, dim)
 
-        # ===== Content-Based KV Memory =====
-        self.key_encoder = nn.Linear(dim, n_phases)
-        self.kv_value = nn.Linear(dim, dim)
+        # Content phase encoder
+        self.content_phase_encoder = nn.Linear(dim, n_phases)
 
-        # Learned gate: is this a value position?
-        self.value_gate = nn.Sequential(
-            nn.Linear(dim * 2, dim),
+        # Value encoder for positional memory
+        self.value_encoder = nn.Linear(dim, dim)
+
+        # Memory 1: Position -> Content
+        self.mem1_content_encoder = nn.Linear(dim, dim)
+
+        # LEARNED OFFSET: predicts phase offset based on current token
+        # This replaces the hardcoded torch.roll
+        self.offset_predictor = nn.Sequential(
+            nn.Linear(dim, dim),
+            nn.GELU(),
+            nn.Linear(dim, n_phases)  # Output: offset phases per phase dimension
+        )
+
+        # Memory 2: Content -> Value (standard associative memory)
+
+        # Gates
+        self.content_store_gate = nn.Sequential(
+            nn.Linear(dim, dim),
             nn.GELU(),
             nn.Linear(dim, 1),
             nn.Sigmoid()
         )
 
-        # ===== Blending =====
-        self.blend_gate = nn.Sequential(
-            nn.Linear(dim, dim // 2),
+        self.pos_store_gate = nn.Sequential(
+            nn.Linear(dim, dim),
             nn.GELU(),
-            nn.Linear(dim // 2, 2),
+            nn.Linear(dim, 1),
+            nn.Sigmoid()
         )
 
         self.to_out = nn.Sequential(
@@ -63,60 +80,96 @@ class PhasorBlock(nn.Module):
     def forward(self, x):
         B, L, D = x.shape
 
-        # ========== Positional Memory ==========
-        pos_phases = self.pos_phases[:L]
-        pos_phasors = torch.exp(1j * pos_phases)
+        # Position phases (fixed random)
+        pos_phases = self.pos_phases[:L]  # [L, n_phases]
 
-        pos_values = self.pos_value(x).to(torch.complex64)
+        # ========== Memory 1: Position -> Content (with LEARNED offset) ==========
+        # Store content[t] under pos_phase[t]
+        # Query with pos_phase[t] + learned_offset to retrieve content from relative position
+        # The offset is learned from the current token - model learns "when I see X, look back by Δ"
 
-        pos_bound = pos_phasors.unsqueeze(0).unsqueeze(-1) * pos_values.unsqueeze(2)
-        pos_memory = torch.cumsum(pos_bound, dim=1)
+        content_for_mem1 = self.mem1_content_encoder(x)  # [B, L, D]
 
-        pos_query = torch.exp(-1j * pos_phases)
-        pos_retrieved = (pos_memory * pos_query.unsqueeze(0).unsqueeze(-1)).sum(dim=2).real
-        pos_retrieved = pos_retrieved / math.sqrt(self.n_phases)
+        # Store under current position (no shift!)
+        pos_cos = torch.cos(pos_phases)  # [L, n_phases]
+        pos_sin = torch.sin(pos_phases)
 
-        # ========== Content-Based KV Memory ==========
-        key_phases = torch.tanh(self.key_encoder(x)) * math.pi
-        key_phasors = torch.exp(1j * key_phases)
+        # Bind content with position phases
+        # Shape: [1, L, n_phases] * [B, L, 1, D] -> [B, L, n_phases, D]
+        mem1_bound_cos = pos_cos.unsqueeze(0).unsqueeze(-1) * content_for_mem1.unsqueeze(2)
+        mem1_bound_sin = pos_sin.unsqueeze(0).unsqueeze(-1) * content_for_mem1.unsqueeze(2)
 
-        kv_values = self.kv_value(x).to(torch.complex64)
+        mem1_cos = torch.cumsum(mem1_bound_cos, dim=1)
+        mem1_sin = torch.cumsum(mem1_bound_sin, dim=1)
 
-        x_shifted = torch.roll(x, shifts=1, dims=1)
-        x_shifted[:, 0] = 0
-        gate_input = torch.cat([x, x_shifted], dim=-1)
-        value_gates = self.value_gate(gate_input)
+        # LEARNED OFFSET: predict phase offset from current token
+        # This replaces hardcoded torch.roll
+        offset_phases = torch.tanh(self.offset_predictor(x)) * math.pi  # [B, L, n_phases]
+        offset_cos = torch.cos(offset_phases)  # [B, L, n_phases]
+        offset_sin = torch.sin(offset_phases)
 
-        key_phasors_shifted = torch.roll(key_phasors, shifts=1, dims=1)
-        key_phasors_shifted[:, 0] = 0
+        # Apply rotation to query: query(θ + Δ) = rotation @ query(θ)
+        # cos(θ + Δ) = cos(θ)cos(Δ) - sin(θ)sin(Δ)
+        # sin(θ + Δ) = sin(θ)cos(Δ) + cos(θ)sin(Δ)
+        query1_cos_base = pos_cos.unsqueeze(0)  # [1, L, n_phases]
+        query1_sin_base = pos_sin.unsqueeze(0)
 
-        kv_bound = key_phasors_shifted.unsqueeze(-1) * kv_values.unsqueeze(2)
-        kv_bound = kv_bound * value_gates.view(B, L, 1, 1)
+        query1_cos = query1_cos_base * offset_cos - query1_sin_base * offset_sin  # [B, L, n_phases]
+        query1_sin = query1_sin_base * offset_cos + query1_cos_base * offset_sin
 
-        kv_memory = torch.cumsum(kv_bound, dim=1)
+        # Expand for retrieval
+        query1_cos = query1_cos.unsqueeze(-1)  # [B, L, n_phases, 1]
+        query1_sin = query1_sin.unsqueeze(-1)
 
-        gate_cumsum = torch.cumsum(value_gates, dim=1).clamp(min=1)
+        # Retrieved content from Memory 1
+        retrieved_content = (mem1_cos * query1_cos + mem1_sin * query1_sin).sum(dim=2)  # [B, L, D]
+        retrieved_content = retrieved_content / math.sqrt(self.n_phases)
 
-        kv_query = torch.exp(-1j * key_phases)
-        kv_retrieved = (kv_memory * kv_query.unsqueeze(-1)).sum(dim=2).real
-        kv_retrieved = kv_retrieved / (torch.sqrt(gate_cumsum) * math.sqrt(self.n_phases))
+        # ========== Memory 2: Content -> Value ==========
+        # Store values under content phases, query with retrieved_content
 
-        # ========== Blend ==========
-        blend_weights = F.softmax(self.blend_gate(x), dim=-1)
+        # Content phases for querying (from current input)
+        query_phases = torch.tanh(self.content_phase_encoder(x)) * math.pi  # [B, L, n_phases]
 
-        blended = (
-            blend_weights[..., 0:1] * pos_retrieved +
-            blend_weights[..., 1:2] * kv_retrieved
-        )
+        # Store phases from retrieved content (what key was before this value)
+        store_phases = torch.tanh(self.content_phase_encoder(retrieved_content)) * math.pi  # [B, L, n_phases]
 
-        return x + self.to_out(blended)
+        # Gates
+        key_gate = self.content_store_gate(x)  # [B, L, 1]
+        value_gate = self.pos_store_gate(x)  # [B, L, 1]
+
+        values = self.value_encoder(x)  # [B, L, D]
+
+        # Store in Memory 2
+        store_cos = torch.cos(store_phases)
+        store_sin = torch.sin(store_phases)
+
+        store_gate = value_gate
+
+        bound_cos = store_cos.unsqueeze(-1) * values.unsqueeze(2) * store_gate.unsqueeze(-1)
+        bound_sin = store_sin.unsqueeze(-1) * values.unsqueeze(2) * store_gate.unsqueeze(-1)
+
+        mem2_cos = torch.cumsum(bound_cos, dim=1)
+        mem2_sin = torch.cumsum(bound_sin, dim=1)
+
+        gate_cumsum = torch.cumsum(store_gate, dim=1).clamp(min=1)
+
+        # Query Memory 2 with current content
+        query_cos = torch.cos(query_phases).unsqueeze(-1)
+        query_sin = torch.sin(query_phases).unsqueeze(-1)
+
+        retrieved = (mem2_cos * query_cos + mem2_sin * query_sin).sum(dim=2)
+        retrieved = retrieved / (torch.sqrt(gate_cumsum) * math.sqrt(self.n_phases))
+
+        retrieved = retrieved * key_gate
+
+        return x + self.to_out(retrieved)
 
 
 class PhasorModel(nn.Module):
     """
     Full phasor memory model for sequence modeling.
-
-    Achieves 100% on both Copy and Associative Recall tasks with O(n) complexity.
+    O(n) complexity via cumsum accumulation.
     """
     def __init__(self, vocab_size, dim=64, n_layers=4, n_phases=32, max_seq_len=16384):
         super().__init__()

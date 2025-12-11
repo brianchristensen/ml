@@ -267,7 +267,7 @@ def run_benchmark():
     seq_len = 128
     n_train = 2000
     n_test = 500
-    n_epochs = 10
+    n_epochs = 40
 
     # Create models
     models = {
