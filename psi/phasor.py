@@ -19,42 +19,49 @@ import math
 
 class PhasorBlock(nn.Module):
     """
-    Phasor memory block:
-    - Memory 1: Flat [B,L,P] for speed (copy task)
-    - Memory 2: Full [B,L,P,D] for correctness (associative recall)
+    Phasor memory block with full-dimension phases (like PHI):
+    - Memory 1: Positional memory [B,L,D]
+    - Memory 2: Content-based KV memory [B,L,D,D] (full dimensions)
+
+    Using dim as n_phases removes the bottleneck that was hurting LM performance.
     """
-    def __init__(self, dim, n_phases=32, max_seq_len=16384):
+    def __init__(self, dim, n_phases=None, max_seq_len=16384):
         super().__init__()
         self.dim = dim
-        self.n_phases = n_phases
+        # Use full dimension as phases (like PHI) - ignore n_phases parameter
+        self.n_phases = dim
 
-        # Fixed random positional phases
-        pos_phases = torch.randn(max_seq_len, n_phases) * math.pi
+        # Fixed random positional phases - now [max_seq_len, dim]
+        pos_phases = torch.randn(max_seq_len, dim) * math.pi
         self.register_buffer('pos_phases', pos_phases)
 
-        # Memory 1: Positional memory with learned offset (flat for speed)
-        self.mem1_value = nn.Linear(dim, n_phases)
-        self.mem1_out = nn.Linear(n_phases, dim)
-        self.offset_predictor = nn.Linear(dim + n_phases, n_phases)
+        # Memory 1: Positional memory with learned offset (full dim)
+        self.mem1_value = nn.Linear(dim, dim)
+        self.mem1_out = nn.Linear(dim, dim)
+        self.offset_predictor = nn.Linear(dim * 2, dim)
 
-        # Memory 2: Content-based KV memory (full [B,L,P,D])
-        self.key_encoder = nn.Linear(dim, n_phases)
+        # Memory 2: Content-based KV memory (full dimensions)
+        self.key_encoder = nn.Linear(dim, dim)
         self.value_encoder = nn.Linear(dim, dim)
         # Storage key needs 2-layer MLP for associative recall
         self.storage_key = nn.Sequential(
             nn.Linear(dim * 2, dim),
             nn.GELU(),
-            nn.Linear(dim, n_phases)
+            nn.Linear(dim, dim)
         )
         self.store_gate = nn.Sequential(
             nn.Linear(dim, 1),
             nn.Sigmoid()
         )
 
-        # Output
+        # Output - takes trajectory + retrieved (like PHI)
+        # Input: [pos_out, kv_retrieved, trajectory_real, trajectory_imag] = dim * 4
         self.to_out = nn.Sequential(
-            nn.LayerNorm(dim),
-            nn.Linear(dim, dim)
+            nn.LayerNorm(dim * 4),
+            nn.Linear(dim * 4, dim * 2),
+            nn.GELU(),
+            nn.Dropout(0.1),
+            nn.Linear(dim * 2, dim)
         )
 
     def forward(self, x):
@@ -123,7 +130,13 @@ class PhasorBlock(nn.Module):
         kv_retrieved = (kv_mem_cos * query_cos_kv + kv_mem_sin * query_sin_kv).sum(dim=2)
         kv_retrieved = kv_retrieved / (torch.sqrt(gate_cumsum) * math.sqrt(P))
 
-        combined = pos_out + kv_retrieved
+        # Compute trajectory (content modulated by phase) like PHI
+        # Use the key phases as the trajectory - this gives content-dependent oscillation
+        trajectory_real = x * key_cos.mean(dim=-1, keepdim=True)  # [B, L, D]
+        trajectory_imag = x * key_sin.mean(dim=-1, keepdim=True)  # [B, L, D]
+
+        # Concatenate all signals: retrieved memory + trajectory
+        combined = torch.cat([pos_out, kv_retrieved, trajectory_real, trajectory_imag], dim=-1)
         return x + self.to_out(combined)
 
 

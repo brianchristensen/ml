@@ -16,6 +16,7 @@ import numpy as np
 import time
 
 from phasor import PhasorModel
+from phi import ParallelHolographicIntegrator
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 print(f"Device: {device}")
@@ -263,11 +264,11 @@ def run_benchmark():
     # Config
     vocab_size = 64
     dim = 64
-    n_layers = 4
+    n_layers = 2
     seq_len = 128
     n_train = 2000
     n_test = 500
-    n_epochs = 20
+    n_epochs = 30
 
     # Create models
     models = {
@@ -277,11 +278,17 @@ def run_benchmark():
             n_layers=n_layers,
             n_heads=4
         ).to(device),
+        'PHI': ParallelHolographicIntegrator(
+            vocab_size=vocab_size,
+            dim=dim,
+            num_layers=n_layers,
+            max_len=16384,
+            device=device
+        ).to(device),
         'Phasor': PhasorModel(
             vocab_size=vocab_size,
             dim=dim,
-            n_layers=n_layers,
-            n_phases=32
+            n_layers=n_layers
         ).to(device),
     }
 
@@ -389,18 +396,18 @@ def run_benchmark():
     print("SUMMARY")
     print("=" * 80)
     print()
-    print(f"{'Task':<20} {'Transformer':>14} {'Phasor':>14} {'Winner':>12}")
-    print("-" * 60)
+    print(f"{'Task':<20} {'Transformer':>14} {'PHI':>14} {'Phasor':>14}")
+    print("-" * 70)
 
     copy_tf = results['Transformer_copy']['acc']
+    copy_phi = results['PHI_copy']['acc']
     copy_ph = results['Phasor_copy']['acc']
-    copy_winner = 'Transformer' if copy_tf > copy_ph else 'Phasor' if copy_ph > copy_tf else 'Tie'
-    print(f"{'Copy/Recall Acc':<20} {copy_tf:>13.1%} {copy_ph:>13.1%} {copy_winner:>12}")
+    print(f"{'Copy/Recall Acc':<20} {copy_tf:>13.1%} {copy_phi:>13.1%} {copy_ph:>13.1%}")
 
     ind_tf = results['Transformer_induction']['acc']
+    ind_phi = results['PHI_induction']['acc']
     ind_ph = results['Phasor_induction']['acc']
-    ind_winner = 'Transformer' if ind_tf > ind_ph else 'Phasor' if ind_ph > ind_tf else 'Tie'
-    print(f"{'Assoc Recall Acc':<20} {ind_tf:>13.1%} {ind_ph:>13.1%} {ind_winner:>12}")
+    print(f"{'Assoc Recall Acc':<20} {ind_tf:>13.1%} {ind_phi:>13.1%} {ind_ph:>13.1%}")
 
     # Timing scaling
     def format_time(t):
@@ -408,12 +415,13 @@ def run_benchmark():
             return "OOM"
         return f"{t*1000:.1f}ms"
 
-    print(f"\n{'Timing':<20} {'Transformer':>14} {'Phasor':>14}")
-    print("-" * 48)
+    print(f"\n{'Timing':<20} {'Transformer':>14} {'PHI':>14} {'Phasor':>14}")
+    print("-" * 62)
     for sl in [64, 512, 8192]:
         t_tf = timing_results['Transformer'][sl]
+        t_phi = timing_results['PHI'][sl]
         t_ph = timing_results['Phasor'][sl]
-        print(f"{'@ ' + str(sl) + ' tokens':<20} {format_time(t_tf):>14} {format_time(t_ph):>14}")
+        print(f"{'@ ' + str(sl) + ' tokens':<20} {format_time(t_tf):>14} {format_time(t_phi):>14} {format_time(t_ph):>14}")
 
     # Find fastest at 8192
     times_8192 = {k: v[8192] for k, v in timing_results.items() if v[8192] != float('inf')}

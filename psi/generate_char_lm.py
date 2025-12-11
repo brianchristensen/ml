@@ -8,7 +8,7 @@ to verify it has learned coherent language patterns.
 import torch
 import torch.nn as nn
 import numpy as np
-from phase_binding_memory import PhaseBindingLanguageModel
+from phasor import PhasorModel
 
 
 device = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu'
@@ -184,11 +184,12 @@ def test_generation():
     try:
         checkpoint = torch.load('tempo_charlm_final.pt', map_location=device)
 
-        novel_model = PhaseBindingLanguageModel(
+        novel_model = PhasorModel(
             vocab_size=256,
             dim=128,
-            num_layers=8,
-            device=device
+            n_layers=4,
+            n_phases=32,
+            max_seq_len=256
         ).to(device)
 
         novel_model.load_state_dict(checkpoint['model_state_dict'])
