@@ -39,15 +39,18 @@ class PhasorBlock(nn.Module):
         # Content encoder for Memory 1
         self.mem1_content_encoder = nn.Linear(dim, dim)
 
-        # Per-head offset predictors for Memory 1
-        # Each head learns: center offset + window width
-        self.head_offset_predictors = nn.ModuleList([
-            nn.Sequential(
-                nn.Linear(dim + n_phases, dim // 2),  # Content + position
-                nn.GELU(),
-                nn.Linear(dim // 2, n_phases + 1)  # offset phases + window width
-            ) for _ in range(n_heads)
-        ])
+        # Vectorized multi-head offset predictor for Memory 1
+        # All heads predict in parallel: offset phases + window width per head
+        self.head_offset_predictor = nn.Sequential(
+            nn.Linear(dim + n_phases, dim),  # Content + position
+            nn.GELU(),
+            nn.Linear(dim, n_heads * (n_phases + 1))  # All heads: offset phases + window width
+        )
+
+        # Precompute window deltas
+        half_window = window_size // 2
+        window_deltas = torch.arange(-half_window, half_window + 1, dtype=torch.float32)
+        self.register_buffer('window_deltas', window_deltas)
 
         # Content phase encoder for Memory 2
         self.content_phase_encoder = nn.Linear(dim, n_phases)
@@ -100,47 +103,58 @@ class PhasorBlock(nn.Module):
         # Offset input: content + position
         offset_input = torch.cat([x, pos_phases.unsqueeze(0).expand(B, -1, -1)], dim=-1)
 
-        head_outputs = []
-        for h in range(H):
-            # Each head predicts offset + window width
-            offset_out = self.head_offset_predictors[h](offset_input)
-            center_offset = torch.tanh(offset_out[..., :self.n_phases]) * math.pi
-            window_width = torch.sigmoid(offset_out[..., -1:]) * 2 + 0.1  # [0.1, 2.1]
+        # All heads predict in parallel [B, L, H * (n_phases + 1)]
+        all_offset_out = self.head_offset_predictor(offset_input)
+        all_offset_out = all_offset_out.view(B, L, H, self.n_phases + 1)
 
-            # Soft window retrieval
-            head_retrieved = torch.zeros(B, L, D, device=x.device)
-            total_weight = torch.zeros(B, L, 1, device=x.device)
+        center_offsets = torch.tanh(all_offset_out[..., :self.n_phases]) * math.pi  # [B, L, H, n_phases]
+        window_widths = torch.sigmoid(all_offset_out[..., -1:]) * 2 + 0.1  # [B, L, H, 1]
 
-            half_window = self.window_size // 2
-            for delta in range(-half_window, half_window + 1):
-                # Gaussian weight
-                weight = torch.exp(-0.5 * (delta ** 2) / (window_width ** 2 + 1e-6))
+        # Vectorized soft window: expand for all window positions
+        W = len(self.window_deltas)  # window_size
+        deltas = self.window_deltas.view(1, 1, 1, W)  # [1, 1, 1, W]
 
-                # Phase offset for this window position
-                delta_phase = delta * 0.1
-                offset_phases = center_offset + delta_phase
+        # Gaussian weights for all window positions [B, L, H, W]
+        weights = torch.exp(-0.5 * (deltas ** 2) / (window_widths ** 2 + 1e-6))
 
-                offset_cos = torch.cos(offset_phases)
-                offset_sin = torch.sin(offset_phases)
+        # Phase offsets for all window positions [B, L, H, W, n_phases]
+        delta_phases = deltas.unsqueeze(-1) * 0.1  # [1, 1, 1, W, 1]
+        offset_phases = center_offsets.unsqueeze(3) + delta_phases  # [B, L, H, W, n_phases]
 
-                # Apply rotation
-                query_cos = pos_cos.unsqueeze(0) * offset_cos - pos_sin.unsqueeze(0) * offset_sin
-                query_sin = pos_sin.unsqueeze(0) * offset_cos + pos_cos.unsqueeze(0) * offset_sin
+        offset_cos = torch.cos(offset_phases)
+        offset_sin = torch.sin(offset_phases)
 
-                # Retrieve
-                query_cos_exp = query_cos.unsqueeze(-1)
-                query_sin_exp = query_sin.unsqueeze(-1)
-                retrieved = (mem1_cos * query_cos_exp + mem1_sin * query_sin_exp).sum(dim=2)
-                retrieved = retrieved / math.sqrt(self.n_phases)
+        # Expand pos_phases for broadcasting [1, L, 1, 1, n_phases]
+        pos_cos_exp = pos_cos.view(1, L, 1, 1, self.n_phases)
+        pos_sin_exp = pos_sin.view(1, L, 1, 1, self.n_phases)
 
-                head_retrieved = head_retrieved + weight * retrieved
-                total_weight = total_weight + weight
+        # Apply rotation [B, L, H, W, n_phases]
+        query_cos = pos_cos_exp * offset_cos - pos_sin_exp * offset_sin
+        query_sin = pos_sin_exp * offset_cos + pos_cos_exp * offset_sin
 
-            head_retrieved = head_retrieved / (total_weight + 1e-6)
-            head_outputs.append(head_retrieved)
+        # Retrieve from memory: mem1 is [B, L, n_phases, D]
+        # We need to compute for each (batch, position, head, window_pos)
+        # Reshape for efficient einsum
+        query_cos_flat = query_cos.view(B, L, H * W, self.n_phases)  # [B, L, H*W, n_phases]
+        query_sin_flat = query_sin.view(B, L, H * W, self.n_phases)
 
-        # Average head outputs
-        multi_head_out = torch.stack(head_outputs, dim=0).mean(dim=0)  # [B, L, D]
+        # Retrieval: sum over n_phases dimension
+        retrieved = (
+            torch.einsum('blpd,blhp->blhd', mem1_cos, query_cos_flat) +
+            torch.einsum('blpd,blhp->blhd', mem1_sin, query_sin_flat)
+        ) / math.sqrt(self.n_phases)  # [B, L, H*W, D]
+
+        # Reshape back to [B, L, H, W, D]
+        retrieved = retrieved.view(B, L, H, W, D)
+
+        # Apply Gaussian weights and sum over window [B, L, H, D]
+        weights_exp = weights.unsqueeze(-1)  # [B, L, H, W, 1]
+        weighted_sum = (retrieved * weights_exp).sum(dim=3)
+        weight_total = weights.sum(dim=3, keepdim=True)  # [B, L, H, 1]
+        head_outputs = weighted_sum / (weight_total + 1e-6)
+
+        # Average over heads [B, L, D]
+        multi_head_out = head_outputs.mean(dim=2)
 
         # ========== Memory 2: Content → Value ==========
         # Key insight: use accumulated context (via cumsum) to inform storage key
