@@ -98,8 +98,9 @@ class TemporalPhaseIntegration(nn.Module):
         # Each dimension gets its own 2D semantic space
         self.to_semantic_2d = nn.Linear(dim, dim * 2)  # Real and imaginary components
 
-        # All heads use same frequency scale (bare bones - no multi-scale)
-        # Simplicity and speed over complexity
+        # Per-head learnable frequency scale
+        # Each head can learn to operate at different timescales
+        self.head_freq_scale = nn.Parameter(torch.ones(num_heads, 1))
 
         # Content-dependent magnitude (importance weighting for memory)
         self.to_magnitude = nn.Linear(dim, dim)
@@ -163,6 +164,10 @@ class TemporalPhaseIntegration(nn.Module):
         # Each head can learn different semantic frequency patterns
         omega = omega.view(batch_size, seq_len, self.num_heads, self.head_dim)
         magnitude = magnitude.view(batch_size, seq_len, self.num_heads, self.head_dim)
+
+        # Apply per-head frequency scale (each head learns its own timescale)
+        # head_freq_scale: [num_heads, 1] -> broadcasts to [batch, seq, num_heads, head_dim]
+        omega = omega * self.head_freq_scale.view(1, 1, self.num_heads, 1)
 
         # PHASE INTEGRATION: Integrate frequency over time
         # =====================================================================

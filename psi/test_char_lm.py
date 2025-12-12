@@ -375,65 +375,65 @@ def main():
     # print()
 
     # ========================================================================
-    # Evolving Phasor Model (PHI-style dynamics + dual memory)
+    # Phasor Model
     # ========================================================================
 
-    print("=" * 80)
-    print("Training Evolving Phasor (PHI-style phase evolution)")
-    print("=" * 80)
-    print()
+    # print("=" * 80)
+    # print("Training Phasor")
+    # print("=" * 80)
+    # print()
 
-    novel_model = EvolvingPhasorModel(
-        vocab_size=vocab_size,
-        dim=128,
-        n_layers=4,
-        n_phases=128,
-        value_dim=8,
-        max_seq_len=seq_len
-    ).to(device)
+    # novel_model = EvolvingPhasorModel(
+    #     vocab_size=vocab_size,
+    #     dim=128,
+    #     n_layers=4,
+    #     n_phases=128,
+    #     value_dim=8,
+    #     max_seq_len=seq_len
+    # ).to(device)
 
-    print(f"Parameters: {sum(p.numel() for p in novel_model.parameters()):,}")
-    print()
+    # print(f"Parameters: {sum(p.numel() for p in novel_model.parameters()):,}")
+    # print()
 
-    optimizer_novel = optim.AdamW(novel_model.parameters(), lr=3e-3)
+    # optimizer_novel = optim.AdamW(novel_model.parameters(), lr=3e-3)
 
-    best_val_bpc_novel = float('inf')
-    for epoch in range(n_epochs):
-        print(f"Epoch {epoch+1}/{n_epochs}")
-        train_loss = train_epoch(novel_model, train_loader, optimizer_novel, criterion, device)
-        val_bpc = evaluate(novel_model, val_loader, device)
+    # best_val_bpc_novel = float('inf')
+    # for epoch in range(n_epochs):
+    #     print(f"Epoch {epoch+1}/{n_epochs}")
+    #     train_loss = train_epoch(novel_model, train_loader, optimizer_novel, criterion, device)
+    #     val_bpc = evaluate(novel_model, val_loader, device)
 
-        train_bpc = train_loss / math.log(2)
+    #     train_bpc = train_loss / math.log(2)
 
-        print(f"Train BPC: {train_bpc:.4f} - Val BPC: {val_bpc:.4f}")
-        print()
+    #     print(f"Train BPC: {train_bpc:.4f} - Val BPC: {val_bpc:.4f}")
+    #     print()
 
-        if val_bpc < best_val_bpc_novel:
-            best_val_bpc_novel = val_bpc
-            # Save best model
-            torch.save({
-                'epoch': epoch + 1,
-                'model_state_dict': novel_model.state_dict(),
-                'optimizer_state_dict': optimizer_novel.state_dict(),
-                'best_val_bpc': best_val_bpc_novel,
-            }, 'tempo_charlm.pt')
-            print(f"  Saved best model (Val BPC: {best_val_bpc_novel:.4f})")
+    #     if val_bpc < best_val_bpc_novel:
+    #         best_val_bpc_novel = val_bpc
+    #         # Save best model
+    #         torch.save({
+    #             'epoch': epoch + 1,
+    #             'model_state_dict': novel_model.state_dict(),
+    #             'optimizer_state_dict': optimizer_novel.state_dict(),
+    #             'best_val_bpc': best_val_bpc_novel,
+    #         }, 'tempo_charlm.pt')
+    #         print(f"  Saved best model (Val BPC: {best_val_bpc_novel:.4f})")
 
-    # Test
-    test_bpc_novel = evaluate(novel_model, test_loader, device)
-    print(f"Final Test BPC: {test_bpc_novel:.4f}")
-    print()
+    # # Test
+    # test_bpc_novel = evaluate(novel_model, test_loader, device)
+    # print(f"Final Test BPC: {test_bpc_novel:.4f}")
+    # print()
 
-    # Save final model
-    torch.save({
-        'epoch': n_epochs,
-        'model_state_dict': novel_model.state_dict(),
-        'optimizer_state_dict': optimizer_novel.state_dict(),
-        'best_val_bpc': best_val_bpc_novel,
-        'test_bpc': test_bpc_novel,
-    }, 'tempo_charlm_final.pt')
-    print("Saved final model to tempo_charlm_final.pt")
-    print()
+    # # Save final model
+    # torch.save({
+    #     'epoch': n_epochs,
+    #     'model_state_dict': novel_model.state_dict(),
+    #     'optimizer_state_dict': optimizer_novel.state_dict(),
+    #     'best_val_bpc': best_val_bpc_novel,
+    #     'test_bpc': test_bpc_novel,
+    # }, 'tempo_charlm_final.pt')
+    # print("Saved final model to tempo_charlm_final.pt")
+    # print()
 
     # ========================================================================
     # TPI Model (Temporal Phase Integration)
@@ -447,8 +447,8 @@ def main():
     tpi_model = NovelAttentionLM(
         vocab_size=vocab_size,
         dim=128,
-        num_layers=4,
-        num_heads=4,
+        num_layers=8,
+        num_heads=8,
         max_len=seq_len
     ).to(device)
 
