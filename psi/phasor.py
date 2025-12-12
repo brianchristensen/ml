@@ -1,16 +1,11 @@
 """
-Phasor Memory Model - Evolving Phase Architecture
+Phasor Memory Model - Fixed Phase Architecture
 
-Key innovation: Instead of fixed random phases, phases EVOLVE via cumsum
-of learned omega (frequency field). This gives content-dependent phase
-dynamics while maintaining O(n) complexity.
-
-Two-memory architecture:
-- Memory 1: Positional memory with evolving phases
+Two-memory architecture with FIXED random phases:
+- Memory 1: Positional memory with fixed random phases
 - Memory 2: Content-based associative memory (slim outer product)
 
-The phase evolution creates a "trajectory" through phase space that
-content rides on - combining PHI's dynamics with dual-memory structure.
+O(n) complexity via cumsum accumulation.
 """
 
 import torch
@@ -21,10 +16,7 @@ import math
 
 class PhasorBlock(nn.Module):
     """
-    Phasor block with EVOLVING phases (PHI-style dynamics + dual memory).
-
-    Key innovation: Phases evolve via cumsum of learned omega, giving
-    content-dependent phase dynamics while maintaining O(n) complexity.
+    Phasor block with FIXED random phases for stable positional addressing.
     """
     def __init__(self, dim, n_phases=128, value_dim=8, max_seq_len=16384):
         super().__init__()
@@ -32,18 +24,11 @@ class PhasorBlock(nn.Module):
         self.n_phases = n_phases
         self.value_dim = value_dim
 
-        # Phase evolution (from PHI) - learned omega creates evolving phases
-        self.to_omega = nn.Linear(dim, dim)  # Frequency field
-        self.omega_scale = nn.Parameter(torch.ones(dim) * 0.01)  # Integration scale
+        # Fixed random phases for positional memory (NOT learned)
+        pos_phases = torch.randn(max_seq_len, dim) * math.pi
+        self.register_buffer('pos_phases', pos_phases)
 
-        # Phase initialization (content-dependent starting point)
-        self.phase_init = nn.Sequential(
-            nn.Linear(dim, dim),
-            nn.GELU(),
-            nn.Linear(dim, dim)
-        )
-
-        # Memory 1: Uses evolved phases for positional memory
+        # Memory 1: Uses fixed phases for positional memory
         self.mem1_value = nn.Linear(dim, dim)
         self.mem1_out = nn.Linear(dim, dim)
         self.to_magnitude = nn.Linear(dim, dim)
@@ -69,10 +54,10 @@ class PhasorBlock(nn.Module):
 
         self.kv_out = nn.Linear(value_dim, dim)
 
-        # Output combines: evolved trajectory, positional retrieval, associative retrieval
+        # Output combines: positional retrieval, associative retrieval
         self.to_out = nn.Sequential(
-            nn.LayerNorm(dim * 4),
-            nn.Linear(dim * 4, dim * 2),
+            nn.LayerNorm(dim * 2),
+            nn.Linear(dim * 2, dim * 2),
             nn.GELU(),
             nn.Dropout(0.1),
             nn.Linear(dim * 2, dim)
@@ -81,26 +66,17 @@ class PhasorBlock(nn.Module):
     def forward(self, x):
         B, L, D = x.shape
 
-        # ========== Phase Evolution (from PHI) ==========
-        # Compute frequency field from content
-        omega = self.to_omega(x)  # [B, L, D]
-        omega_scaled = omega * self.omega_scale.abs()
-
-        # Initialize phase from content
-        phi_init = self.phase_init(x)  # [B, L, D]
-
-        # Phase evolves via cumsum of omega (key innovation from PHI)
-        phi = phi_init + torch.cumsum(omega_scaled, dim=1)  # [B, L, D]
-
+        # ========== Memory 1: Positional with FIXED Phases ==========
+        # Use fixed random phases for stable positional addressing
+        phi = self.pos_phases[:L]  # [L, D]
         cos_phi = torch.cos(phi)
         sin_phi = torch.sin(phi)
 
-        # ========== Memory 1: Positional with Evolved Phases ==========
         v1 = self.mem1_value(x)
         magnitude = torch.sigmoid(self.to_magnitude(x)) * self.magnitude_scale.abs()
         weighted_v1 = magnitude * v1
 
-        # Store with evolved phase
+        # Store with fixed phase
         mem1_cos = torch.cumsum(weighted_v1 * cos_phi, dim=1)
         mem1_sin = torch.cumsum(weighted_v1 * sin_phi, dim=1)
 
@@ -110,7 +86,7 @@ class PhasorBlock(nn.Module):
         mem1_cos = mem1_cos / sqrt_magnitude
         mem1_sin = mem1_sin / sqrt_magnitude
 
-        # Query with offset
+        # Query with learned offset
         query_offset = self.query_offset(x)
         phi_query = phi + query_offset
         cos_q = torch.cos(phi_query)
@@ -155,23 +131,18 @@ class PhasorBlock(nn.Module):
 
         kv_out = self.kv_out(kv_retrieved)
 
-        # ========== Trajectory (content on evolving phase) ==========
-        trajectory_real = x * cos_phi
-        trajectory_imag = x * sin_phi
-
-        # Combine all signals
-        combined = torch.cat([pos_out, kv_out, trajectory_real, trajectory_imag], dim=-1)
+        # Combine positional and associative retrieval
+        combined = torch.cat([pos_out, kv_out], dim=-1)
         return x + self.to_out(combined)
 
 
 class PhasorModel(nn.Module):
     """
-    Phasor model with evolving phases. O(n) complexity.
+    Phasor model with fixed random phases. O(n) complexity.
 
     Key features:
-    - PHI-style phase evolution via cumsum of learned omega
-    - Dual memory: positional (evolved phases) + associative (slim outer product)
-    - Content-dependent phase trajectories
+    - Fixed random phases for stable positional addressing
+    - Dual memory: positional (fixed phases) + associative (slim outer product)
     """
     def __init__(self, vocab_size, dim=128, n_layers=4, n_phases=128, value_dim=8, max_seq_len=16384):
         super().__init__()

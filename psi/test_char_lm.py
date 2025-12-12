@@ -22,6 +22,7 @@ import zipfile
 from phasor import PhasorModel
 from phi import ParallelHolographicIntegrator
 from phasor_slim import SlimPhasorModel, MultiHeadPhasorModel, LocalConvPhasorModel, EvolvingPhasorModel
+from tpi import NovelAttentionLM
 
 device = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu'
 
@@ -435,7 +436,66 @@ def main():
     print()
 
     # ========================================================================
-    # Results Summary (COMMENTED OUT - no transformer baseline)
+    # TPI Model (Temporal Phase Integration)
+    # ========================================================================
+
+    print("=" * 80)
+    print("Training TPI (Temporal Phase Integration)")
+    print("=" * 80)
+    print()
+
+    tpi_model = NovelAttentionLM(
+        vocab_size=vocab_size,
+        dim=128,
+        num_layers=4,
+        num_heads=4,
+        max_len=seq_len
+    ).to(device)
+
+    print(f"Parameters: {sum(p.numel() for p in tpi_model.parameters()):,}")
+    print()
+
+    optimizer_tpi = optim.AdamW(tpi_model.parameters(), lr=3e-3)
+
+    best_val_bpc_tpi = float('inf')
+    for epoch in range(n_epochs):
+        print(f"Epoch {epoch+1}/{n_epochs}")
+        train_loss = train_epoch(tpi_model, train_loader, optimizer_tpi, criterion, device)
+        val_bpc = evaluate(tpi_model, val_loader, device)
+
+        train_bpc = train_loss / math.log(2)
+
+        print(f"Train BPC: {train_bpc:.4f} - Val BPC: {val_bpc:.4f}")
+        print()
+
+        if val_bpc < best_val_bpc_tpi:
+            best_val_bpc_tpi = val_bpc
+            torch.save({
+                'epoch': epoch + 1,
+                'model_state_dict': tpi_model.state_dict(),
+                'optimizer_state_dict': optimizer_tpi.state_dict(),
+                'best_val_bpc': best_val_bpc_tpi,
+            }, 'tpi_charlm.pt')
+            print(f"  Saved best TPI model (Val BPC: {best_val_bpc_tpi:.4f})")
+
+    # Test
+    test_bpc_tpi = evaluate(tpi_model, test_loader, device)
+    print(f"Final Test BPC: {test_bpc_tpi:.4f}")
+    print()
+
+    # Save final model
+    torch.save({
+        'epoch': n_epochs,
+        'model_state_dict': tpi_model.state_dict(),
+        'optimizer_state_dict': optimizer_tpi.state_dict(),
+        'best_val_bpc': best_val_bpc_tpi,
+        'test_bpc': test_bpc_tpi,
+    }, 'tpi_charlm_final.pt')
+    print("Saved final TPI model to tpi_charlm_final.pt")
+    print()
+
+    # ========================================================================
+    # Results Summary
     # ========================================================================
 
     print("=" * 80)
@@ -446,6 +506,7 @@ def main():
     print(f"{'Model':<30} {'Parameters':>12} {'Best Val BPC':>14} {'Test BPC':>12}")
     print("-" * 70)
     print(f"{'EvolvingPhasor':<30} {sum(p.numel() for p in novel_model.parameters()):>12,} {best_val_bpc_novel:>14.4f} {test_bpc_novel:>12.4f}")
+    print(f"{'TPI':<30} {sum(p.numel() for p in tpi_model.parameters()):>12,} {best_val_bpc_tpi:>14.4f} {test_bpc_tpi:>12.4f}")
     print()
 
     print("Notes:")
