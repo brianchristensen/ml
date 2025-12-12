@@ -17,6 +17,7 @@ import time
 
 from phasor import PhasorModel
 from phi import ParallelHolographicIntegrator
+from slim_sweep import SlimPhasorModel
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 print(f"Device: {device}")
@@ -268,7 +269,7 @@ def run_benchmark():
     seq_len = 128
     n_train = 2000
     n_test = 500
-    n_epochs = 30
+    n_epochs = 20
 
     # Create models
     models = {
@@ -278,17 +279,13 @@ def run_benchmark():
             n_layers=n_layers,
             n_heads=4
         ).to(device),
-        'PHI': ParallelHolographicIntegrator(
+        'SlimPhasor': SlimPhasorModel(
             vocab_size=vocab_size,
             dim=dim,
-            num_layers=n_layers,
-            max_len=16384,
-            device=device
-        ).to(device),
-        'Phasor': PhasorModel(
-            vocab_size=vocab_size,
-            dim=dim,
-            n_layers=n_layers
+            n_layers=n_layers,
+            n_phases=128,
+            value_dim=8,
+            max_seq_len=16384
         ).to(device),
     }
 
@@ -396,18 +393,16 @@ def run_benchmark():
     print("SUMMARY")
     print("=" * 80)
     print()
-    print(f"{'Task':<20} {'Transformer':>14} {'PHI':>14} {'Phasor':>14}")
-    print("-" * 70)
+    print(f"{'Task':<20} {'Transformer':>14} {'SlimPhasor':>14}")
+    print("-" * 50)
 
     copy_tf = results['Transformer_copy']['acc']
-    copy_phi = results['PHI_copy']['acc']
-    copy_ph = results['Phasor_copy']['acc']
-    print(f"{'Copy/Recall Acc':<20} {copy_tf:>13.1%} {copy_phi:>13.1%} {copy_ph:>13.1%}")
+    copy_slim = results['SlimPhasor_copy']['acc']
+    print(f"{'Copy/Recall Acc':<20} {copy_tf:>13.1%} {copy_slim:>13.1%}")
 
     ind_tf = results['Transformer_induction']['acc']
-    ind_phi = results['PHI_induction']['acc']
-    ind_ph = results['Phasor_induction']['acc']
-    print(f"{'Assoc Recall Acc':<20} {ind_tf:>13.1%} {ind_phi:>13.1%} {ind_ph:>13.1%}")
+    ind_slim = results['SlimPhasor_induction']['acc']
+    print(f"{'Assoc Recall Acc':<20} {ind_tf:>13.1%} {ind_slim:>13.1%}")
 
     # Timing scaling
     def format_time(t):
@@ -415,13 +410,12 @@ def run_benchmark():
             return "OOM"
         return f"{t*1000:.1f}ms"
 
-    print(f"\n{'Timing':<20} {'Transformer':>14} {'PHI':>14} {'Phasor':>14}")
-    print("-" * 62)
+    print(f"\n{'Timing':<20} {'Transformer':>14} {'SlimPhasor':>14}")
+    print("-" * 50)
     for sl in [64, 512, 8192]:
         t_tf = timing_results['Transformer'][sl]
-        t_phi = timing_results['PHI'][sl]
-        t_ph = timing_results['Phasor'][sl]
-        print(f"{'@ ' + str(sl) + ' tokens':<20} {format_time(t_tf):>14} {format_time(t_phi):>14} {format_time(t_ph):>14}")
+        t_slim = timing_results['SlimPhasor'][sl]
+        print(f"{'@ ' + str(sl) + ' tokens':<20} {format_time(t_tf):>14} {format_time(t_slim):>14}")
 
     # Find fastest at 8192
     times_8192 = {k: v[8192] for k, v in timing_results.items() if v[8192] != float('inf')}

@@ -21,6 +21,7 @@ import zipfile
 
 from phasor import PhasorModel
 from phi import ParallelHolographicIntegrator
+from slim_sweep import SlimPhasorModel
 
 device = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu'
 
@@ -373,65 +374,20 @@ def main():
     # print()
 
     # ========================================================================
-    # PHI Model (Parallel Holographic Integrator)
+    # Slim Phasor Model (value_dim=8 compression)
     # ========================================================================
 
     print("=" * 80)
-    print("Training PHI (Parallel Holographic Integrator)")
+    print("Training Slim Phasor (value_dim=8)")
     print("=" * 80)
     print()
 
-    phi_model = ParallelHolographicIntegrator(
-        vocab_size=vocab_size,
-        dim=128,
-        num_layers=4,
-        max_len=seq_len,
-        device=device
-    ).to(device)
-
-    print(f"Parameters: {phi_model.count_parameters():,}")
-    print()
-
-    optimizer_phi = optim.AdamW(phi_model.parameters(), lr=3e-3)
-
-    best_val_bpc_phi = float('inf')
-    for epoch in range(n_epochs):
-        print(f"Epoch {epoch+1}/{n_epochs}")
-        train_loss = train_epoch(phi_model, train_loader, optimizer_phi, criterion, device)
-        val_bpc = evaluate(phi_model, val_loader, device)
-
-        train_bpc = train_loss / math.log(2)
-
-        print(f"Train BPC: {train_bpc:.4f} - Val BPC: {val_bpc:.4f}")
-        print()
-
-        if val_bpc < best_val_bpc_phi:
-            best_val_bpc_phi = val_bpc
-            torch.save({
-                'epoch': epoch + 1,
-                'model_state_dict': phi_model.state_dict(),
-                'optimizer_state_dict': optimizer_phi.state_dict(),
-                'best_val_bpc': best_val_bpc_phi,
-            }, 'phi_charlm.pt')
-            print(f"  Saved best model (Val BPC: {best_val_bpc_phi:.4f})")
-
-    test_bpc_phi = evaluate(phi_model, test_loader, device)
-    print(f"Final Test BPC: {test_bpc_phi:.4f}")
-    print()
-
-    # ========================================================================
-    # Full Phasor Model (Positional + Content-Based)
-    # ========================================================================
-
-    print("=" * 80)
-    print("Training Full Phasor (Positional + Content-Based)")
-    print("=" * 80)
-    print()
-
-    novel_model = PhasorModel(
+    novel_model = SlimPhasorModel(
         vocab_size=vocab_size,
         dim=128,
         n_layers=2,
+        n_phases=128,
+        value_dim=8,
         max_seq_len=seq_len
     ).to(device)
 
@@ -488,9 +444,8 @@ def main():
     print()
 
     print(f"{'Model':<30} {'Parameters':>12} {'Best Val BPC':>14} {'Test BPC':>12}")
-    print("-" * 80)
-    print(f"{'PHI (holographic integrator)':<30} {phi_model.count_parameters():>12,} {best_val_bpc_phi:>14.4f} {test_bpc_phi:>12.4f}")
-    print(f"{'Phasor (pos+content memory)':<30} {sum(p.numel() for p in novel_model.parameters()):>12,} {best_val_bpc_novel:>14.4f} {test_bpc_novel:>12.4f}")
+    print("-" * 70)
+    print(f"{'SlimPhasor (value_dim=8)':<30} {sum(p.numel() for p in novel_model.parameters()):>12,} {best_val_bpc_novel:>14.4f} {test_bpc_novel:>12.4f}")
     print()
 
     print("Notes:")
