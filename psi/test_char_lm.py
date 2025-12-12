@@ -21,7 +21,7 @@ import zipfile
 
 from phasor import PhasorModel
 from phi import ParallelHolographicIntegrator
-from slim_sweep import SlimPhasorModel
+from phasor_slim import SlimPhasorModel, MultiHeadPhasorModel, LocalConvPhasorModel, EvolvingPhasorModel
 
 device = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu'
 
@@ -374,18 +374,18 @@ def main():
     # print()
 
     # ========================================================================
-    # Slim Phasor Model (value_dim=8 compression)
+    # Evolving Phasor Model (PHI-style dynamics + dual memory)
     # ========================================================================
 
     print("=" * 80)
-    print("Training Slim Phasor (value_dim=8)")
+    print("Training Evolving Phasor (PHI-style phase evolution)")
     print("=" * 80)
     print()
 
-    novel_model = SlimPhasorModel(
+    novel_model = EvolvingPhasorModel(
         vocab_size=vocab_size,
         dim=128,
-        n_layers=2,
+        n_layers=4,
         n_phases=128,
         value_dim=8,
         max_seq_len=seq_len
@@ -445,7 +445,7 @@ def main():
 
     print(f"{'Model':<30} {'Parameters':>12} {'Best Val BPC':>14} {'Test BPC':>12}")
     print("-" * 70)
-    print(f"{'SlimPhasor (value_dim=8)':<30} {sum(p.numel() for p in novel_model.parameters()):>12,} {best_val_bpc_novel:>14.4f} {test_bpc_novel:>12.4f}")
+    print(f"{'EvolvingPhasor':<30} {sum(p.numel() for p in novel_model.parameters()):>12,} {best_val_bpc_novel:>14.4f} {test_bpc_novel:>12.4f}")
     print()
 
     print("Notes:")

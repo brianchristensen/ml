@@ -1,14 +1,16 @@
 """
-Phasor Memory Model - Optimized
+Phasor Memory Model - Evolving Phase Architecture
 
-Two-memory architecture with O(n) complexity:
-- Memory 1: Position → Content (flat [B,L,P] with learned offset)
-- Memory 2: Content → Value (full [B,L,P,D] for associative recall)
+Key innovation: Instead of fixed random phases, phases EVOLVE via cumsum
+of learned omega (frequency field). This gives content-dependent phase
+dynamics while maintaining O(n) complexity.
 
-Key components:
-1. Learned offset for Memory 1 (positional retrieval)
-2. Context accumulation via cumsum for Memory 2 storage key (associative recall)
-3. Full [B,L,P,D] binding for Memory 2 (D-dimensional values essential)
+Two-memory architecture:
+- Memory 1: Positional memory with evolving phases
+- Memory 2: Content-based associative memory (slim outer product)
+
+The phase evolution creates a "trajectory" through phase space that
+content rides on - combining PHI's dynamics with dual-memory structure.
 """
 
 import torch
@@ -19,46 +21,55 @@ import math
 
 class PhasorBlock(nn.Module):
     """
-    Phasor memory block with full-dimension phases (like PHI):
-    - Memory 1: Positional memory [B,L,D]
-    - Memory 2: Content-based KV memory [B,L,D,D] (full dimensions)
+    Phasor block with EVOLVING phases (PHI-style dynamics + dual memory).
 
-    Using dim as n_phases removes the bottleneck that was hurting LM performance.
+    Key innovation: Phases evolve via cumsum of learned omega, giving
+    content-dependent phase dynamics while maintaining O(n) complexity.
     """
-    def __init__(self, dim, n_phases=None, max_seq_len=16384):
+    def __init__(self, dim, n_phases=128, value_dim=8, max_seq_len=16384):
         super().__init__()
         self.dim = dim
-        # Use full dimension as phases (like PHI) - ignore n_phases parameter
-        self.n_phases = dim
+        self.n_phases = n_phases
+        self.value_dim = value_dim
 
-        # Fixed random positional phases - now [max_seq_len, dim]
-        pos_phases = torch.randn(max_seq_len, dim) * math.pi
-        self.register_buffer('pos_phases', pos_phases)
+        # Phase evolution (from PHI) - learned omega creates evolving phases
+        self.to_omega = nn.Linear(dim, dim)  # Frequency field
+        self.omega_scale = nn.Parameter(torch.ones(dim) * 0.01)  # Integration scale
 
-        # Memory 1: Positional memory with learned offset (full dim)
+        # Phase initialization (content-dependent starting point)
+        self.phase_init = nn.Sequential(
+            nn.Linear(dim, dim),
+            nn.GELU(),
+            nn.Linear(dim, dim)
+        )
+
+        # Memory 1: Uses evolved phases for positional memory
         self.mem1_value = nn.Linear(dim, dim)
         self.mem1_out = nn.Linear(dim, dim)
-        self.offset_predictor = nn.Linear(dim * 2, dim)
-        # Magnitude weighting (like PHI - key for LM performance)
         self.to_magnitude = nn.Linear(dim, dim)
         self.magnitude_scale = nn.Parameter(torch.tensor(5.0))
 
-        # Memory 2: Content-based KV memory (full dimensions)
-        self.key_encoder = nn.Linear(dim, dim)
-        self.value_encoder = nn.Linear(dim, dim)
-        # Storage key needs 2-layer MLP for associative recall
+        # Query offset for Memory 1 retrieval
+        self.query_offset = nn.Linear(dim, dim)
+
+        # Memory 2: Associative memory with separate phase encoding
+        self.key_encoder = nn.Linear(dim, n_phases)
+        self.value_encoder = nn.Linear(dim, value_dim)
+
+        # Storage uses context-aware phase
         self.storage_key = nn.Sequential(
             nn.Linear(dim * 2, dim),
             nn.GELU(),
-            nn.Linear(dim, dim)
+            nn.Linear(dim, n_phases)
         )
         self.store_gate = nn.Sequential(
             nn.Linear(dim, 1),
             nn.Sigmoid()
         )
 
-        # Output - takes trajectory + retrieved (like PHI)
-        # Input: [pos_out, kv_retrieved, trajectory_real, trajectory_imag] = dim * 4
+        self.kv_out = nn.Linear(value_dim, dim)
+
+        # Output combines: evolved trajectory, positional retrieval, associative retrieval
         self.to_out = nn.Sequential(
             nn.LayerNorm(dim * 4),
             nn.Linear(dim * 4, dim * 2),
@@ -69,99 +80,105 @@ class PhasorBlock(nn.Module):
 
     def forward(self, x):
         B, L, D = x.shape
-        P = self.n_phases
 
-        pos_phases = self.pos_phases[:L]
-        pos_cos = torch.cos(pos_phases)
-        pos_sin = torch.sin(pos_phases)
+        # ========== Phase Evolution (from PHI) ==========
+        # Compute frequency field from content
+        omega = self.to_omega(x)  # [B, L, D]
+        omega_scaled = omega * self.omega_scale.abs()
 
-        # ========== Memory 1: Positional with learned offset + magnitude ==========
-        v1 = self.mem1_value(x)  # [B, L, P]
+        # Initialize phase from content
+        phi_init = self.phase_init(x)  # [B, L, D]
 
-        # Magnitude weighting (like PHI - learned importance per token)
-        magnitude = torch.sigmoid(self.to_magnitude(x)) * self.magnitude_scale.abs()  # [B, L, D]
+        # Phase evolves via cumsum of omega (key innovation from PHI)
+        phi = phi_init + torch.cumsum(omega_scaled, dim=1)  # [B, L, D]
+
+        cos_phi = torch.cos(phi)
+        sin_phi = torch.sin(phi)
+
+        # ========== Memory 1: Positional with Evolved Phases ==========
+        v1 = self.mem1_value(x)
+        magnitude = torch.sigmoid(self.to_magnitude(x)) * self.magnitude_scale.abs()
         weighted_v1 = magnitude * v1
 
-        # Build memory with magnitude-weighted values
-        mem1_cos = torch.cumsum(pos_cos.unsqueeze(0) * weighted_v1, dim=1)  # [B, L, P]
-        mem1_sin = torch.cumsum(pos_sin.unsqueeze(0) * weighted_v1, dim=1)
+        # Store with evolved phase
+        mem1_cos = torch.cumsum(weighted_v1 * cos_phi, dim=1)
+        mem1_sin = torch.cumsum(weighted_v1 * sin_phi, dim=1)
 
         # Normalize by accumulated magnitude
         accumulated_magnitude = torch.cumsum(magnitude, dim=1)
         sqrt_magnitude = torch.sqrt(accumulated_magnitude + 1e-8)
-
         mem1_cos = mem1_cos / sqrt_magnitude
         mem1_sin = mem1_sin / sqrt_magnitude
 
-        # Learned offset for retrieval
-        offset_input = torch.cat([x, pos_phases.unsqueeze(0).expand(B, -1, -1)], dim=-1)
-        offset = torch.tanh(self.offset_predictor(offset_input)) * math.pi  # [B, L, P]
+        # Query with offset
+        query_offset = self.query_offset(x)
+        phi_query = phi + query_offset
+        cos_q = torch.cos(phi_query)
+        sin_q = torch.sin(phi_query)
 
-        # Rotated query
-        offset_cos = torch.cos(offset)
-        offset_sin = torch.sin(offset)
-        query_cos = pos_cos.unsqueeze(0) * offset_cos - pos_sin.unsqueeze(0) * offset_sin
-        query_sin = pos_sin.unsqueeze(0) * offset_cos + pos_cos.unsqueeze(0) * offset_sin
+        pos_ret = (mem1_cos * cos_q + mem1_sin * sin_q) / math.sqrt(D)
+        pos_out = self.mem1_out(pos_ret)
 
-        # Retrieve
-        pos_ret = (mem1_cos * query_cos + mem1_sin * query_sin) / math.sqrt(P)
-        pos_out = self.mem1_out(pos_ret)  # [B, L, D]
+        # ========== Memory 2: Associative (separate phase space) ==========
+        query_phase = torch.tanh(self.key_encoder(x)) * math.pi
+        values = self.value_encoder(x)
+        store_gate = self.store_gate(x)
 
-        # ========== Memory 2: Content-based KV (full dimensions) ==========
-        # Query key (for retrieval) - based on current content
-        key_phases = torch.tanh(self.key_encoder(x)) * math.pi  # [B, L, P]
-        key_cos = torch.cos(key_phases)
-        key_sin = torch.sin(key_phases)
-
-        values = self.value_encoder(x)  # [B, L, D]
-        store_gate = self.store_gate(x)  # [B, L, 1]
-
-        # Context accumulation (essential for associative recall)
+        # Context for storage key
         context = torch.cumsum(x, dim=1)
         positions = torch.arange(1, L + 1, device=x.device, dtype=x.dtype).view(1, -1, 1)
         context_avg = context / positions
 
-        # Storage key from current + context
-        storage_phases = torch.tanh(self.storage_key(torch.cat([x, context_avg], dim=-1))) * math.pi
-        store_cos = torch.cos(storage_phases)  # [B, L, P]
-        store_sin = torch.sin(storage_phases)
+        storage_phase = torch.tanh(self.storage_key(torch.cat([x, context_avg], dim=-1))) * math.pi
 
-        # Bind values with context-aware storage key (gated)
-        # [B, L, P, 1] * [B, L, 1, D] * [B, L, 1, 1] -> [B, L, P, D]
+        store_cos = torch.cos(storage_phase)
+        store_sin = torch.sin(storage_phase)
+
+        # Outer product binding
         kv_bound_cos = store_cos.unsqueeze(-1) * values.unsqueeze(2) * store_gate.unsqueeze(-1)
         kv_bound_sin = store_sin.unsqueeze(-1) * values.unsqueeze(2) * store_gate.unsqueeze(-1)
 
-        kv_mem_cos = torch.cumsum(kv_bound_cos, dim=1)  # [B, L, P, D]
+        kv_mem_cos = torch.cumsum(kv_bound_cos, dim=1)
         kv_mem_sin = torch.cumsum(kv_bound_sin, dim=1)
 
         gate_cumsum = torch.cumsum(store_gate, dim=1).clamp(min=1)
+        kv_mem_cos = kv_mem_cos / torch.sqrt(gate_cumsum).unsqueeze(-1)
+        kv_mem_sin = kv_mem_sin / torch.sqrt(gate_cumsum).unsqueeze(-1)
 
-        # Query with current content's key phase
-        # [B, L, P, 1] * [B, L, P, D] -> sum over P -> [B, L, D]
-        query_cos_kv = key_cos.unsqueeze(-1)  # [B, L, P, 1]
-        query_sin_kv = key_sin.unsqueeze(-1)
+        q_cos = torch.cos(query_phase)
+        q_sin = torch.sin(query_phase)
 
-        kv_retrieved = (kv_mem_cos * query_cos_kv + kv_mem_sin * query_sin_kv).sum(dim=2)
-        kv_retrieved = kv_retrieved / (torch.sqrt(gate_cumsum) * math.sqrt(P))
+        kv_retrieved = (
+            q_cos.unsqueeze(-1) * kv_mem_cos +
+            q_sin.unsqueeze(-1) * kv_mem_sin
+        ).sum(dim=2) / math.sqrt(self.n_phases)
 
-        # Compute trajectory (content modulated by phase) like PHI
-        # Use the key phases as the trajectory - this gives content-dependent oscillation
-        trajectory_real = x * key_cos.mean(dim=-1, keepdim=True)  # [B, L, D]
-        trajectory_imag = x * key_sin.mean(dim=-1, keepdim=True)  # [B, L, D]
+        kv_out = self.kv_out(kv_retrieved)
 
-        # Concatenate all signals: retrieved memory + trajectory
-        combined = torch.cat([pos_out, kv_retrieved, trajectory_real, trajectory_imag], dim=-1)
+        # ========== Trajectory (content on evolving phase) ==========
+        trajectory_real = x * cos_phi
+        trajectory_imag = x * sin_phi
+
+        # Combine all signals
+        combined = torch.cat([pos_out, kv_out, trajectory_real, trajectory_imag], dim=-1)
         return x + self.to_out(combined)
 
 
 class PhasorModel(nn.Module):
-    """Phasor model for sequence modeling. O(n) complexity."""
-    def __init__(self, vocab_size, dim=64, n_layers=4, n_phases=32, max_seq_len=16384):
+    """
+    Phasor model with evolving phases. O(n) complexity.
+
+    Key features:
+    - PHI-style phase evolution via cumsum of learned omega
+    - Dual memory: positional (evolved phases) + associative (slim outer product)
+    - Content-dependent phase trajectories
+    """
+    def __init__(self, vocab_size, dim=128, n_layers=4, n_phases=128, value_dim=8, max_seq_len=16384):
         super().__init__()
         self.embed = nn.Embedding(vocab_size, dim)
 
         self.blocks = nn.ModuleList([
-            PhasorBlock(dim, n_phases, max_seq_len)
+            PhasorBlock(dim, n_phases, value_dim, max_seq_len)
             for _ in range(n_layers)
         ])
         self.norms = nn.ModuleList([nn.LayerNorm(dim) for _ in range(n_layers)])
@@ -183,7 +200,7 @@ if __name__ == "__main__":
     # Quick test
     x = torch.randint(0, 64, (2, 128), device=device)
 
-    model = PhasorModel(vocab_size=64, dim=64, n_layers=4, n_phases=32).to(device)
+    model = PhasorModel(vocab_size=64, dim=64, n_layers=4, n_phases=64, value_dim=8).to(device)
     out = model(x)
 
     n_params = sum(p.numel() for p in model.parameters())
