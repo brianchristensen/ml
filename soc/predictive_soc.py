@@ -143,6 +143,15 @@ class PredictiveSOCMind:
         self.A_prev = np.zeros(n_units)  # Previous activation for avalanche detection
         self.in_avalanche = False
 
+        # === Continuous Contrastive Learning ===
+        # A_target: what external input wants the network state to be (sparse)
+        # This enables real prediction: network flows toward A_target
+        # Error = A_target - A is local and drives three-factor learning
+        self.A_target = np.zeros(n_units)      # Target activation (sparse)
+        self.target_strength = 0.0              # β: how strongly to pull toward target
+        self.target_decay = 0.9                 # How fast target decays without new input
+        self.lr_contrastive = 0.02              # Learning rate for three-factor rule
+
     def step(self, dt=0.1, dream_mode=False):
         """One timestep of dynamics."""
         self.t += dt
@@ -165,24 +174,33 @@ class PredictiveSOCMind:
         # 4. Compute prediction error
         self.prediction_error = A_next - self.A_pred
 
-        # 5. Learn from prediction error
+        # 5. Learn from prediction error (internal model)
         self._learn_from_error(dt)
 
-        # 6. Homeostatic threshold adjustment (maintains criticality)
+        # 6. === Continuous Contrastive Learning ===
+        # Three-factor: pre * post * local_error
+        # This is the EXTERNAL prediction learning
+        self._contrastive_learning(dt)
+
+        # 7. Homeostatic threshold adjustment (maintains criticality)
         self._homeostatic_adjustment()
 
-        # 7. === SOC: Synaptic Scaling ===
+        # 8. === SOC: Synaptic Scaling ===
         self._synaptic_scaling(dt)
 
-        # 8. === Avalanche Tracking ===
+        # 9. === Avalanche Tracking ===
         self._track_avalanche(A_next)
 
-        # 9. Update state
+        # 10. Update state
         self.A = A_next
         self._update_phases(dt)
         self._update_energy(dt)
 
-        # 10. Dream mode: temporal Hebbian learning during free evolution
+        # 11. Decay target (external signal fades without reinforcement)
+        self.A_target *= self.target_decay
+        self.target_strength *= self.target_decay
+
+        # 12. Dream mode: temporal Hebbian learning during free evolution
         if dream_mode:
             self._dream_learning(dt)
 
@@ -248,8 +266,13 @@ class PredictiveSOCMind:
 
         total_input = (exc_sum + inh_sum) / in_degree
 
-        # dA/dt = input - decay + noise
-        dA = total_input - self.decay * self.A + np.random.normal(0, self.noise, self.n)
+        # === Continuous Contrastive: Pull toward target ===
+        # local_error = A_target - A (what should be minus what is)
+        # This term pulls the network toward the target state
+        target_pull = self.target_strength * (self.A_target - self.A)
+
+        # dA/dt = input - decay + noise + target_pull
+        dA = total_input - self.decay * self.A + np.random.normal(0, self.noise, self.n) + target_pull
 
         A_next = np.clip(self.A + dt * dA, 0, 1)
         return A_next
@@ -345,6 +368,57 @@ class PredictiveSOCMind:
         dW_phase = self.lr_phase * co_active * confident_connections * np.sin(phase_diff)
         self.W_phase_data += dt * dW_phase
         self.W_phase_data = np.clip(self.W_phase_data, -np.pi, np.pi)
+
+    def _contrastive_learning(self, dt):
+        """
+        Three-factor learning for continuous contrastive prediction.
+
+        The unified equation:
+            dW_ij/dt = η * pre_i * post_j * local_error_j
+
+        Where:
+            - pre_i = activation of source unit i
+            - post_j = activation of target unit j
+            - local_error_j = A_target_j - A_j (how wrong is unit j?)
+
+        This is THREE-FACTOR because learning requires:
+            1. Pre-synaptic activity (source is active)
+            2. Post-synaptic activity (target is active)
+            3. Error signal (target knows it's wrong)
+
+        The error is LOCAL - each unit knows its own target and its own state.
+        No backprop needed. Credit assignment is implicit in the sparse activation.
+
+        For sparse patterns:
+            - Most local_error_j ≈ 0 (both target and actual are 0 or both are 1)
+            - Learning only happens where there's mismatch
+            - And only for active pre-synaptic units
+        """
+        if self.target_strength < 0.01:
+            # No target active, skip contrastive learning
+            return
+
+        rows, cols = self._conn_rows, self._conn_cols
+
+        # Local error at each unit: what it should be minus what it is
+        local_error = self.A_target - self.A  # [n_units]
+
+        # Delta rule for contrastive learning:
+        # dW_ij = η * pre_i * error_j
+        #
+        # This is simpler than three-factor but handles both cases:
+        # - error > 0 (should be more active): strengthen from active pre
+        # - error < 0 (should be less active): weaken from active pre
+        #
+        # The sparse activation of pre naturally limits which connections learn
+        pre = self.A[cols]
+        error_post = local_error[rows]
+
+        dW = self.lr_contrastive * pre * error_post
+
+        # Apply to dynamics weights (this IS the real learning)
+        self.W_dyn_data += dt * dW
+        self.W_dyn_data = np.clip(self.W_dyn_data, -1.0, 1.0)
 
     def _homeostatic_adjustment(self):
         """
@@ -557,6 +631,49 @@ class PredictiveSOCMind:
         # Hash text to get reproducible pattern
         pattern_id = hash(text) % 10000
         return self.inject_pattern(pattern_id, strength)
+
+    def set_target(self, text_or_id, strength=1.0):
+        """
+        Set the target activation (what the network should predict).
+
+        This is used for contrastive learning:
+        1. Network sees input A, evolves
+        2. set_target(B) tells network "you should have predicted B"
+        3. Error = B_pattern - current_state drives learning
+
+        The target decays over time, so learning is strongest right after setting.
+        """
+        if isinstance(text_or_id, str):
+            pattern_id = hash(text_or_id) % 10000
+        else:
+            pattern_id = text_or_id
+
+        # Generate the same sparse pattern as inject would
+        np.random.seed(pattern_id)
+        n_active = np.random.randint(20, 50)
+        units = np.random.choice(self.n, n_active, replace=False)
+        np.random.seed(None)
+
+        # Set target as sparse activation
+        self.A_target = np.zeros(self.n)
+        self.A_target[units] = 1.0
+
+        # Set target strength (how hard to pull toward target)
+        self.target_strength = strength
+
+        return {'units': units, 'n_active': n_active}
+
+    def get_prediction_error(self):
+        """
+        Get the current prediction error: how far is network from target?
+        Returns mean absolute error for active target units.
+        """
+        if self.target_strength < 0.01:
+            return 0.0
+        active_targets = self.A_target > 0.5
+        if not np.any(active_targets):
+            return 0.0
+        return np.mean(np.abs(self.A_target[active_targets] - self.A[active_targets]))
 
     def learn_pattern(self, name, n_presentations=5, steps_per=30):
         """
@@ -1327,12 +1444,358 @@ def demo_sequence_learning():
     return mind
 
 
+def benchmark_sequence_prediction():
+    """
+    Benchmark: Can the model learn and recall sequences?
+
+    Tests:
+    1. Learn multiple distinct sequences (A→B→C, D→E→F, etc.)
+    2. Test if presenting first item recalls the sequence
+    3. Measure accuracy: does the correct next item have highest activation?
+    4. Test interference: do sequences stay separate?
+    5. Test chaining: A→B→C, does A eventually reach C?
+    """
+    print("=" * 70)
+    print("SEQUENCE PREDICTION BENCHMARK")
+    print("=" * 70)
+
+    # Define test sequences - using distinct words to avoid overlap
+    sequences = [
+        ['cat', 'meow', 'purr'],
+        ['dog', 'bark', 'woof'],
+        ['bird', 'chirp', 'fly'],
+        ['fish', 'swim', 'splash'],
+        ['sun', 'bright', 'warm'],
+    ]
+
+    print(f"\nTest sequences:")
+    for seq in sequences:
+        print(f"  {' -> '.join(seq)}")
+
+    # Create model
+    mind = PredictiveSOCMind(n_units=1024)
+
+    # Warmup
+    print("\nWarming up network...")
+    for _ in range(100):
+        mind.step(0.1)
+
+    # === TRAINING PHASE ===
+    print("\n" + "=" * 70)
+    print("TRAINING PHASE")
+    print("=" * 70)
+
+    for seq in sequences:
+        print(f"\nLearning sequence: {' -> '.join(seq)}")
+        # Learn each transition in the sequence
+        for i in range(len(seq) - 1):
+            mind.learn_association(seq[i], seq[i+1])
+
+    # Dream to consolidate
+    print("\nConsolidating with dreaming (2000 steps)...")
+    mind.dream(n_steps=2000, verbose=True)
+
+    # === TESTING PHASE ===
+    print("\n" + "=" * 70)
+    print("TESTING PHASE")
+    print("=" * 70)
+
+    results = {
+        'direct_recall': [],      # A→B (direct association)
+        'chain_recall': [],       # A→C (through B)
+        'interference': [],       # Does dog trigger meow? (should NOT)
+    }
+
+    # Test 1: Direct recall (A->B)
+    print("\n--- Test 1: Direct Recall (A -> B) ---")
+    print(f"{'Trigger':<10} {'Expected':<10} {'Top Recall':<10} {'Correct?':<10} {'Delta':<10}")
+    print("-" * 55)
+
+    for seq in sequences:
+        trigger = seq[0]
+        expected = seq[1]
+
+        recall_result = mind.recall(trigger, n_steps=50)
+
+        # Find which pattern had highest delta (most recalled)
+        deltas = recall_result['delta_overlaps']
+        if deltas:
+            top_pattern = max(deltas.keys(), key=lambda k: deltas[k])
+            top_delta = deltas[top_pattern]
+            correct = (top_pattern == expected)
+            results['direct_recall'].append(correct)
+
+            print(f"{trigger:<10} {expected:<10} {top_pattern:<10} {'Y' if correct else 'N':<10} {top_delta:+.3f}")
+        else:
+            print(f"{trigger:<10} {expected:<10} {'N/A':<10} {'N':<10}")
+            results['direct_recall'].append(False)
+
+    direct_accuracy = sum(results['direct_recall']) / len(results['direct_recall']) * 100
+    print(f"\nDirect recall accuracy: {direct_accuracy:.1f}%")
+
+    # Test 2: Chain recall (A->C through B)
+    print("\n--- Test 2: Chain Recall (A -> C through B) ---")
+    print(f"{'Trigger':<10} {'Expected':<10} {'In Top 3?':<10} {'Delta':<10}")
+    print("-" * 45)
+
+    for seq in sequences:
+        if len(seq) < 3:
+            continue
+
+        trigger = seq[0]
+        expected_chain = seq[2]  # The end of the chain
+
+        # Run longer to let chain propagate
+        recall_result = mind.recall(trigger, n_steps=100)
+
+        deltas = recall_result['delta_overlaps']
+        if deltas and expected_chain in deltas:
+            # Check if chain target is in top 3
+            sorted_deltas = sorted(deltas.items(), key=lambda x: -x[1])
+            top_3 = [x[0] for x in sorted_deltas[:3]]
+            in_top_3 = expected_chain in top_3
+            delta = deltas[expected_chain]
+            results['chain_recall'].append(in_top_3)
+
+            print(f"{trigger:<10} {expected_chain:<10} {'Y' if in_top_3 else 'N':<10} {delta:+.3f}")
+        else:
+            print(f"{trigger:<10} {expected_chain:<10} {'N/A':<10}")
+            results['chain_recall'].append(False)
+
+    chain_accuracy = sum(results['chain_recall']) / len(results['chain_recall']) * 100 if results['chain_recall'] else 0
+    print(f"\nChain recall accuracy (in top 3): {chain_accuracy:.1f}%")
+
+    # Test 3: Interference (cross-sequence errors)
+    print("\n--- Test 3: Interference Check ---")
+    print("Testing if sequences stay separate (trigger should NOT recall other sequences)")
+    print(f"{'Trigger':<10} {'Seq':<6} {'Wrong Recalls':<30}")
+    print("-" * 50)
+
+    for i, seq in enumerate(sequences):
+        trigger = seq[0]
+        own_items = set(seq)
+
+        recall_result = mind.recall(trigger, n_steps=50)
+        deltas = recall_result['delta_overlaps']
+
+        # Find items from OTHER sequences that were strongly recalled
+        wrong_recalls = []
+        for pattern, delta in deltas.items():
+            if pattern not in own_items and delta > 0.1:  # Threshold for "recalled"
+                wrong_recalls.append(f"{pattern}({delta:+.2f})")
+
+        no_interference = len(wrong_recalls) == 0
+        results['interference'].append(no_interference)
+
+        wrong_str = ', '.join(wrong_recalls[:3]) if wrong_recalls else 'None'
+        print(f"{trigger:<10} {i:<6} {wrong_str:<30}")
+
+    interference_score = sum(results['interference']) / len(results['interference']) * 100
+    print(f"\nInterference resistance: {interference_score:.1f}% (higher = better separation)")
+
+    # === SUMMARY ===
+    print("\n" + "=" * 70)
+    print("BENCHMARK SUMMARY")
+    print("=" * 70)
+    print(f"  Direct recall (A->B):    {direct_accuracy:5.1f}%")
+    print(f"  Chain recall (A->C):     {chain_accuracy:5.1f}%")
+    print(f"  Interference resistance: {interference_score:5.1f}%")
+
+    overall = (direct_accuracy + chain_accuracy + interference_score) / 3
+    print(f"\n  Overall score:           {overall:5.1f}%")
+    print("=" * 70)
+
+    # SOC statistics
+    print("\nSOC Statistics:")
+    soc_stats = mind.get_avalanche_stats()
+    if 'mean_size' in soc_stats:
+        print(f"  Avalanches: {soc_stats['n_avalanches']}")
+        print(f"  Mean/Median ratio: {soc_stats['mean_median_ratio']:.2f} (>2 suggests criticality)")
+
+    return mind, results
+
+
+def benchmark_contrastive_prediction():
+    """
+    Test the continuous contrastive learning mechanism.
+
+    This is a REAL prediction test - no pre-stored vocabulary.
+
+    Training:
+        1. Show input A
+        2. Let network evolve (it makes implicit prediction)
+        3. Set target B (this is what SHOULD come next)
+        4. Network learns from error: A -> B
+
+    Testing:
+        1. Show input A
+        2. Let network evolve WITHOUT setting target
+        3. Measure how close network gets to B pattern
+        4. Compare trained pairs vs untrained pairs
+    """
+    print("=" * 70)
+    print("CONTRASTIVE PREDICTION BENCHMARK")
+    print("=" * 70)
+    print("\nThis tests REAL prediction (no vocabulary lookup)")
+    print("Network learns: input A should predict state B")
+
+    # Training pairs
+    train_pairs = [
+        ('alpha', 'beta'),
+        ('one', 'two'),
+        ('up', 'down'),
+        ('hot', 'cold'),
+        ('left', 'right'),
+    ]
+
+    # Untrained pairs (for comparison)
+    untrained_pairs = [
+        ('alpha', 'cold'),   # Wrong pairing
+        ('one', 'down'),     # Wrong pairing
+        ('up', 'two'),       # Wrong pairing
+    ]
+
+    print(f"\nTraining pairs:")
+    for a, b in train_pairs:
+        print(f"  {a} -> {b}")
+
+    # Create model
+    mind = PredictiveSOCMind(n_units=1024)
+
+    # Warmup
+    print("\nWarming up network...")
+    for _ in range(100):
+        mind.step(0.1)
+
+    # === TRAINING PHASE ===
+    print("\n" + "=" * 70)
+    print("TRAINING PHASE")
+    print("=" * 70)
+
+    n_epochs = 20
+    steps_per_exposure = 10
+
+    for epoch in range(n_epochs):
+        epoch_error = 0.0
+        for input_word, target_word in train_pairs:
+            # 1. Inject input
+            mind.inject_text(input_word, strength=0.8)
+
+            # 2. Let network evolve a few steps
+            for _ in range(steps_per_exposure):
+                mind.step(0.1)
+
+            # 3. Set target (this is what should come next)
+            mind.set_target(target_word, strength=1.5)
+
+            # 4. Run more steps with target active (learning happens)
+            for _ in range(steps_per_exposure):
+                mind.step(0.1)
+                epoch_error += mind.get_prediction_error()
+
+            # 5. Clear for next pair
+            mind.reset()
+
+        avg_error = epoch_error / (len(train_pairs) * steps_per_exposure)
+        if epoch % 5 == 0:
+            print(f"  Epoch {epoch+1:2d}/{n_epochs}: avg prediction error = {avg_error:.4f}")
+
+    # === TESTING PHASE ===
+    print("\n" + "=" * 70)
+    print("TESTING PHASE")
+    print("=" * 70)
+
+    def measure_prediction_overlap(mind, input_word, target_word, n_steps=30):
+        """
+        Measure how well the network predicts target after seeing input.
+        Returns overlap between network state and target pattern.
+        """
+        mind.reset()
+
+        # Inject input
+        mind.inject_text(input_word, strength=0.8)
+
+        # Let network evolve WITHOUT target (pure prediction)
+        for _ in range(n_steps):
+            mind.step(0.1)
+
+        # Generate target pattern to compare against
+        target_id = hash(target_word) % 10000
+        np.random.seed(target_id)
+        n_active = np.random.randint(20, 50)
+        target_units = np.random.choice(mind.n, n_active, replace=False)
+        np.random.seed(None)
+
+        target_pattern = np.zeros(mind.n)
+        target_pattern[target_units] = 1.0
+
+        # Measure overlap (cosine similarity)
+        dot = np.dot(mind.A, target_pattern)
+        norm = np.linalg.norm(mind.A) * np.linalg.norm(target_pattern) + 1e-8
+        overlap = dot / norm
+
+        return overlap
+
+    # Test trained pairs
+    print("\n--- Trained Pairs ---")
+    print(f"{'Input':<10} {'Target':<10} {'Overlap':<10}")
+    print("-" * 35)
+
+    trained_overlaps = []
+    for input_word, target_word in train_pairs:
+        overlap = measure_prediction_overlap(mind, input_word, target_word)
+        trained_overlaps.append(overlap)
+        print(f"{input_word:<10} {target_word:<10} {overlap:.4f}")
+
+    avg_trained = np.mean(trained_overlaps)
+    print(f"\nAverage trained overlap: {avg_trained:.4f}")
+
+    # Test untrained pairs
+    print("\n--- Untrained Pairs (should be lower) ---")
+    print(f"{'Input':<10} {'Target':<10} {'Overlap':<10}")
+    print("-" * 35)
+
+    untrained_overlaps = []
+    for input_word, target_word in untrained_pairs:
+        overlap = measure_prediction_overlap(mind, input_word, target_word)
+        untrained_overlaps.append(overlap)
+        print(f"{input_word:<10} {target_word:<10} {overlap:.4f}")
+
+    avg_untrained = np.mean(untrained_overlaps)
+    print(f"\nAverage untrained overlap: {avg_untrained:.4f}")
+
+    # === SUMMARY ===
+    print("\n" + "=" * 70)
+    print("BENCHMARK SUMMARY")
+    print("=" * 70)
+
+    ratio = avg_trained / (avg_untrained + 1e-8)
+    print(f"  Trained pairs overlap:   {avg_trained:.4f}")
+    print(f"  Untrained pairs overlap: {avg_untrained:.4f}")
+    print(f"  Signal/Noise ratio:      {ratio:.2f}x")
+
+    if ratio > 1.5:
+        print("\n  PASS: Network learned to predict trained pairs better!")
+    elif ratio > 1.1:
+        print("\n  PARTIAL: Some learning detected, but weak.")
+    else:
+        print("\n  FAIL: No significant learning detected.")
+
+    print("=" * 70)
+
+    return mind, {'trained': trained_overlaps, 'untrained': untrained_overlaps}
+
+
 if __name__ == "__main__":
     if len(sys.argv) > 1:
         if sys.argv[1] == '--demo':
             demo_prediction_learning()
         elif sys.argv[1] == '--sequence':
             demo_sequence_learning()
+        elif sys.argv[1] == '--benchmark':
+            benchmark_sequence_prediction()
+        elif sys.argv[1] == '--contrastive':
+            benchmark_contrastive_prediction()
     else:
         print("Starting interactive mode...")
         mind = PredictiveSOCMind(n_units=1024)
