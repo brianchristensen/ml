@@ -94,6 +94,18 @@ class PredictiveSOCMind:
         self.lr_phase = 0.005      # Phase learning rate
         self.confidence_decay = 0.95  # How fast confidence decays
 
+        # === Hierarchical Predictive Learning ===
+        # Each unit predicts the input it will receive from other units
+        # Slow units (high τ) predict patterns in fast units (low τ)
+        # This creates a predictive hierarchy where higher levels predict lower levels
+        #
+        # W_hier: prediction weights (connection-level)
+        # Unit i predicts what input it will receive via: pred_input = Σ W_hier_ij * A_i
+        self.W_hier_data = np.zeros(self._n_connections)  # Hierarchical prediction weights
+        self.input_pred = np.zeros(n_units)      # Predicted input for each unit
+        self.input_pred_error = np.zeros(n_units)  # Error: actual - predicted
+        self.lr_hier = 0.02                       # Learning rate for hierarchical prediction
+
         # === Homeostatic Parameters (for SOC) ===
         self.target_activity = 0.05   # Target fraction of active units
         self.homeostatic_rate = 0.001 # How fast threshold adapts
@@ -152,6 +164,24 @@ class PredictiveSOCMind:
         self.target_decay = 0.9                 # How fast target decays without new input
         self.lr_contrastive = 0.02              # Learning rate for three-factor rule
 
+        # === Adaptive Timescales (for emergent hierarchy) ===
+        # Each unit has its own time constant τ
+        # Small τ → fast response → low-level features
+        # Large τ → slow integration → high-level patterns
+        # τ adapts based on input variance and prediction error
+        self.tau = np.exp(np.random.randn(n_units) * 0.5)  # Log-normal, centered ~1
+        self.tau = np.clip(self.tau, 0.1, 10.0)  # Keep in reasonable range
+
+        # Track input variance per unit (for tau adaptation)
+        self.input_mean = np.zeros(n_units)      # Running mean of input
+        self.input_var = np.ones(n_units) * 0.1  # Running variance of input
+        self.var_decay = 0.95                     # Decay for variance tracking
+
+        # Tau adaptation parameters
+        self.lr_tau = 0.001                       # Learning rate for tau adaptation
+        self.tau_min = 0.1                        # Minimum timescale
+        self.tau_max = 10.0                       # Maximum timescale
+
     def step(self, dt=0.1, dream_mode=False):
         """One timestep of dynamics."""
         self.t += dt
@@ -182,7 +212,16 @@ class PredictiveSOCMind:
         # This is the EXTERNAL prediction learning
         self._contrastive_learning(dt)
 
-        # 7. Homeostatic threshold adjustment (maintains criticality)
+        # 7. === Adaptive Timescales ===
+        # Units learn their own τ based on input variance and prediction error
+        # This enables emergent hierarchy
+        self._adapt_timescales(dt)
+
+        # 8. === Hierarchical Predictive Learning ===
+        # Units learn to predict their inputs (slow predicts fast)
+        self._hierarchical_learning(dt)
+
+        # 9. Homeostatic threshold adjustment (maintains criticality)
         self._homeostatic_adjustment()
 
         # 8. === SOC: Synaptic Scaling ===
@@ -266,13 +305,39 @@ class PredictiveSOCMind:
 
         total_input = (exc_sum + inh_sum) / in_degree
 
+        # === Hierarchical Prediction ===
+        # Each unit predicts the input it will receive based on its own state
+        # Slow units (high τ) have smooth activation that carries temporal context
+        # They use this context to predict what input they'll receive from fast units
+        #
+        # For connection j→i: unit i predicts j's contribution as W_hier_ij * A_i
+        # This means slow units learn to predict patterns in their inputs
+        hier_pred_input = self.W_hier_data * self.A[rows]  # Use receiving unit's state
+        predicted_input = np.zeros(self.n)
+        np.add.at(predicted_input, rows, hier_pred_input)
+        predicted_input = predicted_input / in_degree
+
+        # Store prediction and error for learning
+        self.input_pred = predicted_input
+        self.input_pred_error = total_input - predicted_input  # Actual - Predicted
+
+        # === Track input statistics for tau adaptation ===
+        # Update running mean and variance of input per unit
+        self.input_mean = self.var_decay * self.input_mean + (1 - self.var_decay) * total_input
+        input_diff = total_input - self.input_mean
+        self.input_var = self.var_decay * self.input_var + (1 - self.var_decay) * (input_diff ** 2)
+
         # === Continuous Contrastive: Pull toward target ===
         # local_error = A_target - A (what should be minus what is)
         # This term pulls the network toward the target state
         target_pull = self.target_strength * (self.A_target - self.A)
 
-        # dA/dt = input - decay + noise + target_pull
-        dA = total_input - self.decay * self.A + np.random.normal(0, self.noise, self.n) + target_pull
+        # === Adaptive Timescale Dynamics ===
+        # dA/dt = (1/τ) * [input - decay*A + noise + target_pull]
+        # Small τ → fast response (low-level features)
+        # Large τ → slow integration (high-level patterns)
+        raw_dA = total_input - self.decay * self.A + np.random.normal(0, self.noise, self.n) + target_pull
+        dA = (1.0 / self.tau) * raw_dA
 
         A_next = np.clip(self.A + dt * dA, 0, 1)
         return A_next
@@ -419,6 +484,89 @@ class PredictiveSOCMind:
         # Apply to dynamics weights (this IS the real learning)
         self.W_dyn_data += dt * dW
         self.W_dyn_data = np.clip(self.W_dyn_data, -1.0, 1.0)
+
+    def _adapt_timescales(self, dt):
+        """
+        Adapt per-unit timescales based on input variance and prediction error.
+
+        The differential equation for τ:
+            dτ/dt = lr * prediction_error * (target_τ - τ)
+
+        Where target_τ is derived from input variance:
+            - High variance → small target_τ (need to track fast changes)
+            - Low variance → large target_τ (can integrate longer)
+
+        The prediction_error gates the learning:
+            - High error → τ needs to change (current timescale not working)
+            - Low error → τ is good, keep it stable
+
+        This creates emergent hierarchy:
+            - Units receiving variable input become fast (low-level)
+            - Units receiving stable input become slow (high-level)
+            - Units with high error explore different timescales
+        """
+        # Compute target tau from input variance
+        # target_tau = k / (variance + epsilon)
+        # High variance → low target (fast), Low variance → high target (slow)
+        variance_scale = 0.5  # Scaling factor
+        target_tau = variance_scale / (self.input_var + 0.01)
+        target_tau = np.clip(target_tau, self.tau_min, self.tau_max)
+
+        # Prediction error gates the adaptation
+        # Only adapt tau when prediction is wrong
+        pred_error = np.abs(self.prediction_error)
+
+        # Combined adaptation rule:
+        # dτ/dt = lr * error * (target - current) + small_noise_for_exploration
+        d_tau = self.lr_tau * pred_error * (target_tau - self.tau)
+
+        # Add small exploration noise to prevent getting stuck
+        d_tau += 0.0001 * np.random.randn(self.n)
+
+        # Update tau
+        self.tau += dt * d_tau
+        self.tau = np.clip(self.tau, self.tau_min, self.tau_max)
+
+    def _hierarchical_learning(self, dt):
+        """
+        Learn hierarchical predictions: units learn to predict their inputs.
+
+        The key insight: slow units (high τ) have smooth activation that
+        carries temporal context. They can use this to predict patterns
+        in the input they receive from fast units.
+
+        Learning rule:
+            dW_hier_ij/dt = lr * input_pred_error_i * A_i
+
+        Where:
+            - input_pred_error_i = actual_input_i - predicted_input_i
+            - A_i = activation of the receiving unit (the predictor)
+
+        If error > 0 (actual > predicted): increase W_hier (predict more)
+        If error < 0 (actual < predicted): decrease W_hier (predict less)
+
+        This creates a predictive hierarchy:
+            - Slow units learn to predict their inputs
+            - They become "higher level" by modeling patterns in fast units
+            - The hierarchy emerges from the timescale gradient
+        """
+        rows, cols = self._conn_rows, self._conn_cols
+
+        # Error at each receiving unit
+        error_i = self.input_pred_error[rows]
+
+        # Activation of receiving unit (the predictor)
+        A_predictor = self.A[rows]
+
+        # Learning rule: adjust prediction weights based on error
+        # Scale by tau - slow units (high tau) should learn to predict more
+        tau_factor = np.sqrt(self.tau[rows])  # Slow units learn predictions more
+
+        dW_hier = self.lr_hier * error_i * A_predictor * tau_factor
+
+        # Update hierarchical prediction weights
+        self.W_hier_data += dt * dW_hier
+        self.W_hier_data = np.clip(self.W_hier_data, -2.0, 2.0)
 
     def _homeostatic_adjustment(self):
         """
@@ -1011,11 +1159,37 @@ class PredictiveSOCMind:
         print("Training complete.")
 
     def reset(self):
-        """Reset network state (but keep learned weights)."""
+        """Reset network state (but keep learned weights and tau)."""
         self.A = np.zeros(self.n)
         self.theta = np.random.uniform(0, 2*np.pi, self.n)
         self.E = np.ones(self.n)
         self.prediction_error = np.zeros(self.n)
+        # Reset target but keep tau (tau is learned structure)
+        self.A_target = np.zeros(self.n)
+        self.target_strength = 0.0
+
+    def get_tau_stats(self):
+        """Get statistics about timescale distribution (for analyzing hierarchy)."""
+        return {
+            'mean': np.mean(self.tau),
+            'std': np.std(self.tau),
+            'min': np.min(self.tau),
+            'max': np.max(self.tau),
+            'median': np.median(self.tau),
+            'fast_units': np.sum(self.tau < 0.5),    # Units with τ < 0.5
+            'medium_units': np.sum((self.tau >= 0.5) & (self.tau < 2.0)),
+            'slow_units': np.sum(self.tau >= 2.0),   # Units with τ >= 2.0
+            'tau_range': np.max(self.tau) / (np.min(self.tau) + 1e-8),  # Dynamic range
+        }
+
+    def get_hier_stats(self):
+        """Get statistics about hierarchical prediction learning."""
+        return {
+            'W_hier_mean': np.mean(np.abs(self.W_hier_data)),
+            'W_hier_max': np.max(np.abs(self.W_hier_data)),
+            'W_hier_nonzero': np.sum(np.abs(self.W_hier_data) > 0.01),
+            'input_pred_error_mean': np.mean(np.abs(self.input_pred_error)),
+        }
 
 
 class InteractiveVisualizer:
@@ -1877,9 +2051,24 @@ def benchmark_fibonacci():
     print("TESTING PHASE")
     print("=" * 70)
 
-    def measure_fib_prediction(mind, a, b, expected_c, n_steps=40):
+    # All candidate answers the network could predict
+    all_candidates = list(set(fib[:12]))  # All Fibonacci numbers we know
+
+    def get_pattern_for_number(n, n_units):
+        """Generate the sparse pattern for a Fibonacci number."""
+        pattern_id = hash(f"fib_{n}") % 10000
+        np.random.seed(pattern_id)
+        n_active = np.random.randint(20, 50)
+        units = np.random.choice(n_units, n_active, replace=False)
+        np.random.seed(None)
+        pattern = np.zeros(n_units)
+        pattern[units] = 1.0
+        return pattern
+
+    def predict_fib(mind, a, b, n_steps=40):
         """
-        Show (a, b), measure how well network predicts c.
+        Show (a, b), return which candidate has highest overlap.
+        Returns: (predicted_number, correct_number, all_overlaps_dict)
         """
         mind.reset()
 
@@ -1893,83 +2082,113 @@ def benchmark_fibonacci():
         for _ in range(n_steps):
             mind.step(0.1)
 
-        # Generate target pattern for expected_c
-        target_id = hash(f"fib_{expected_c}") % 10000
-        np.random.seed(target_id)
-        n_active = np.random.randint(20, 50)
-        target_units = np.random.choice(mind.n, n_active, replace=False)
-        np.random.seed(None)
+        # Compute overlap with ALL candidates
+        overlaps = {}
+        for candidate in all_candidates:
+            pattern = get_pattern_for_number(candidate, mind.n)
+            dot = np.dot(mind.A, pattern)
+            norm = np.linalg.norm(mind.A) * np.linalg.norm(pattern) + 1e-8
+            overlaps[candidate] = dot / norm
 
-        target_pattern = np.zeros(mind.n)
-        target_pattern[target_units] = 1.0
+        # Find winner
+        predicted = max(overlaps, key=overlaps.get)
+        correct = a + b  # Fibonacci rule
 
-        # Measure overlap
-        dot = np.dot(mind.A, target_pattern)
-        norm = np.linalg.norm(mind.A) * np.linalg.norm(target_pattern) + 1e-8
-        overlap = dot / norm
-
-        return overlap
+        return predicted, correct, overlaps
 
     # Test on all triplets
-    print("\n--- Fibonacci Predictions ---")
-    print(f"{'Input (a,b)':<15} {'Expected c':<12} {'Overlap':<10} {'Trained?':<10}")
-    print("-" * 50)
+    print("\n--- Fibonacci Predictions (Top-1 Accuracy) ---")
+    print(f"{'Input':<12} {'Correct':<10} {'Predicted':<10} {'Match?':<8} {'Confidence':<10}")
+    print("-" * 55)
 
     results = []
+    trained_correct = 0
+    trained_total = 0
+    untrained_correct = 0
+    untrained_total = 0
+
     for i, (a, b, c) in enumerate(test_triplets):
-        overlap = measure_fib_prediction(mind, a, b, c)
+        predicted, correct, overlaps = predict_fib(mind, a, b)
+        is_correct = (predicted == correct)
         trained = i < len(train_triplets)
-        results.append({'a': a, 'b': b, 'c': c, 'overlap': overlap, 'trained': trained})
 
-        marker = "Y" if trained else "N (new)"
-        print(f"({a}, {b}){'':<8} {c:<12} {overlap:.4f}     {marker}")
+        # Confidence = gap between top prediction and second best
+        sorted_overlaps = sorted(overlaps.values(), reverse=True)
+        confidence = sorted_overlaps[0] - sorted_overlaps[1] if len(sorted_overlaps) > 1 else 0
 
-    # Also test WRONG predictions (sanity check)
-    print("\n--- Wrong Predictions (should be lower) ---")
-    print(f"{'Input (a,b)':<15} {'Wrong c':<12} {'Overlap':<10}")
-    print("-" * 40)
+        results.append({
+            'a': a, 'b': b, 'correct': correct, 'predicted': predicted,
+            'is_correct': is_correct, 'trained': trained,
+            'overlaps': overlaps, 'confidence': confidence
+        })
 
-    wrong_results = []
-    wrong_tests = [
-        (1, 1, 5),   # Should be 2, not 5
-        (2, 3, 13),  # Should be 5, not 13
-        (3, 5, 21),  # Should be 8, not 21
-    ]
-    for a, b, wrong_c in wrong_tests:
-        overlap = measure_fib_prediction(mind, a, b, wrong_c)
-        wrong_results.append(overlap)
-        print(f"({a}, {b}){'':<8} {wrong_c:<12} {overlap:.4f}")
+        if trained:
+            trained_total += 1
+            if is_correct:
+                trained_correct += 1
+        else:
+            untrained_total += 1
+            if is_correct:
+                untrained_correct += 1
+
+        match_str = "YES" if is_correct else "NO"
+        train_str = "" if trained else "(new)"
+        print(f"({a},{b}){train_str:<6} {correct:<10} {predicted:<10} {match_str:<8} {confidence:.3f}")
 
     # === SUMMARY ===
     print("\n" + "=" * 70)
     print("BENCHMARK SUMMARY")
     print("=" * 70)
 
-    trained_overlaps = [r['overlap'] for r in results if r['trained']]
-    untrained_overlaps = [r['overlap'] for r in results if not r['trained']]
+    trained_acc = trained_correct / trained_total * 100 if trained_total > 0 else 0
+    untrained_acc = untrained_correct / untrained_total * 100 if untrained_total > 0 else 0
+    total_acc = (trained_correct + untrained_correct) / (trained_total + untrained_total) * 100
 
-    avg_trained = np.mean(trained_overlaps) if trained_overlaps else 0
-    avg_untrained = np.mean(untrained_overlaps) if untrained_overlaps else 0
-    avg_wrong = np.mean(wrong_results)
+    print(f"\n  ACCURACY:")
+    print(f"    Trained triplets:   {trained_correct}/{trained_total} = {trained_acc:.1f}%")
+    print(f"    Untrained triplets: {untrained_correct}/{untrained_total} = {untrained_acc:.1f}%")
+    print(f"    Overall:            {trained_correct + untrained_correct}/{trained_total + untrained_total} = {total_acc:.1f}%")
 
-    print(f"  Trained triplets overlap:    {avg_trained:.4f}")
-    print(f"  Untrained triplets overlap:  {avg_untrained:.4f}")
-    print(f"  Wrong answers overlap:       {avg_wrong:.4f}")
+    if untrained_acc > 0:
+        print(f"\n  Generalization: Network correctly predicted {untrained_correct} unseen triplets!")
 
-    if avg_untrained > 0:
-        generalization = avg_untrained / avg_trained
-        print(f"\n  Generalization ratio:        {generalization:.2f}x")
-        print(f"    (1.0 = perfect generalization, <0.5 = just memorization)")
-
-    signal_noise = avg_trained / (avg_wrong + 1e-8)
-    print(f"  Signal/Noise (vs wrong):     {signal_noise:.2f}x")
-
-    if signal_noise > 1.5 and avg_untrained > avg_wrong:
-        print("\n  PASS: Network learned Fibonacci pattern!")
-    elif signal_noise > 1.2:
+    if trained_acc >= 80 and untrained_acc >= 50:
+        print("\n  PASS: Strong learning with generalization!")
+    elif trained_acc >= 50:
         print("\n  PARTIAL: Some learning, but weak generalization.")
     else:
         print("\n  FAIL: Network did not learn the pattern.")
+
+    # === Emergent Hierarchy Analysis ===
+    print("\n" + "-" * 70)
+    print("EMERGENT HIERARCHY (Timescale Distribution)")
+    print("-" * 70)
+
+    tau_stats = mind.get_tau_stats()
+    print(f"  Tau range:    {tau_stats['min']:.3f} - {tau_stats['max']:.3f}")
+    print(f"  Tau mean:     {tau_stats['mean']:.3f} (std: {tau_stats['std']:.3f})")
+    print(f"  Dynamic range: {tau_stats['tau_range']:.1f}x")
+    print(f"\n  Fast units (tau < 0.5):   {tau_stats['fast_units']}")
+    print(f"  Medium units (0.5-2.0):   {tau_stats['medium_units']}")
+    print(f"  Slow units (tau >= 2.0):  {tau_stats['slow_units']}")
+
+    if tau_stats['tau_range'] > 10:
+        print("\n  Strong timescale separation detected (potential hierarchy)!")
+    elif tau_stats['tau_range'] > 3:
+        print("\n  Moderate timescale separation detected.")
+    else:
+        print("\n  Weak timescale separation (no clear hierarchy).")
+
+    # Hierarchical prediction stats
+    print("\n" + "-" * 70)
+    print("HIERARCHICAL PREDICTION")
+    print("-" * 70)
+
+    hier_stats = mind.get_hier_stats()
+    print(f"  W_hier mean magnitude:   {hier_stats['W_hier_mean']:.4f}")
+    print(f"  W_hier max magnitude:    {hier_stats['W_hier_max']:.4f}")
+    print(f"  Active predictions:      {hier_stats['W_hier_nonzero']}")
+    print(f"  Input pred error:        {hier_stats['input_pred_error_mean']:.4f}")
 
     print("=" * 70)
 
