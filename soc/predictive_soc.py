@@ -1786,6 +1786,196 @@ def benchmark_contrastive_prediction():
     return mind, {'trained': trained_overlaps, 'untrained': untrained_overlaps}
 
 
+def benchmark_fibonacci():
+    """
+    Can the network learn the Fibonacci rule?
+
+    f(n) = f(n-1) + f(n-2)
+
+    This is harder than simple A->B because:
+    1. It requires combining TWO previous inputs
+    2. It's a mathematical pattern, not arbitrary associations
+    3. We can test generalization to unseen numbers
+
+    Training approach:
+    - Show two consecutive Fibonacci numbers
+    - Set target to the next number
+    - Network state after seeing (a, b) should predict (a+b)
+    """
+    print("=" * 70)
+    print("FIBONACCI PREDICTION BENCHMARK")
+    print("=" * 70)
+    print("\nCan the network learn: f(n) = f(n-1) + f(n-2)?")
+
+    # Generate Fibonacci sequence
+    fib = [1, 1]
+    for _ in range(15):
+        fib.append(fib[-1] + fib[-2])
+    print(f"\nFibonacci sequence: {fib[:12]}...")
+
+    # Training triplets (a, b) -> c where c = a + b
+    train_triplets = []
+    for i in range(8):  # Train on first 8 triplets
+        train_triplets.append((fib[i], fib[i+1], fib[i+2]))
+
+    # Test triplets (including some not in training)
+    test_triplets = []
+    for i in range(10):  # Test on more, including unseen
+        test_triplets.append((fib[i], fib[i+1], fib[i+2]))
+
+    print(f"\nTraining triplets: {len(train_triplets)}")
+    for a, b, c in train_triplets:
+        print(f"  ({a}, {b}) -> {c}")
+
+    # Create model
+    mind = PredictiveSOCMind(n_units=1024)
+
+    # Warmup
+    print("\nWarming up network...")
+    for _ in range(100):
+        mind.step(0.1)
+
+    # === TRAINING PHASE ===
+    print("\n" + "=" * 70)
+    print("TRAINING PHASE")
+    print("=" * 70)
+
+    n_epochs = 30
+    steps_between = 8  # Steps between injections
+    steps_with_target = 15  # Steps with target active
+
+    for epoch in range(n_epochs):
+        epoch_error = 0.0
+
+        for a, b, c in train_triplets:
+            mind.reset()
+
+            # 1. Inject first number
+            mind.inject_text(f"fib_{a}", strength=0.8)
+            for _ in range(steps_between):
+                mind.step(0.1)
+
+            # 2. Inject second number
+            mind.inject_text(f"fib_{b}", strength=0.8)
+            for _ in range(steps_between):
+                mind.step(0.1)
+
+            # 3. Set target (what should come next)
+            mind.set_target(f"fib_{c}", strength=1.5)
+
+            # 4. Learn with target active
+            for _ in range(steps_with_target):
+                mind.step(0.1)
+                epoch_error += mind.get_prediction_error()
+
+        avg_error = epoch_error / (len(train_triplets) * steps_with_target)
+        if epoch % 5 == 0:
+            print(f"  Epoch {epoch+1:2d}/{n_epochs}: avg prediction error = {avg_error:.4f}")
+
+    # === TESTING PHASE ===
+    print("\n" + "=" * 70)
+    print("TESTING PHASE")
+    print("=" * 70)
+
+    def measure_fib_prediction(mind, a, b, expected_c, n_steps=40):
+        """
+        Show (a, b), measure how well network predicts c.
+        """
+        mind.reset()
+
+        # Inject first number
+        mind.inject_text(f"fib_{a}", strength=0.8)
+        for _ in range(steps_between):
+            mind.step(0.1)
+
+        # Inject second number
+        mind.inject_text(f"fib_{b}", strength=0.8)
+        for _ in range(n_steps):
+            mind.step(0.1)
+
+        # Generate target pattern for expected_c
+        target_id = hash(f"fib_{expected_c}") % 10000
+        np.random.seed(target_id)
+        n_active = np.random.randint(20, 50)
+        target_units = np.random.choice(mind.n, n_active, replace=False)
+        np.random.seed(None)
+
+        target_pattern = np.zeros(mind.n)
+        target_pattern[target_units] = 1.0
+
+        # Measure overlap
+        dot = np.dot(mind.A, target_pattern)
+        norm = np.linalg.norm(mind.A) * np.linalg.norm(target_pattern) + 1e-8
+        overlap = dot / norm
+
+        return overlap
+
+    # Test on all triplets
+    print("\n--- Fibonacci Predictions ---")
+    print(f"{'Input (a,b)':<15} {'Expected c':<12} {'Overlap':<10} {'Trained?':<10}")
+    print("-" * 50)
+
+    results = []
+    for i, (a, b, c) in enumerate(test_triplets):
+        overlap = measure_fib_prediction(mind, a, b, c)
+        trained = i < len(train_triplets)
+        results.append({'a': a, 'b': b, 'c': c, 'overlap': overlap, 'trained': trained})
+
+        marker = "Y" if trained else "N (new)"
+        print(f"({a}, {b}){'':<8} {c:<12} {overlap:.4f}     {marker}")
+
+    # Also test WRONG predictions (sanity check)
+    print("\n--- Wrong Predictions (should be lower) ---")
+    print(f"{'Input (a,b)':<15} {'Wrong c':<12} {'Overlap':<10}")
+    print("-" * 40)
+
+    wrong_results = []
+    wrong_tests = [
+        (1, 1, 5),   # Should be 2, not 5
+        (2, 3, 13),  # Should be 5, not 13
+        (3, 5, 21),  # Should be 8, not 21
+    ]
+    for a, b, wrong_c in wrong_tests:
+        overlap = measure_fib_prediction(mind, a, b, wrong_c)
+        wrong_results.append(overlap)
+        print(f"({a}, {b}){'':<8} {wrong_c:<12} {overlap:.4f}")
+
+    # === SUMMARY ===
+    print("\n" + "=" * 70)
+    print("BENCHMARK SUMMARY")
+    print("=" * 70)
+
+    trained_overlaps = [r['overlap'] for r in results if r['trained']]
+    untrained_overlaps = [r['overlap'] for r in results if not r['trained']]
+
+    avg_trained = np.mean(trained_overlaps) if trained_overlaps else 0
+    avg_untrained = np.mean(untrained_overlaps) if untrained_overlaps else 0
+    avg_wrong = np.mean(wrong_results)
+
+    print(f"  Trained triplets overlap:    {avg_trained:.4f}")
+    print(f"  Untrained triplets overlap:  {avg_untrained:.4f}")
+    print(f"  Wrong answers overlap:       {avg_wrong:.4f}")
+
+    if avg_untrained > 0:
+        generalization = avg_untrained / avg_trained
+        print(f"\n  Generalization ratio:        {generalization:.2f}x")
+        print(f"    (1.0 = perfect generalization, <0.5 = just memorization)")
+
+    signal_noise = avg_trained / (avg_wrong + 1e-8)
+    print(f"  Signal/Noise (vs wrong):     {signal_noise:.2f}x")
+
+    if signal_noise > 1.5 and avg_untrained > avg_wrong:
+        print("\n  PASS: Network learned Fibonacci pattern!")
+    elif signal_noise > 1.2:
+        print("\n  PARTIAL: Some learning, but weak generalization.")
+    else:
+        print("\n  FAIL: Network did not learn the pattern.")
+
+    print("=" * 70)
+
+    return mind, results
+
+
 if __name__ == "__main__":
     if len(sys.argv) > 1:
         if sys.argv[1] == '--demo':
@@ -1796,6 +1986,8 @@ if __name__ == "__main__":
             benchmark_sequence_prediction()
         elif sys.argv[1] == '--contrastive':
             benchmark_contrastive_prediction()
+        elif sys.argv[1] == '--fibonacci':
+            benchmark_fibonacci()
     else:
         print("Starting interactive mode...")
         mind = PredictiveSOCMind(n_units=1024)
