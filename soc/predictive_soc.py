@@ -129,14 +129,32 @@ class PredictiveSOCMind:
         self.temporal_trace = np.zeros(self._n_connections)  # A_prev[col] * A_now[row]
         self.associations = {}  # "A->B" -> strength
 
-    def step(self, dt=0.1):
+        # === SOC: Synaptic Scaling ===
+        # Each unit tracks its running average activity
+        # If too active: scale DOWN incoming weights (prevents runaway)
+        # If too quiet: scale UP incoming weights (prevents death)
+        # This creates criticality through weight homeostasis
+        self.activity_trace = np.ones(n_units) * self.target_activity  # Running avg
+        self.synaptic_scale = np.ones(n_units)  # Scaling factor per unit
+
+        # === Avalanche Tracking ===
+        self.avalanche_sizes = []  # History of avalanche sizes
+        self.current_avalanche = 0  # Current avalanche size
+        self.A_prev = np.zeros(n_units)  # Previous activation for avalanche detection
+        self.in_avalanche = False
+
+    def step(self, dt=0.1, dream_mode=False):
         """One timestep of dynamics."""
         self.t += dt
 
-        # 1. Process external input
-        for inp in self.input_queue:
-            self._inject(inp)
-        self.input_queue.clear()
+        # Store previous activation for temporal learning and avalanche tracking
+        self.A_prev = self.A.copy()
+
+        # 1. Process external input (skip in dream mode - only noise)
+        if not dream_mode:
+            for inp in self.input_queue:
+                self._inject(inp)
+            self.input_queue.clear()
 
         # 2. Each unit predicts its next state
         self._make_predictions()
@@ -153,10 +171,20 @@ class PredictiveSOCMind:
         # 6. Homeostatic threshold adjustment (maintains criticality)
         self._homeostatic_adjustment()
 
-        # 7. Update state
+        # 7. === SOC: Synaptic Scaling ===
+        self._synaptic_scaling(dt)
+
+        # 8. === Avalanche Tracking ===
+        self._track_avalanche(A_next)
+
+        # 9. Update state
         self.A = A_next
         self._update_phases(dt)
         self._update_energy(dt)
+
+        # 10. Dream mode: temporal Hebbian learning during free evolution
+        if dream_mode:
+            self._dream_learning(dt)
 
         # Record history
         self._record()
@@ -332,6 +360,111 @@ class PredictiveSOCMind:
         # Adjust threshold
         self.threshold += self.homeostatic_rate * error
         self.threshold = np.clip(self.threshold, 0.1, 0.9)
+
+    def _synaptic_scaling(self, dt):
+        """
+        SOC through synaptic scaling (weight homeostasis).
+
+        This is the core SOC mechanism:
+        - GROWTH: Learning strengthens specific connections → cascades can spread
+        - DECAY: If a unit is too active, scale DOWN its incoming weights
+
+        This creates competition: learned pathways compete for limited "activation budget".
+        The system self-organizes to criticality through weight regulation.
+
+        Biological basis: Homeostatic synaptic plasticity (Turrigiano et al.)
+        """
+        # Update running average of each unit's activity
+        activity_tau = 0.99  # Slow averaging
+        self.activity_trace = activity_tau * self.activity_trace + (1 - activity_tau) * self.A
+
+        # Compute scaling factor: if activity > target, scale < 1 (reduce); if < target, scale > 1
+        # Using multiplicative scaling for stability
+        ratio = self.target_activity / (self.activity_trace + 1e-8)
+        # Gentle scaling - don't change too fast
+        target_scale = np.clip(ratio, 0.5, 2.0)
+        self.synaptic_scale += 0.001 * (target_scale - self.synaptic_scale)
+
+        # Apply scaling to incoming weights (W_dyn)
+        # Each connection's effective weight is W * scale[target_unit]
+        rows = self._conn_rows
+        scale_factors = self.synaptic_scale[rows]
+
+        # Instead of modifying W_dyn directly, we'll use this in _soc_dynamics
+        # But for now, let's apply a gentle push toward balanced weights
+        scaling_rate = 0.0001
+        self.W_dyn_data *= (1 - scaling_rate) + scaling_rate * scale_factors
+
+    def _track_avalanche(self, A_next):
+        """
+        Track avalanche sizes for SOC analysis.
+
+        An avalanche starts when activity increases and ends when it decreases.
+        Power-law distributed avalanche sizes = system at criticality.
+        """
+        # Count newly activated units (crossed threshold this step)
+        newly_active = np.sum((A_next > self.threshold) & (self.A_prev <= self.threshold))
+        still_active = np.sum((A_next > self.threshold) & (self.A_prev > self.threshold))
+
+        # Avalanche detection
+        if newly_active > 0:
+            if not self.in_avalanche:
+                # Start new avalanche
+                self.in_avalanche = True
+                self.current_avalanche = newly_active
+            else:
+                # Continue avalanche
+                self.current_avalanche += newly_active
+        else:
+            if self.in_avalanche:
+                # Avalanche ended - record its size
+                if self.current_avalanche > 0:
+                    self.avalanche_sizes.append(self.current_avalanche)
+                    # Keep only recent avalanches
+                    if len(self.avalanche_sizes) > 1000:
+                        self.avalanche_sizes = self.avalanche_sizes[-500:]
+                self.in_avalanche = False
+                self.current_avalanche = 0
+
+    def _dream_learning(self, dt):
+        """
+        Temporal Hebbian learning during dream/free evolution.
+
+        When the network runs freely (no external input), associations
+        that naturally co-activate get strengthened. This:
+        1. Consolidates learned chains (cat→meow→purr)
+        2. Allows the network to "practice" associations
+        3. Strengthens whatever patterns emerge from SOC dynamics
+
+        Key insight: In dream mode, the network's own dynamics determine
+        what gets learned. Strong associations activate each other,
+        reinforcing themselves.
+        """
+        rows, cols = self._conn_rows, self._conn_cols
+
+        # Temporal Hebbian: strengthen connections FROM previously-active TO currently-active
+        source_was_active = self.A_prev[cols]  # How active was source last step?
+        target_is_active = self.A[rows]         # How active is target now?
+
+        # Only learn when there's a temporal sequence (not just co-activation)
+        temporal_signal = source_was_active * target_is_active
+
+        # Weight the learning by how "surprising" this activation is
+        # (prediction error modulated)
+        surprise = np.abs(self.prediction_error[rows])
+
+        # Dream learning rate (slower than explicit training)
+        dream_lr = 0.001
+        dW = dream_lr * temporal_signal * (1 + surprise)
+
+        # Apply to both temporal trace and dynamics weights
+        self.temporal_trace += dt * dW
+
+        # Gently apply temporal trace to W_dyn
+        if np.max(self.temporal_trace) > 0:
+            normalized = self.temporal_trace / (np.max(self.temporal_trace) + 1e-8)
+            self.W_dyn_data += dt * 0.01 * normalized
+            self.W_dyn_data = np.clip(self.W_dyn_data, -1.0, 1.0)
 
     def _update_phases(self, dt):
         """Phase dynamics: Kuramoto-like coupling using W_dyn."""
@@ -608,6 +741,85 @@ class PredictiveSOCMind:
             'history': overlap_history
         }
 
+    def dream(self, n_steps=200, verbose=True):
+        """
+        Dream mode: run the network with only noise, allowing temporal
+        Hebbian learning to consolidate associations.
+
+        This is like sleep consolidation:
+        - No external input (just spontaneous noise)
+        - Whatever patterns naturally co-activate get strengthened
+        - Chains like cat→meow→purr reinforce themselves
+
+        Returns statistics about what happened during dreaming.
+        """
+        if verbose:
+            print(f"Dreaming for {n_steps} steps...")
+            print("  (Temporal Hebbian learning active, no external input)")
+
+        # Track which patterns activate during dreaming
+        pattern_activations = {name: [] for name in self.pattern_traces}
+        avalanches_before = len(self.avalanche_sizes)
+
+        # Start from low activity state
+        self.A = np.random.uniform(0, 0.1, self.n)
+
+        for step in range(n_steps):
+            # Add small noise to trigger spontaneous activity
+            noise_units = np.random.choice(self.n, size=5, replace=False)
+            self.A[noise_units] += np.random.uniform(0.1, 0.3, len(noise_units))
+            self.A = np.clip(self.A, 0, 1)
+
+            # Step with dream_mode=True
+            self.step(0.1, dream_mode=True)
+
+            # Track pattern overlaps
+            for name, pattern in self.pattern_traces.items():
+                dot = np.dot(self.A, pattern)
+                norm = np.linalg.norm(self.A) * np.linalg.norm(pattern) + 1e-8
+                pattern_activations[name].append(dot / norm)
+
+        # Analyze what patterns were active during dreaming
+        avg_activations = {name: np.mean(hist) for name, hist in pattern_activations.items()}
+        peak_activations = {name: np.max(hist) for name, hist in pattern_activations.items()}
+        avalanches_during = len(self.avalanche_sizes) - avalanches_before
+
+        if verbose:
+            print(f"\nDream summary:")
+            print(f"  Avalanches: {avalanches_during}")
+            if avg_activations:
+                print(f"  Pattern activations (avg):")
+                for name, avg in sorted(avg_activations.items(), key=lambda x: -x[1]):
+                    peak = peak_activations[name]
+                    print(f"    {name}: avg={avg:.3f}, peak={peak:.3f}")
+            print(f"  Temporal trace max: {np.max(self.temporal_trace):.4f}")
+            print("Done dreaming.")
+
+        return {
+            'n_steps': n_steps,
+            'avalanches': avalanches_during,
+            'avg_activations': avg_activations,
+            'peak_activations': peak_activations,
+            'pattern_history': pattern_activations
+        }
+
+    def get_avalanche_stats(self):
+        """Get statistics about avalanche sizes (for SOC analysis)."""
+        if len(self.avalanche_sizes) < 10:
+            return {'n_avalanches': len(self.avalanche_sizes), 'status': 'not enough data'}
+
+        sizes = np.array(self.avalanche_sizes)
+        return {
+            'n_avalanches': len(sizes),
+            'mean_size': np.mean(sizes),
+            'max_size': np.max(sizes),
+            'median_size': np.median(sizes),
+            'std_size': np.std(sizes),
+            # Power law indicator: ratio of mean to median
+            # For power law: mean >> median
+            'mean_median_ratio': np.mean(sizes) / (np.median(sizes) + 1e-8)
+        }
+
     def inject_sequence(self, items, delay_steps=20):
         """
         Inject a sequence of items with delays.
@@ -696,6 +908,7 @@ class InteractiveVisualizer:
         self.mind = mind
         self.input_queue = queue.Queue()
         self.last_input = ""
+        self.is_dreaming = True  # Start in dream mode
 
         # Create figure
         self.fig = plt.figure(figsize=(16, 10))
@@ -793,13 +1006,15 @@ class InteractiveVisualizer:
         return hsv_to_rgb(np.stack([h, s, v], axis=-1))
 
     def _process_input(self):
-        """Process command queue."""
+        """Process command queue. Returns True if input was processed."""
+        had_input = False
         try:
             while True:
                 text = self.input_queue.get_nowait().strip()
                 if not text:
                     continue
 
+                had_input = True
                 if text.lower() in ('quit', 'exit'):
                     plt.close(self.fig)
                     return
@@ -876,22 +1091,55 @@ class InteractiveVisualizer:
 
                     sys.stdout.flush()
                     self.last_input = f"[RECALL: {word}]"
+                elif text.lower().startswith('dream'):
+                    # dream or dream 500 -> run dream mode for N steps
+                    parts = text.split()
+                    n_steps = int(parts[1]) if len(parts) > 1 else 200
+                    result = self.mind.dream(n_steps=n_steps)
+                    sys.stdout.flush()
+                    self.last_input = f"[DREAM: {n_steps} steps]"
+                elif text.lower() == 'soc':
+                    # Show SOC statistics
+                    stats = self.mind.get_avalanche_stats()
+                    print(f"\n[SOC Statistics]")
+                    if 'status' in stats:
+                        print(f"  {stats['status']}")
+                    else:
+                        print(f"  Avalanches recorded: {stats['n_avalanches']}")
+                        print(f"  Mean size: {stats['mean_size']:.2f}")
+                        print(f"  Median size: {stats['median_size']:.2f}")
+                        print(f"  Max size: {stats['max_size']}")
+                        print(f"  Mean/Median ratio: {stats['mean_median_ratio']:.2f}")
+                        print(f"  (Ratio > 2 suggests power-law / criticality)")
+                    print(f"\n  Synaptic scale range: [{np.min(self.mind.synaptic_scale):.3f}, {np.max(self.mind.synaptic_scale):.3f}]")
+                    print(f"  Activity trace range: [{np.min(self.mind.activity_trace):.4f}, {np.max(self.mind.activity_trace):.4f}]")
+                    sys.stdout.flush()
+                    self.last_input = "[SOC]"
                 else:
                     self.mind.inject_text(text, 0.7)
                     self.last_input = text
 
         except queue.Empty:
             pass
+        return had_input
 
     def update(self, frame):
         """Animation update."""
-        self._process_input()
+        had_input = self._process_input()
+        self.is_dreaming = not had_input  # Track mode for display
 
-        # Run steps
+        # Run steps - dream mode when idle, awake mode when input received
         for _ in range(5):
-            if np.random.random() < 0.005:
-                self.mind.inject_pattern(np.random.randint(10000), 0.3)
-            self.mind.step(0.1)
+            if had_input:
+                # Awake mode: just processed real input, run normal dynamics
+                self.mind.step(0.1, dream_mode=False)
+            else:
+                # Dream/idle mode: no input, consolidate associations
+                # Add noise EVERY step to trigger spontaneous activity (match explicit dream)
+                noise_units = np.random.choice(self.mind.n, size=5, replace=False)
+                self.mind.A[noise_units] += np.random.uniform(0.1, 0.3, len(noise_units))
+                self.mind.A = np.clip(self.mind.A, 0, 1)
+                self.mind.step(0.1, dream_mode=True)
 
         # Update activation
         padded = np.zeros(self.mind.grid_size**2)
@@ -946,11 +1194,14 @@ class InteractiveVisualizer:
         if n_patterns > 3:
             patterns_str += f'... (+{n_patterns-3})'
 
-        stats = f"""Time: {self.mind.t:.1f}
+        mode = "DREAMING" if self.is_dreaming else "AWAKE"
+        n_avalanches = len(self.mind.avalanche_sizes)
+
+        stats = f"""Mode: {mode}
+Time: {self.mind.t:.1f}
 Threshold: {self.mind.threshold:.3f}
 Active: {np.sum(self.mind.A > self.mind.threshold)}
-Mean Error: {np.mean(np.abs(self.mind.prediction_error)):.4f}
-Confidence: {np.mean(self.mind.prediction_confidence):.3f}
+Avalanches: {n_avalanches}
 Coherence: {self.mind._phase_coherence():.3f}
 Learned: {patterns_str}
 
@@ -977,12 +1228,17 @@ Last: {self.last_input[:25]}"""
         print("This system learns by predicting its own next state.")
         print("Structure emerges from prediction, not hard-coded regions.")
         print()
+        print("DEFAULT: Network is DREAMING (consolidating associations)")
+        print("         Switches to AWAKE mode briefly when you input.")
+        print()
         print("Commands:")
         print("  <text>         - Inject pattern (just activates, no learning)")
         print("  learn a b c    - Learn patterns with Hebbian strengthening")
         print("  assoc a b      - Learn association: a triggers b")
         print("  recall <word>  - See what patterns are triggered by <word>")
         print("  test <word>    - Test familiarity (overlap with learned patterns)")
+        print("  dream [N]      - Dream for N steps (consolidate associations)")
+        print("  soc            - Show SOC statistics (avalanches, synaptic scaling)")
         print("  train a b c    - Train on sequence (prediction learning)")
         print("  reset          - Reset state (keep weights)")
         print("  quit           - Exit")
