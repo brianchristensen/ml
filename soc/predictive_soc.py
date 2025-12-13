@@ -162,7 +162,7 @@ class PredictiveSOCMind:
         self.A_target = np.zeros(n_units)      # Target activation (sparse)
         self.target_strength = 0.0              # β: how strongly to pull toward target
         self.target_decay = 0.9                 # How fast target decays without new input
-        self.lr_contrastive = 0.02              # Learning rate for three-factor rule
+        self.lr_contrastive = 0.1               # Learning rate for contrastive rule (increased for faster learning)
 
         # === Adaptive Timescales (for emergent hierarchy) ===
         # Each unit has its own time constant τ
@@ -176,6 +176,24 @@ class PredictiveSOCMind:
         self.input_mean = np.zeros(n_units)      # Running mean of input
         self.input_var = np.ones(n_units) * 0.1  # Running variance of input
         self.var_decay = 0.95                     # Decay for variance tracking
+
+        # === Fast Hebbian Weights (Working Memory) ===
+        # When input arrives, immediately update fast weights (Hebbian)
+        # These weights persist even as activation decays
+        # At prediction time, fast weights encode "what was recently seen"
+        #
+        # W_fast: temporary weight changes on same sparse structure as W_dyn
+        # Updated when input is injected, decays slowly over time
+        self.W_fast_data = np.zeros(self._n_connections)
+        self.fast_decay = 0.92  # How fast the fast weights decay each step
+        self.fast_lr = 0.5  # Learning rate for fast weight updates
+        self.fast_weight_scale = 0.3  # How much fast weights contribute to dynamics
+
+        # Also keep a simple input trace (leaky integrator of inputs)
+        # This directly tracks what patterns have been seen recently
+        self.input_trace = np.zeros(n_units)
+        self.trace_decay = 0.97  # Decay per step (slow decay to persist during learning)
+        self.trace_weight = 0.5  # How much trace contributes to dynamics
 
         # Tau adaptation parameters
         self.lr_tau = 0.001                       # Learning rate for tau adaptation
@@ -332,14 +350,38 @@ class PredictiveSOCMind:
         # This term pulls the network toward the target state
         target_pull = self.target_strength * (self.A_target - self.A)
 
+        # === Fast Weights: Memory of recent inputs ===
+        # W_fast encodes what patterns were recently injected (Hebbian traces)
+        # These add to the dynamics, allowing past inputs to influence current state
+
+        # Compute input from fast weights (same structure as W_dyn)
+        fast_exc = np.maximum(self.W_fast_data, 0) * firing[cols] * self.E[cols]
+        fast_sum = np.zeros(self.n)
+        np.add.at(fast_sum, rows, fast_exc)
+        fast_input = self.fast_weight_scale * fast_sum / in_degree
+
+        # Input trace contribution: directly excite units that were recently input
+        trace_input = self.trace_weight * self.input_trace
+
+        # === Decay fast weights and input trace ===
+        self.W_fast_data *= self.fast_decay
+        self.input_trace *= self.trace_decay
+
         # === Adaptive Timescale Dynamics ===
-        # dA/dt = (1/τ) * [input - decay*A + noise + target_pull]
+        # dA/dt = (1/τ) * [input - decay*A + noise + target_pull + fast_input + trace_input]
         # Small τ → fast response (low-level features)
         # Large τ → slow integration (high-level patterns)
-        raw_dA = total_input - self.decay * self.A + np.random.normal(0, self.noise, self.n) + target_pull
+        # Fast weights and input trace add historical context
+        raw_dA = (total_input
+                  + fast_input
+                  + trace_input
+                  - self.decay * self.A
+                  + np.random.normal(0, self.noise, self.n)
+                  + target_pull)
         dA = (1.0 / self.tau) * raw_dA
 
         A_next = np.clip(self.A + dt * dA, 0, 1)
+
         return A_next
 
     def _learn_from_error(self, dt):
@@ -475,11 +517,27 @@ class PredictiveSOCMind:
         # - error > 0 (should be more active): strengthen from active pre
         # - error < 0 (should be less active): weaken from active pre
         #
-        # The sparse activation of pre naturally limits which connections learn
-        pre = self.A[cols]
+        # KEY INSIGHT: Use input_trace as pre, not current A!
+        # input_trace contains "what was seen" without target contamination.
+        # This learns: "when these inputs were seen → predict target"
+        # Rather than: "when target is already active → strengthen target"
+        pre = self.input_trace[cols]  # What was INPUT, not what is currently active
         error_post = local_error[rows]
 
-        dW = self.lr_contrastive * pre * error_post
+        dW_forward = self.lr_contrastive * pre * error_post
+
+        # === BIDIRECTIONAL LEARNING ===
+        # Also learn the REVERSE association: target → input
+        # This allows recalling what LED TO the target, not just what follows
+        # When target is active AND input_trace shows what was seen,
+        # strengthen connections from target back to input context.
+        # This creates backward flow: slow → fast, target → context
+        target_pre = self.A_target[cols]  # Target as source
+        trace_post = self.input_trace[rows]  # Input trace as destination
+        dW_backward = self.lr_contrastive * 0.5 * target_pre * trace_post
+
+        # Combine forward and backward learning
+        dW = dW_forward + dW_backward
 
         # Apply to dynamics weights (this IS the real learning)
         self.W_dyn_data += dt * dW
@@ -729,6 +787,22 @@ class PredictiveSOCMind:
             self.A[u] = min(1.0, self.A[u] + strength)
             if phases is not None:
                 self.theta[u] = phases[i]
+
+        # === Fast Hebbian Weight Update ===
+        # When input arrives, strengthen connections between co-active input units
+        # This stores the input pattern in the weight structure
+        rows, cols = self._conn_rows, self._conn_cols
+
+        # Create input pattern vector
+        input_pattern = np.zeros(self.n)
+        input_pattern[units] = strength
+
+        # Hebbian: dW_ij = pre_j * post_i (strengthen connections within input pattern)
+        dW_fast = self.fast_lr * input_pattern[rows] * input_pattern[cols]
+        self.W_fast_data += dW_fast
+
+        # Also update input trace (simple leaky integrator)
+        self.input_trace[units] += strength
 
     def _record(self):
         """Record history."""
@@ -1167,6 +1241,11 @@ class PredictiveSOCMind:
         # Reset target but keep tau (tau is learned structure)
         self.A_target = np.zeros(self.n)
         self.target_strength = 0.0
+
+    def reset_fast_weights(self):
+        """Reset fast weights and input trace (for fresh sequence learning)."""
+        self.W_fast_data = np.zeros(self._n_connections)
+        self.input_trace = np.zeros(self.n)
 
     def get_tau_stats(self):
         """Get statistics about timescale distribution (for analyzing hierarchy)."""
@@ -2023,6 +2102,7 @@ def benchmark_fibonacci():
 
         for a, b, c in train_triplets:
             mind.reset()
+            mind.reset_fast_weights()  # Fresh memory for each sequence
 
             # 1. Inject first number
             mind.inject_text(f"fib_{a}", strength=0.8)
@@ -2065,12 +2145,74 @@ def benchmark_fibonacci():
         pattern[units] = 1.0
         return pattern
 
+    # === DIAGNOSTIC: Test fast weights memory ===
+    print("\n" + "=" * 70)
+    print("FAST WEIGHTS DIAGNOSTIC")
+    print("=" * 70)
+
+    def cosine_sim(a, b):
+        return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-8)
+
+    # Test with (1, 2) -> 3
+    mind.reset()
+    mind.reset_fast_weights()
+
+    pattern_1 = get_pattern_for_number(1, mind.n)
+    pattern_2 = get_pattern_for_number(2, mind.n)
+    pattern_3 = get_pattern_for_number(3, mind.n)
+
+    print(f"\nTest sequence: (1, 2) -> 3")
+    print(f"Pattern overlap 1 vs 2: {cosine_sim(pattern_1, pattern_2):.3f}")
+    print(f"Pattern overlap 1 vs 3: {cosine_sim(pattern_1, pattern_3):.3f}")
+    print(f"Pattern overlap 2 vs 3: {cosine_sim(pattern_2, pattern_3):.3f}")
+
+    # Inject first number
+    print(f"\n1. Inject fib_1:")
+    mind.inject_text("fib_1", strength=0.8)
+    print(f"   A overlap with pattern_1: {cosine_sim(mind.A, pattern_1):.3f}")
+    print(f"   W_fast sum: {mind.W_fast_data.sum():.3f}")
+    print(f"   Input trace sum: {mind.input_trace.sum():.3f}")
+
+    for step in range(steps_between):
+        mind.step(0.1)
+
+    print(f"\n2. After {steps_between} steps (before inject 2):")
+    print(f"   A overlap with pattern_1: {cosine_sim(mind.A, pattern_1):.3f}")
+    print(f"   A overlap with pattern_2: {cosine_sim(mind.A, pattern_2):.3f}")
+    print(f"   W_fast sum: {mind.W_fast_data.sum():.3f}")
+    print(f"   Input trace overlap with pattern_1: {cosine_sim(mind.input_trace, pattern_1):.3f}")
+
+    # Inject second number
+    print(f"\n3. Inject fib_2:")
+    mind.inject_text("fib_2", strength=0.8)
+    print(f"   A overlap with pattern_1: {cosine_sim(mind.A, pattern_1):.3f}")
+    print(f"   A overlap with pattern_2: {cosine_sim(mind.A, pattern_2):.3f}")
+    print(f"   W_fast sum: {mind.W_fast_data.sum():.3f}")
+    print(f"   Input trace sum: {mind.input_trace.sum():.3f}")
+
+    for step in range(steps_between):
+        mind.step(0.1)
+
+    print(f"\n4. After {steps_between} more steps (prediction time):")
+    print(f"   Current activation (A):")
+    print(f"      overlap with pattern_1: {cosine_sim(mind.A, pattern_1):.3f}")
+    print(f"      overlap with pattern_2: {cosine_sim(mind.A, pattern_2):.3f}")
+    print(f"      overlap with pattern_3: {cosine_sim(mind.A, pattern_3):.3f}")
+    print(f"   W_fast sum: {mind.W_fast_data.sum():.3f}")
+    print(f"   Input trace:")
+    print(f"      overlap with pattern_1: {cosine_sim(mind.input_trace, pattern_1):.3f}")
+    print(f"      overlap with pattern_2: {cosine_sim(mind.input_trace, pattern_2):.3f}")
+    print(f"      sum: {mind.input_trace.sum():.3f}")
+
+    print("\n" + "=" * 70)
+
     def predict_fib(mind, a, b, n_steps=40):
         """
         Show (a, b), return which candidate has highest overlap.
         Returns: (predicted_number, correct_number, all_overlaps_dict)
         """
         mind.reset()
+        mind.reset_fast_weights()  # Fresh memory for each sequence
 
         # Inject first number
         mind.inject_text(f"fib_{a}", strength=0.8)
