@@ -123,6 +123,12 @@ class PredictiveSOCMind:
         self.pattern_traces = {}  # name -> activation pattern
         self.hebbian_trace = np.zeros(self._n_connections)  # Accumulated co-activation
 
+        # === Temporal/Associative Memory ===
+        # For sequence learning: strengthen connections FROM past TO present
+        # This allows pattern A to trigger pattern B
+        self.temporal_trace = np.zeros(self._n_connections)  # A_prev[col] * A_now[row]
+        self.associations = {}  # "A->B" -> strength
+
     def step(self, dt=0.1):
         """One timestep of dynamics."""
         self.t += dt
@@ -501,6 +507,107 @@ class PredictiveSOCMind:
             'final_activation': final_A
         }
 
+    def learn_association(self, pattern_a, pattern_b, n_reps=10, transition_steps=20):
+        """
+        Learn that pattern A triggers pattern B.
+
+        Temporal Hebbian rule:
+        - Present A, let it develop
+        - Present B, strengthen connections FROM A-active units TO B-active units
+        - Repeat to strengthen the association
+
+        This creates a "pathway" from A's attractor to B's attractor.
+        """
+        print(f"Learning association: '{pattern_a}' -> '{pattern_b}'")
+
+        # First ensure both patterns are learned individually
+        if pattern_a not in self.pattern_traces:
+            self.learn_pattern(pattern_a)
+        if pattern_b not in self.pattern_traces:
+            self.learn_pattern(pattern_b)
+
+        rows, cols = self._conn_rows, self._conn_cols
+
+        for rep in range(n_reps):
+            # Phase 1: Present pattern A and let it develop
+            self.reset()
+            self.inject_text(pattern_a, 0.9)
+            for _ in range(15):
+                self.step(0.1)
+
+            # Capture A's activation (these are the "source" units)
+            A_source = self.A.copy()
+
+            # Phase 2: Present pattern B (the target)
+            self.inject_text(pattern_b, 0.9)
+            for step in range(transition_steps):
+                self.step(0.1)
+
+                # Temporal Hebbian: strengthen FROM A-active TO currently-active
+                # This creates pathways from A's representation to B's
+                source_activity = A_source[cols]  # How active was source in pattern A?
+                target_activity = self.A[rows]     # How active is target now?
+
+                # Only strengthen where both source was active (in A) and target is active (in B)
+                temporal_strength = source_activity * target_activity
+                self.temporal_trace += 0.005 * temporal_strength
+
+        # Apply temporal trace to dynamics weights
+        if np.max(self.temporal_trace) > 0:
+            normalized = self.temporal_trace / (np.max(self.temporal_trace) + 1e-8)
+            # Add to dynamics weights - this creates the associative pathway
+            self.W_dyn_data += 0.1 * normalized
+            self.W_dyn_data = np.clip(self.W_dyn_data, -1.0, 1.0)
+
+        # Record the association
+        assoc_key = f"{pattern_a}->{pattern_b}"
+        self.associations[assoc_key] = self.associations.get(assoc_key, 0) + 1
+
+        print(f"  Association strengthened ({n_reps} repetitions)")
+        print(f"  Stored associations: {list(self.associations.keys())}")
+
+        return True
+
+    def recall(self, trigger_pattern, n_steps=50):
+        """
+        Present a pattern and see what the network evolves toward.
+
+        If we learned A->B, presenting A should cause the network
+        to drift toward B's representation.
+        """
+        self.reset()
+        self.inject_text(trigger_pattern, 0.9)
+
+        # Track overlaps over time
+        overlap_history = {name: [] for name in self.pattern_traces}
+
+        for step in range(n_steps):
+            self.step(0.1)
+
+            # Measure current overlap with all stored patterns
+            for name, pattern in self.pattern_traces.items():
+                dot = np.dot(self.A, pattern)
+                norm = np.linalg.norm(self.A) * np.linalg.norm(pattern) + 1e-8
+                overlap_history[name].append(dot / norm)
+
+        # Analyze: which pattern has highest overlap at the end?
+        final_overlaps = {name: hist[-1] for name, hist in overlap_history.items()}
+
+        # Also check: which pattern INCREASED the most?
+        delta_overlaps = {}
+        for name, hist in overlap_history.items():
+            if len(hist) > 10:
+                early = np.mean(hist[:10])
+                late = np.mean(hist[-10:])
+                delta_overlaps[name] = late - early
+
+        return {
+            'trigger': trigger_pattern,
+            'final_overlaps': final_overlaps,
+            'delta_overlaps': delta_overlaps,
+            'history': overlap_history
+        }
+
     def inject_sequence(self, items, delay_steps=20):
         """
         Inject a sequence of items with delays.
@@ -737,6 +844,38 @@ class InteractiveVisualizer:
                     sys.stdout.flush()
 
                     self.last_input = f"[TEST: {word}]"
+                elif text.lower().startswith('assoc '):
+                    # assoc cat meow -> learn that 'cat' triggers 'meow'
+                    parts = text[6:].split()
+                    if len(parts) >= 2:
+                        pattern_a, pattern_b = parts[0], parts[1]
+                        self.mind.learn_association(pattern_a, pattern_b)
+                        sys.stdout.flush()
+                        self.last_input = f"[ASSOC: {pattern_a}->{pattern_b}]"
+                    else:
+                        print("Usage: assoc <pattern_a> <pattern_b>")
+                        sys.stdout.flush()
+                elif text.lower().startswith('recall '):
+                    # recall cat -> show what patterns are triggered
+                    word = text[7:].strip()
+                    result = self.mind.recall(word)
+
+                    print(f"\n[RECALL '{word}']")
+                    print(f"  Final overlaps (after evolution):")
+                    for name, overlap in sorted(result['final_overlaps'].items(),
+                                                 key=lambda x: -x[1]):
+                        marker = " <-- trigger" if name == word else ""
+                        print(f"    {name}: {overlap:.3f}{marker}")
+
+                    print(f"\n  Delta (change over time):")
+                    for name, delta in sorted(result['delta_overlaps'].items(),
+                                               key=lambda x: -x[1]):
+                        direction = "+" if delta > 0 else ""
+                        marker = " <-- RECALLED!" if delta > 0.05 and name != word else ""
+                        print(f"    {name}: {direction}{delta:.3f}{marker}")
+
+                    sys.stdout.flush()
+                    self.last_input = f"[RECALL: {word}]"
                 else:
                     self.mind.inject_text(text, 0.7)
                     self.last_input = text
@@ -841,12 +980,14 @@ Last: {self.last_input[:25]}"""
         print("Commands:")
         print("  <text>         - Inject pattern (just activates, no learning)")
         print("  learn a b c    - Learn patterns with Hebbian strengthening")
+        print("  assoc a b      - Learn association: a triggers b")
+        print("  recall <word>  - See what patterns are triggered by <word>")
         print("  test <word>    - Test familiarity (overlap with learned patterns)")
         print("  train a b c    - Train on sequence (prediction learning)")
         print("  reset          - Reset state (keep weights)")
         print("  quit           - Exit")
         print()
-        print("Try: learn hello world  -> then: test hello  vs  test dog")
+        print("Try: assoc cat meow  -> then: recall cat  (should trigger meow)")
         print("=" * 60)
         sys.stdout.flush()
 
