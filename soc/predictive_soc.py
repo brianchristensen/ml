@@ -164,6 +164,24 @@ class PredictiveSOCMind:
         self.target_decay = 0.9                 # How fast target decays without new input
         self.lr_contrastive = 0.1               # Learning rate for contrastive rule (increased for faster learning)
 
+        # === COMPLEMENTARY LEARNING SYSTEM ===
+        # Inspired by hippocampus (fast) / neocortex (slow) in the brain
+        # Prevents catastrophic interference by separating fast volatile learning
+        # from slow stable memory accumulation
+        #
+        # W_dyn: Fast system - error-driven, can go negative, volatile
+        # W_longterm: Slow system - PURELY ADDITIVE Hebbian, never weakens, stable
+        #
+        # Key insight: Error-driven learning can push weights negative, erasing
+        # earlier learning. Additive Hebbian only accumulates, never forgets.
+        self.W_longterm = np.zeros(self._n_connections)  # Stable long-term memory
+        self.lr_longterm = 0.05                           # Learning rate for long-term
+        self.longterm_blend = 0.3                         # How much W_longterm contributes to dynamics
+
+        # Experience buffer for replay during dreams
+        self.experience_buffer = []
+        self.max_buffer_size = 200
+
         # === Adaptive Timescales (for emergent hierarchy) ===
         # Each unit has its own time constant τ
         # Small τ → fast response → low-level features
@@ -292,9 +310,14 @@ class PredictiveSOCMind:
 
     def _soc_dynamics(self, dt):
         """
-        SOC dynamics using W_dyn (the actual physics).
+        SOC dynamics using W_dyn blended with W_longterm.
         This is where avalanches emerge.
-        W_dyn is separate from W_pred - dynamics are stable while predictions learn.
+
+        W_dyn: Fast, volatile, error-driven (can go negative)
+        W_longterm: Slow, stable, purely additive (only positive)
+
+        Blending prevents catastrophic interference by incorporating
+        stable long-term memory that accumulates without forgetting.
         """
         # Which units are firing?
         firing = (self.A > self.threshold).astype(float)
@@ -302,9 +325,16 @@ class PredictiveSOCMind:
         # Input from firing neighbors using DYNAMICS weights
         rows, cols = self._conn_rows, self._conn_cols
 
+        # === COMPLEMENTARY LEARNING: Blend W_dyn with W_longterm ===
+        # W_longterm is purely positive (additive Hebbian)
+        # W_dyn can be positive or negative (error-driven)
+        # Blend them to get stable, interference-resistant dynamics
+        effective_weights = ((1 - self.longterm_blend) * self.W_dyn_data +
+                           self.longterm_blend * self.W_longterm)
+
         # Only positive weights contribute to excitation
-        excitatory = np.maximum(self.W_dyn_data, 0)
-        inhibitory = np.minimum(self.W_dyn_data, 0)
+        excitatory = np.maximum(effective_weights, 0)
+        inhibitory = np.minimum(effective_weights, 0)
 
         # Excitatory input (energy-weighted)
         exc_input = excitatory * firing[cols] * self.E[cols]
@@ -316,9 +346,9 @@ class PredictiveSOCMind:
         inh_sum = np.zeros(self.n)
         np.add.at(inh_sum, rows, inh_input)
 
-        # Normalize by in-degree
+        # Normalize by in-degree (using effective weights)
         in_degree = np.zeros(self.n)
-        np.add.at(in_degree, rows, np.abs(self.W_dyn_data))
+        np.add.at(in_degree, rows, np.abs(effective_weights))
         in_degree = np.maximum(in_degree, 1)
 
         total_input = (exc_sum + inh_sum) / in_degree
@@ -543,6 +573,60 @@ class PredictiveSOCMind:
         self.W_dyn_data += dt * dW
         self.W_dyn_data = np.clip(self.W_dyn_data, -1.0, 1.0)
 
+        # === COMPLEMENTARY LEARNING: Update W_longterm ===
+        # PURELY ADDITIVE Hebbian: only strengthen where BOTH pre AND post are active
+        # NO error term = NO negative updates = NO interference
+        # This accumulates associations without ever forgetting
+        pre_active = (self.input_trace > 0.3)[cols]   # Input was active
+        post_active = (self.A_target > 0.5)[rows]     # Target should be active
+
+        # Hebbian: strengthen connections where both pre AND post are active
+        hebbian_signal = pre_active & post_active
+        dW_longterm = self.lr_longterm * hebbian_signal.astype(float)
+        self.W_longterm += dt * dW_longterm
+        self.W_longterm = np.clip(self.W_longterm, 0, 1.0)  # Non-negative only
+
+        # Store experience for replay during dreams
+        if np.sum(self.A_target > 0.5) > 3:  # Only store meaningful targets
+            self._store_contrastive_experience(self.input_trace.copy(), self.A_target.copy())
+
+    def _store_contrastive_experience(self, input_pattern, target_pattern):
+        """Store a contrastive experience for later replay during dreams."""
+        experience = {
+            'input': input_pattern,
+            'target': target_pattern,
+            'age': 0
+        }
+        self.experience_buffer.append(experience)
+
+        # Keep buffer bounded (remove oldest)
+        if len(self.experience_buffer) > self.max_buffer_size:
+            self.experience_buffer = self.experience_buffer[-self.max_buffer_size:]
+
+    def _replay_contrastive_to_longterm(self, dt):
+        """Replay stored contrastive experiences to W_longterm during dreams."""
+        if len(self.experience_buffer) == 0:
+            return
+
+        # Sample a random experience
+        idx = np.random.randint(len(self.experience_buffer))
+        exp = self.experience_buffer[idx]
+        exp['age'] += 1
+
+        input_pattern = exp['input']
+        target_pattern = exp['target']
+
+        rows, cols = self._conn_rows, self._conn_cols
+
+        # Purely additive Hebbian replay
+        pre_active = (input_pattern > 0.3)[cols]
+        post_active = (target_pattern > 0.5)[rows]
+
+        hebbian_signal = pre_active & post_active
+        dW = self.lr_longterm * hebbian_signal.astype(float)
+        self.W_longterm += dt * dW
+        self.W_longterm = np.clip(self.W_longterm, 0, 1.0)
+
     def _adapt_timescales(self, dt):
         """
         Adapt per-unit timescales based on input variance and prediction error.
@@ -712,9 +796,10 @@ class PredictiveSOCMind:
 
         When the network runs freely (no external input), associations
         that naturally co-activate get strengthened. This:
-        1. Consolidates learned chains (cat→meow→purr)
+        1. Consolidates learned chains (cat->meow->purr)
         2. Allows the network to "practice" associations
         3. Strengthens whatever patterns emerge from SOC dynamics
+        4. Replays stored experiences to W_longterm (complementary learning)
 
         Key insight: In dream mode, the network's own dynamics determine
         what gets learned. Strong associations activate each other,
@@ -745,6 +830,12 @@ class PredictiveSOCMind:
             normalized = self.temporal_trace / (np.max(self.temporal_trace) + 1e-8)
             self.W_dyn_data += dt * 0.01 * normalized
             self.W_dyn_data = np.clip(self.W_dyn_data, -1.0, 1.0)
+
+        # === COMPLEMENTARY LEARNING: Experience Replay ===
+        # During dreams, replay stored experiences to consolidate W_longterm
+        # This reinforces all learned associations, preventing forgetting
+        if np.random.random() < 0.3:  # 30% of dream steps do replay
+            self._replay_contrastive_to_longterm(dt)
 
     def _update_phases(self, dt):
         """Phase dynamics: Kuramoto-like coupling using W_dyn."""
