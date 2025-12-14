@@ -37,7 +37,7 @@ class PlanningSOCMind(PredictiveSOCMind):
     """
 
     def __init__(self, n_units=1024, n_action_dims=4, n_slots=8,
-                 connectivity=0.1, seed=42):
+                 connectivity=0.1, seed=42, pattern_sparsity=0.10):
         """
         Args:
             n_units: Number of units in the network
@@ -45,8 +45,15 @@ class PlanningSOCMind(PredictiveSOCMind):
             n_slots: Number of parallel simulation slots for planning
             connectivity: Sparse connectivity fraction
             seed: Random seed
+            pattern_sparsity: Fraction of units active in patterns (default 5%)
+                             Sparser patterns have less overlap, improving action specificity.
         """
         super().__init__(n_units, connectivity, seed)
+
+        # === Pattern Configuration ===
+        # Sparse patterns reduce overlap between states, preventing unwanted generalization
+        # At 5% sparsity with 200 units: ~10 active units, near-zero expected overlap
+        self.pattern_sparsity = pattern_sparsity
 
         # === Action System ===
         # Actions are represented as activation patterns over dedicated units
@@ -101,10 +108,11 @@ class PlanningSOCMind(PredictiveSOCMind):
         # === COMPLEMENTARY LEARNING SYSTEM ===
         # Inspired by hippocampus-neocortex consolidation in the brain
         # Fast system: W_transition (current) - learns quickly, subject to interference
-        # Slow system: W_longterm - consolidates slowly, resists overwriting
+        # Slow system: W_action_longterm - consolidates slowly, resists overwriting
+        # NOTE: Named W_action_longterm (not W_longterm) to avoid collision with parent's W_longterm
 
         # Long-term weights per action (consolidated, stable memory)
-        self.W_longterm = [
+        self.W_action_longterm = [
             np.zeros(self._n_connections)
             for _ in range(n_action_dims)
         ]
@@ -123,10 +131,20 @@ class PlanningSOCMind(PredictiveSOCMind):
         self.min_plasticity = 0.1  # Minimum learning rate multiplier
 
         # Learning rates for long-term consolidation
-        # W_longterm is ONLY updated via replay, never direct learning
-        # This prevents catastrophic interference
-        self.lr_longterm = 0.1  # Faster since it's only updated via replay
-        self.longterm_blend = 1.0  # ONLY use longterm (ignore corrupted W_transition)
+        # Higher rate needed for sparse patterns (few connections to strengthen)
+        self.lr_action_longterm = 0.5  # High rate for one-shot learning with sparse patterns
+        self.action_longterm_blend = 1.0  # ONLY use longterm (ignore corrupted W_transition)
+
+        # === ELIGIBILITY TRACES ===
+        # Implements goal-gated learning: connections are marked as "eligible"
+        # but only consolidated into weights when goal is actually reached.
+        # This prevents learning incorrect transitions.
+        self.eligibility_traces = [
+            np.zeros(self._n_connections)
+            for _ in range(n_action_dims)
+        ]
+        self.eligibility_decay = 0.98  # Slower decay - accumulate more eligibility
+        self.goal_verification_threshold = 0.2  # Lower threshold for one-shot learning
 
         # === Extended Dream Learning ===
         self.action_outcome_trace = np.zeros_like(self.W_action_gate)
@@ -135,6 +153,7 @@ class PlanningSOCMind(PredictiveSOCMind):
         self._current_state_hash = None
         self._current_action_dim = None
         self._current_state_pattern = None
+        self._current_target_pattern = None  # Track target for goal verification
 
     # ==========================================================================
     # COMPLEMENTARY LEARNING SYSTEM - Memory & Consolidation
@@ -235,10 +254,10 @@ class PlanningSOCMind(PredictiveSOCMind):
 
         This happens continuously but slowly, creating stable long-term memory.
         """
-        weight_diff = self.W_transition[action_dim] - self.W_longterm[action_dim]
-        dW = self.lr_longterm * dt * weight_diff
-        self.W_longterm[action_dim] += dW
-        self.W_longterm[action_dim] = np.clip(self.W_longterm[action_dim], -1.0, 1.0)
+        weight_diff = self.W_transition[action_dim] - self.W_action_longterm[action_dim]
+        dW = self.lr_action_longterm * dt * weight_diff
+        self.W_action_longterm[action_dim] += dW
+        self.W_action_longterm[action_dim] = np.clip(self.W_action_longterm[action_dim], -1.0, 1.0)
 
     def _init_action_vocabulary(self):
         """Initialize named action patterns."""
@@ -262,7 +281,13 @@ class PlanningSOCMind(PredictiveSOCMind):
 
         Also captures the current state for experience buffering (complementary learning).
         """
-        # === Capture current state BEFORE action modifies it ===
+        # === Process any pending inputs BEFORE capturing state ===
+        # This ensures inject_text patterns are applied before we capture the state
+        for inp in self.input_queue:
+            self._inject(inp)
+        self.input_queue.clear()
+
+        # === Capture current state AFTER processing inputs ===
         # This is needed for experience replay
         self._current_state_pattern = self.A.copy()
         self._current_state_hash = self._hash_pattern(self.A)
@@ -392,12 +417,12 @@ class PlanningSOCMind(PredictiveSOCMind):
             # Combine short-term (W_transition) and long-term (W_longterm)
             # Long-term provides stable knowledge, short-term provides recent learning
             short_term = self.W_transition[active_dim]
-            long_term = self.W_longterm[active_dim]
+            long_term = self.W_action_longterm[active_dim]
 
             # Blend: longterm_blend controls the ratio
             # Higher longterm_blend = more stable, less interference
-            action_weights = (self.longterm_blend * long_term +
-                            (1 - self.longterm_blend) * short_term)
+            action_weights = (self.action_longterm_blend * long_term +
+                            (1 - self.action_longterm_blend) * short_term)
 
             # Then blend with base dynamics (action-specific weights dominate)
             effective_weights = 0.9 * action_weights + 0.1 * base_weights
@@ -517,10 +542,21 @@ class PlanningSOCMind(PredictiveSOCMind):
 
         self.W_action_dyn = np.clip(self.W_action_dyn, -1.0, 1.0)
 
-    def step(self, dt=0.1, dream_mode=False):
+    def step(self, dt=0.1, dream_mode=False, execute_mode=False):
         """
         Extended step with action-conditioned learning.
+
+        Args:
+            dt: Time step
+            dream_mode: If True, use temporal Hebbian learning (consolidation)
+            execute_mode: If True, skip ALL learning (for goal execution)
         """
+        if execute_mode:
+            # Execute-only mode: run dynamics without any learning
+            # This is used during goal execution to prevent weight corruption
+            self._execute_step(dt)
+            return
+
         # Call parent step (handles all base dynamics)
         super().step(dt, dream_mode)
 
@@ -532,6 +568,34 @@ class PlanningSOCMind(PredictiveSOCMind):
         else:
             # Dream mode: also practice action->outcome
             self._dream_action_learning(dt)
+
+    def _execute_step(self, dt):
+        """
+        Execute one step WITHOUT any learning.
+        Used during goal execution to prevent weight corruption.
+        """
+        self.t += dt
+        self.A_prev = self.A.copy()
+
+        # Process external input
+        for inp in self.input_queue:
+            self._inject(inp)
+        self.input_queue.clear()
+
+        # Compute next state using SOC dynamics
+        A_next = self._soc_dynamics(dt)
+
+        # Update state
+        self.A = A_next
+        self._update_phases(dt)
+        self._update_energy(dt)
+
+        # Decay target
+        self.A_target *= self.target_decay
+        self.target_strength *= self.target_decay
+
+        # Record history
+        self._record()
 
     def _action_contrastive_learning(self, dt):
         """
@@ -584,19 +648,24 @@ class PlanningSOCMind(PredictiveSOCMind):
         self.W_transition[active_dim] += dt * dW
         self.W_transition[active_dim] = np.clip(self.W_transition[active_dim], -1.0, 1.0)
 
-        # === PURELY ADDITIVE LONG-TERM LEARNING ===
-        # W_longterm uses HEBBIAN learning: pre * post (only where both active)
-        # CRITICAL: Only POSITIVE updates (no unlearning) to prevent interference
-        # This accumulates ALL transitions without forgetting
-        pre_active = (self.input_trace > 0.3)[cols]  # Pre-synaptic active
+        # === DIRECT HEBBIAN LEARNING ===
+        # Strengthen connections from source state to target state.
+        # Sparse patterns (default 5%) reduce overlap between states,
+        # which prevents unwanted generalization without needing eligibility gating.
+
         post_active = (self.A_target > 0.5)[rows]    # Post-synaptic target active
 
-        # Hebbian: strengthen connections where BOTH pre AND post are active
-        # No error term = no unlearning = no interference
+        # Use the ORIGINAL source pattern (captured at set_action), not drifted input_trace
+        if self._current_state_pattern is not None:
+            pre_active = (self._current_state_pattern > 0.3)[cols]
+        else:
+            pre_active = (self.input_trace > 0.3)[cols]
+
+        # Direct Hebbian update
         hebbian_signal = pre_active * post_active
-        dW_longterm = self.lr_longterm * 0.5 * hebbian_signal.astype(float)
-        self.W_longterm[active_dim] += dt * dW_longterm
-        self.W_longterm[active_dim] = np.clip(self.W_longterm[active_dim], 0, 1.0)  # Non-negative only
+        dW = self.lr_action_longterm * hebbian_signal.astype(float)
+        self.W_action_longterm[active_dim] += dt * dW
+        self.W_action_longterm[active_dim] = np.clip(self.W_action_longterm[active_dim], 0, 1.0)
 
         # === EXPERIENCE STORAGE ===
         # Store this experience for later replay during dreams
@@ -606,10 +675,14 @@ class PlanningSOCMind(PredictiveSOCMind):
 
     def _replay_to_longterm(self, dt):
         """
-        Replay a random stored experience to W_longterm.
+        Replay a random stored experience to W_longterm using CONTRASTIVE learning.
 
-        This is the ONLY way W_longterm gets updated - ensuring all transitions
-        are reinforced equally over time, preventing catastrophic interference.
+        Uses contrastive learning with OTHER LEARNED STATES as negative examples:
+        1. Positive phase: strengthen stored_state → outcome connections
+        2. Negative phase: weaken OTHER_state → outcome connections
+
+        This teaches: "only THIS specific state leads to outcome, not other states"
+        Much more effective than random noise because it targets actual learned patterns.
 
         Called during waking learning (interleaved) and during dreams.
         """
@@ -627,16 +700,34 @@ class PlanningSOCMind(PredictiveSOCMind):
 
         rows, cols = self._conn_rows, self._conn_cols
 
-        # PURELY ADDITIVE Hebbian replay (same as waking learning)
-        # Strengthen connections where state active AND outcome active
-        # No unlearning = no interference
-        pre_active = (state_pattern > 0.3)[cols]
+        # CONTRASTIVE REPLAY with learned negative examples
         post_active = (outcome_pattern > 0.5)[rows]
 
-        hebbian_signal = pre_active * post_active
-        dW = self.lr_longterm * hebbian_signal.astype(float)
-        self.W_longterm[action_dim] += dt * dW
-        self.W_longterm[action_dim] = np.clip(self.W_longterm[action_dim], 0, 1.0)
+        # Positive phase: strengthen stored state → outcome
+        pre_active = (state_pattern > 0.3)[cols]
+        positive_signal = pre_active * post_active
+        dW_positive = self.lr_action_longterm * positive_signal.astype(float)
+
+        # Negative phase: use ANOTHER learned state as negative example
+        # This specifically teaches "other states shouldn't lead to this outcome"
+        if len(self.experience_buffer) > 1:
+            # Sample a different experience as negative
+            neg_idx = np.random.randint(len(self.experience_buffer))
+            while neg_idx == idx and len(self.experience_buffer) > 1:
+                neg_idx = np.random.randint(len(self.experience_buffer))
+            neg_state = self.experience_buffer[neg_idx]['state']
+            neg_pre = (neg_state > 0.3)[cols]
+
+            # Weaken connections from neg_state to outcome
+            # BUT only where neg_state differs from positive state
+            negative_mask = neg_pre & (~pre_active) & post_active
+            dW_negative = self.lr_action_longterm * 0.5 * negative_mask.astype(float)
+        else:
+            dW_negative = 0
+
+        # Apply contrastive update
+        self.W_action_longterm[action_dim] += dt * (dW_positive - dW_negative)
+        self.W_action_longterm[action_dim] = np.clip(self.W_action_longterm[action_dim], 0, 1.0)
 
     def _dream_action_learning(self, dt):
         """
@@ -695,63 +786,59 @@ class PlanningSOCMind(PredictiveSOCMind):
                 return dim
         return None
 
-    def _simulate_slot(self, slot_idx, steps=10):
+    def _simulate_slot(self, slot_idx, steps_per_action=10):
         """
-        Simulate one slot forward in imagination.
+        Simulate one slot forward in imagination using ACTION SEQUENCE.
 
-        Uses ACTION-SPECIFIC transition weights for imagination.
-        This ensures planning uses the learned world model correctly.
+        Each action in the sequence is applied for steps_per_action steps.
+        This enables multi-step planning (A→B→C requires action_0 then action_1).
         """
         temp_A = self.slot_A[slot_idx].copy()
-        temp_action = self.slot_action[slot_idx].copy()
         temp_input_trace = temp_A.copy() * 0.5
 
-        # Get which action dimension this slot is using
-        action_dim = self._get_action_dim_from_pattern(temp_action)
+        # Get the action SEQUENCE for this slot
+        action_sequence = self.slot_action_sequence[slot_idx]
+        if not action_sequence:
+            action_sequence = [self.slot_action[slot_idx]]
 
-        for _ in range(steps):
-            firing = (temp_A > self.threshold).astype(float)
-            rows, cols = self._conn_rows, self._conn_cols
+        # Simulate each action in sequence
+        for action_pattern in action_sequence:
+            action_dim = self._get_action_dim_from_pattern(action_pattern)
 
-            # === Use W_longterm for imagination (the stable learned world model) ===
-            # CRITICAL: Must match what real dynamics use (longterm_blend = 1.0)
-            # W_transition is corrupted/volatile, W_longterm has the real knowledge
-            if action_dim is not None:
-                # Use stable long-term weights (same as real dynamics)
-                action_weights = self.W_longterm[action_dim]
-                # Blend with base weights (same ratio as _soc_dynamics)
-                effective_weights = 0.9 * action_weights + 0.1 * self.W_pred_data
-            else:
-                effective_weights = self.W_pred_data
+            for _ in range(steps_per_action):
+                firing = (temp_A > self.threshold).astype(float)
+                rows, cols = self._conn_rows, self._conn_cols
 
-            excitatory = np.maximum(effective_weights, 0)
-            inhibitory = np.minimum(effective_weights, 0)
+                # Use W_longterm for imagination
+                if action_dim is not None:
+                    action_weights = self.W_action_longterm[action_dim]
+                    effective_weights = 0.9 * action_weights + 0.1 * self.W_pred_data
+                else:
+                    effective_weights = self.W_pred_data
 
-            exc_input = excitatory * firing[cols]
-            inh_input = inhibitory * firing[cols]
+                excitatory = np.maximum(effective_weights, 0)
+                inhibitory = np.minimum(effective_weights, 0)
 
-            exc_sum = np.zeros(self.n)
-            np.add.at(exc_sum, rows, exc_input)
-            inh_sum = np.zeros(self.n)
-            np.add.at(inh_sum, rows, inh_input)
+                exc_input = excitatory * firing[cols]
+                inh_input = inhibitory * firing[cols]
 
-            # Normalize using effective weights
-            in_degree = np.zeros(self.n)
-            np.add.at(in_degree, rows, np.abs(effective_weights))
-            in_degree = np.maximum(in_degree, 1)
+                exc_sum = np.zeros(self.n)
+                np.add.at(exc_sum, rows, exc_input)
+                inh_sum = np.zeros(self.n)
+                np.add.at(inh_sum, rows, inh_input)
 
-            total_input = (exc_sum + inh_sum) / in_degree
+                in_degree = np.zeros(self.n)
+                np.add.at(in_degree, rows, np.abs(effective_weights))
+                in_degree = np.maximum(in_degree, 1)
 
-            # Add input trace contribution (memory of starting state)
-            trace_contribution = self.trace_weight * temp_input_trace
+                total_input = (exc_sum + inh_sum) / in_degree
+                trace_contribution = self.trace_weight * temp_input_trace
 
-            # Dynamics with trace
-            dA = total_input + trace_contribution - self.decay * temp_A
-            dA += np.random.normal(0, self.noise * 0.3, self.n)
-            temp_A = np.clip(temp_A + 0.1 * dA, 0, 1)
+                dA = total_input + trace_contribution - self.decay * temp_A
+                dA += np.random.normal(0, self.noise * 0.3, self.n)
+                temp_A = np.clip(temp_A + 0.1 * dA, 0, 1)
 
-            # Decay trace
-            temp_input_trace *= 0.95
+                temp_input_trace *= 0.95
 
         # Update slot state
         self.slot_A[slot_idx] = temp_A
@@ -842,27 +929,32 @@ class PlanningSOCMind(PredictiveSOCMind):
                 self.slot_reward[i] = self.slot_reward[k]
                 self.slot_action_sequence[i] = [a.copy() for a in self.slot_action_sequence[k]]
 
-    def _perturb_actions(self):
+    def _perturb_actions(self, max_sequence_length=4):
         """
         Perturb slot actions for exploration.
 
-        Small random changes to action patterns allow discovering
-        new action sequences.
+        Sequences are capped at max_sequence_length to keep planning fast.
         """
         for i in range(self.n_slots):
             if np.random.random() < 0.3:  # 30% chance to perturb
-                # Either mutate current action or sample new one
+                # Sample new action
                 if np.random.random() < 0.5:
-                    # Sample completely new action
                     new_action = self._sample_random_action()
                 else:
-                    # Small perturbation
                     new_action = self.slot_action[i].copy()
                     noise = np.random.randn(self.n_action_units) * 0.1
                     new_action = np.clip(new_action + noise, 0, 1)
 
                 self.slot_action[i] = new_action
-                self.slot_action_sequence[i].append(new_action.copy())
+
+                # Cap sequence length - replace random position or append
+                if len(self.slot_action_sequence[i]) >= max_sequence_length:
+                    # Replace a random action in sequence
+                    idx = np.random.randint(len(self.slot_action_sequence[i]))
+                    self.slot_action_sequence[i][idx] = new_action.copy()
+                else:
+                    # Still room to grow
+                    self.slot_action_sequence[i].append(new_action.copy())
 
     def plan(self, goal_pattern, n_iterations=20, verbose=False):
         """
@@ -890,7 +982,7 @@ class PlanningSOCMind(PredictiveSOCMind):
         for iteration in range(n_iterations):
             # 1. Simulate each slot forward
             for i in range(self.n_slots):
-                self._simulate_slot(i, steps=self.plan_horizon)
+                self._simulate_slot(i, steps_per_action=self.plan_horizon)
 
             # 2. Compute Virtual Rewards
             virtual_rewards, rewards, distances = self._compute_virtual_rewards(goal_pattern)
@@ -914,7 +1006,7 @@ class PlanningSOCMind(PredictiveSOCMind):
 
         # Final evaluation
         for i in range(self.n_slots):
-            self._simulate_slot(i, steps=self.plan_horizon)
+            self._simulate_slot(i, steps_per_action=self.plan_horizon)
         virtual_rewards, rewards, _ = self._compute_virtual_rewards(goal_pattern)
 
         # Return best action sequence
@@ -959,9 +1051,10 @@ class PlanningSOCMind(PredictiveSOCMind):
         if pattern_name in self.pattern_traces:
             pattern = self.pattern_traces[pattern_name]
         else:
-            # Generate pattern from name
+            # Generate SPARSE pattern from name
+            # Sparse patterns reduce overlap, improving action specificity
             np.random.seed(hash(pattern_name) % 10000)
-            n_active = np.random.randint(20, 50)
+            n_active = max(5, int(self.n * self.pattern_sparsity))
             units = np.random.choice(self.n, n_active, replace=False)
             pattern = np.zeros(self.n)
             pattern[units] = 1.0
@@ -1137,9 +1230,9 @@ def benchmark_planning():
     for _ in range(20):
         mind.step(0.1)
 
-    # Get goal pattern
+    # Get goal pattern (using sparse pattern generation)
     np.random.seed(hash('goal') % 10000)
-    n_active = np.random.randint(20, 50)
+    n_active = max(5, int(mind.n * mind.pattern_sparsity))
     goal_units = np.random.choice(mind.n, n_active, replace=False)
     goal_pattern = np.zeros(mind.n)
     goal_pattern[goal_units] = 1.0
@@ -1281,6 +1374,7 @@ class PlanningVisualizer:
         self.goal_start_state = None      # State when goal was set (for planning)
         self.best_reward = 0.0            # Best reward from FMC planning
         self.planning_iterations = 0     # FMC iterations done
+        self.replan_frequency = 10       # Only re-plan every N frames (reduces degradation)
 
         # Create figure with more panels
         self.fig = plt.figure(figsize=(18, 11))
@@ -1384,8 +1478,8 @@ Example:
         self.slider_alpha.on_changed(lambda v: setattr(mind, 'fmc_alpha', v))
 
         slider_ax2 = self.fig.add_axes([0.35, 0.02, 0.15, 0.02])
-        self.slider_blend = Slider(slider_ax2, 'LT Blend', 0, 1, valinit=mind.longterm_blend)
-        self.slider_blend.on_changed(lambda v: setattr(mind, 'longterm_blend', v))
+        self.slider_blend = Slider(slider_ax2, 'LT Blend', 0, 1, valinit=mind.action_longterm_blend)
+        self.slider_blend.on_changed(lambda v: setattr(mind, 'action_longterm_blend', v))
 
         # Buttons
         btn_ax = self.fig.add_axes([0.6, 0.02, 0.08, 0.03])
@@ -1521,9 +1615,9 @@ Example:
         if name in self.mind.pattern_traces:
             return self.mind.pattern_traces[name]
         else:
-            # Generate pattern from name (same as pattern_overlap)
+            # Generate SPARSE pattern from name (same as pattern_overlap)
             np.random.seed(hash(name) % 10000)
-            n_active = np.random.randint(20, 50)
+            n_active = max(5, int(self.mind.n * self.mind.pattern_sparsity))
             units = np.random.choice(self.mind.n, n_active, replace=False)
             pattern = np.zeros(self.mind.n)
             pattern[units] = 1.0
@@ -1561,11 +1655,18 @@ Example:
 
     def _do_planning_iteration(self):
         """Run one FMC planning iteration (non-blocking)."""
-        # 1. Simulate each slot forward from START state (not decayed current state)
+        # Use CURRENT network state for planning (re-plan as we progress)
+        # But if network is too quiet, use the saved start state
+        if np.mean(self.mind.A) > 0.05:
+            planning_state = self.mind.A.copy()
+        else:
+            planning_state = self.goal_start_state.copy()
+
+        # 1. Simulate each slot forward from current state
         for i in range(self.mind.n_slots):
-            self.mind.slot_A[i] = self.goal_start_state.copy()  # Reset to start
+            self.mind.slot_A[i] = planning_state.copy()
         for i in range(self.mind.n_slots):
-            self.mind._simulate_slot(i, steps=self.mind.plan_horizon)
+            self.mind._simulate_slot(i, steps_per_action=self.mind.plan_horizon)
 
         # 2. Compute Virtual Rewards
         virtual_rewards, rewards, distances = self.mind._compute_virtual_rewards(self.goal_pattern)
@@ -1655,8 +1756,13 @@ Example:
                 self.last_input = f"[GOAL REACHED!]"
             return
 
-        # CONTINUOUS PLANNING: Run FMC iteration
-        self._do_planning_iteration()
+        # SPARSE RE-PLANNING: Only re-plan every N frames
+        # Frequent re-planning causes degradation as the planner keeps changing its mind
+        # planning_iterations is incremented inside _do_planning_iteration
+        if self.planning_iterations % self.replan_frequency == 0:
+            self._do_planning_iteration()
+        else:
+            self.planning_iterations += 1  # Still count frames even when not re-planning
 
         # Execute current best action
         if self.planned_actions:
@@ -1668,20 +1774,23 @@ Example:
                 self.mind.set_action(f'action_{best_action_dim}')
                 self.current_action = best_action_dim
 
-        # Keep network alive - maintain starting state with some activation
-        # This prevents decay to zero while allowing dynamics to evolve
+        # GOAL REINFORCEMENT: weak continuous pull toward goal
+        # This prevents diffusion away from goal during execution
+        # Without this, the network state drifts due to dynamics/decay
+        self.mind.A = np.clip(self.mind.A + 0.05 * self.goal_pattern, 0, 1)
+
+        # Keep network alive - reinject start state if dying
         if np.mean(self.mind.A) < 0.05:
-            # Network dying - reinject start state
-            self.mind.A = np.clip(self.mind.A + 0.3 * self.goal_start_state, 0, 1)
+            self.mind.A = np.clip(self.mind.A + 0.5 * self.goal_start_state, 0, 1)
 
         # Step the actual network
+        # Use execute_mode=True to prevent ALL learning during execution
+        # Learning should happen during explicit learn commands, not during planning
         for _ in range(5):
-            self.mind.step(0.1, dream_mode=False)
+            self.mind.step(0.1, execute_mode=True)
 
-        # Update start state if we're making progress (for re-planning)
-        if goal_overlap > 0.1:
-            # Blend current state into start state for re-planning
-            self.goal_start_state = 0.7 * self.goal_start_state + 0.3 * self.mind.A
+        # DON'T update goal_start_state - keep planning from original position
+        # This prevents feedback loop where bad execution corrupts planning
 
         # Update status
         self.last_input = f"[g={goal_overlap:.2f} r={self.best_reward:.2f} i={self.planning_iterations}]"
@@ -1746,7 +1855,7 @@ Example:
         dim = 0
         self.ax_weights.hist(self.mind.W_transition[dim], bins=40, alpha=0.5,
                             label='W_trans', color='red', range=(-1, 1))
-        self.ax_weights.hist(self.mind.W_longterm[dim], bins=40, alpha=0.5,
+        self.ax_weights.hist(self.mind.W_action_longterm[dim], bins=40, alpha=0.5,
                             label='W_long', color='blue', range=(0, 1))
         self.ax_weights.axvline(0, color='gray', linestyle='--', alpha=0.5)
         self.ax_weights.set_title(f'Weights (action 0)')
@@ -1777,7 +1886,7 @@ Example:
 
         action_str = f"a{self.current_action}" if self.current_action is not None else "-"
         n_exp = len(self.mind.experience_buffer)
-        lt_sum = sum(np.sum(w > 0.1) for w in self.mind.W_longterm)
+        lt_sum = sum(np.sum(w > 0.1) for w in self.mind.W_action_longterm)
 
         stats = f"""Mode: {mode}
 Goal: {goal_str}

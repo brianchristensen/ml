@@ -4,7 +4,9 @@
       "Bash(python:*)",
       "Bash(for i in 1 2 3)",
       "Bash(do echo \"=== Run $i ===\")",
-      "Bash(done)"
+      "Bash(done)",
+      "Bash(for i in 1 2 3 4 5)",
+      "Bash(do echo \"=== Run $i (dream_mode=True to disable learning) ===\")"
     ]
   }
 }
