@@ -271,13 +271,19 @@ class PlanningSOCMind(PredictiveSOCMind):
             if action_name_or_pattern in self.action_names:
                 pattern = self.action_names[action_name_or_pattern]
             else:
-                np.random.seed(hash(action_name_or_pattern) % 10000)
-                dim = np.random.randint(self.n_action_dims)
+                # DETERMINISTIC mapping: 'action_N' -> dimension N
+                # This ensures planning and execution use the same dimensions
+                if action_name_or_pattern.startswith('action_'):
+                    try:
+                        dim = int(action_name_or_pattern.split('_')[1]) % self.n_action_dims
+                    except:
+                        dim = hash(action_name_or_pattern) % self.n_action_dims
+                else:
+                    dim = hash(action_name_or_pattern) % self.n_action_dims
                 pattern = np.zeros(self.n_action_units)
                 start_idx = dim * self.action_units_per_dim
                 pattern[start_idx:start_idx + self.action_units_per_dim] = 1.0
                 self.action_names[action_name_or_pattern] = pattern.copy()
-                np.random.seed(None)
         else:
             pattern = action_name_or_pattern
 
@@ -1236,6 +1242,616 @@ def benchmark_dream_consolidation():
     return success, mind
 
 
+# ==============================================================================
+# INTERACTIVE VISUALIZATION
+# ==============================================================================
+
+class PlanningVisualizer:
+    """Interactive visualization for Planning SOC Mind."""
+
+    def __init__(self, mind):
+        import matplotlib.pyplot as plt
+        from matplotlib.animation import FuncAnimation
+        from matplotlib.widgets import Slider, Button
+        import threading
+        import queue
+
+        self.plt = plt
+        self.mind = mind
+        self.input_queue = queue.Queue()
+        self.last_input = ""
+        self.current_action = None
+
+        # Goal-driven behavior
+        self.current_goal = None          # Target pattern name
+        self.planned_actions = []         # Action sequence from FMC
+        self.plan_step = 0                # Current step in plan
+        self.steps_in_current_action = 0  # Steps spent on current action
+        self.goal_threshold = 0.4         # Overlap threshold for "goal reached"
+        self.steps_per_action = 30        # Steps to execute each action
+
+        # Non-blocking learning queue
+        self.learning_queue = []          # List of {state, action_dim, target, cycles_done, total_cycles}
+        self.learning_phase = 0           # 0=inject state, 1=apply action, 2=set target
+        self.phase_steps = 0              # Steps within current phase
+
+        # Goal queue (goals wait for learning to finish)
+        self.goal_queue = []              # List of goal names to pursue
+        self.goal_pattern = None          # Current goal as activation pattern
+        self.goal_start_state = None      # State when goal was set (for planning)
+        self.best_reward = 0.0            # Best reward from FMC planning
+        self.planning_iterations = 0     # FMC iterations done
+
+        # Create figure with more panels
+        self.fig = plt.figure(figsize=(18, 11))
+        gs = self.fig.add_gridspec(3, 4, hspace=0.35, wspace=0.3)
+
+        # Row 0: Activation, Prediction Error, Phase, Action
+        self.ax_act = self.fig.add_subplot(gs[0, 0])
+        self.ax_act.set_title('Activation')
+        padded = np.zeros(mind.grid_size**2)
+        padded[:mind.n] = mind.A
+        self.act_img = self.ax_act.imshow(
+            padded.reshape(mind.grid_size, mind.grid_size),
+            cmap='hot', vmin=0, vmax=1
+        )
+        plt.colorbar(self.act_img, ax=self.ax_act)
+
+        self.ax_err = self.fig.add_subplot(gs[0, 1])
+        self.ax_err.set_title('Prediction Error')
+        self.err_img = self.ax_err.imshow(
+            padded.reshape(mind.grid_size, mind.grid_size),
+            cmap='RdBu', vmin=-0.5, vmax=0.5
+        )
+        plt.colorbar(self.err_img, ax=self.ax_err)
+
+        self.ax_phase = self.fig.add_subplot(gs[0, 2])
+        self.ax_phase.set_title('Phase (binding)')
+        self.phase_img = self.ax_phase.imshow(
+            self._make_phase_img(), vmin=0, vmax=1
+        )
+
+        # Action display
+        self.ax_action = self.fig.add_subplot(gs[0, 3])
+        self.ax_action.set_title('Current Action')
+        self.action_bars = self.ax_action.bar(
+            range(mind.n_action_dims),
+            [0] * mind.n_action_dims,
+            color=['C0', 'C1', 'C2', 'C3'][:mind.n_action_dims]
+        )
+        self.ax_action.set_ylim(0, 1)
+        self.ax_action.set_xticks(range(mind.n_action_dims))
+        self.ax_action.set_xticklabels([f'A{i}' for i in range(mind.n_action_dims)])
+
+        # Row 1: Time series
+        self.ax_ts = self.fig.add_subplot(gs[1, 0])
+        self.ax_ts.set_title('Activation & Error')
+        self.line_act, = self.ax_ts.plot([], [], 'b-', label='Activation', linewidth=1)
+        self.line_err, = self.ax_ts.plot([], [], 'r-', label='Pred Error', linewidth=1)
+        self.ax_ts.legend(fontsize=8)
+
+        self.ax_soc = self.fig.add_subplot(gs[1, 1])
+        self.ax_soc.set_title('SOC Dynamics')
+        self.line_thresh, = self.ax_soc.plot([], [], 'g-', label='Threshold', linewidth=1)
+        self.line_frac, = self.ax_soc.plot([], [], 'm-', label='Active Frac', linewidth=1)
+        self.ax_soc.legend(fontsize=8)
+
+        # Weight distributions
+        self.ax_weights = self.fig.add_subplot(gs[1, 2])
+        self.ax_weights.set_title('Weight Distribution')
+
+        # Stats panel
+        self.ax_stats = self.fig.add_subplot(gs[1, 3])
+        self.ax_stats.axis('off')
+        self.stats_text = self.ax_stats.text(0.05, 0.95, '', ha='left', va='top',
+                                              fontsize=9, family='monospace',
+                                              transform=self.ax_stats.transAxes)
+
+        # Row 2: Planning slots visualization
+        self.ax_slots = self.fig.add_subplot(gs[2, :2])
+        self.ax_slots.set_title('Planning Slots (during planning)')
+        self.ax_slots.axis('off')
+        self.slots_img = None
+
+        # Help/Commands
+        self.ax_help = self.fig.add_subplot(gs[2, 2:])
+        self.ax_help.axis('off')
+        help_text = """Always-On Behavior:
+  NO GOAL: Dreaming (consolidation)
+  GOAL SET: Auto-plan + execute
+
+Commands:
+  <text>           - Set current state
+  goal <text>      - Set goal (auto-plans)
+  learn <s> <a> <t> - Teach transition
+  clear            - Clear goal -> dream
+  reset            - Reset network
+  benchmark        - Run tests
+  quit             - Exit
+
+Example:
+  1. learn room_A 0 room_B
+  2. learn room_B 1 room_C
+  3. room_A          (set state)
+  4. goal room_C     (auto-plans!)"""
+        self.ax_help.text(0.05, 0.95, help_text, ha='left', va='top',
+                          fontsize=9, family='monospace',
+                          transform=self.ax_help.transAxes)
+
+        # Sliders
+        slider_ax = self.fig.add_axes([0.1, 0.02, 0.15, 0.02])
+        self.slider_alpha = Slider(slider_ax, 'FMC alpha', 0, 2, valinit=mind.fmc_alpha)
+        self.slider_alpha.on_changed(lambda v: setattr(mind, 'fmc_alpha', v))
+
+        slider_ax2 = self.fig.add_axes([0.35, 0.02, 0.15, 0.02])
+        self.slider_blend = Slider(slider_ax2, 'LT Blend', 0, 1, valinit=mind.longterm_blend)
+        self.slider_blend.on_changed(lambda v: setattr(mind, 'longterm_blend', v))
+
+        # Buttons
+        btn_ax = self.fig.add_axes([0.6, 0.02, 0.08, 0.03])
+        self.btn_reset = Button(btn_ax, 'Reset')
+        self.btn_reset.on_clicked(lambda e: mind.reset())
+
+        btn_ax2 = self.fig.add_axes([0.7, 0.02, 0.08, 0.03])
+        self.btn_clear = Button(btn_ax2, 'Clear Goal')
+        self.btn_clear.on_clicked(lambda e: self._clear_goal())
+
+        btn_ax3 = self.fig.add_axes([0.8, 0.02, 0.1, 0.03])
+        self.btn_benchmark = Button(btn_ax3, 'Benchmark')
+        self.btn_benchmark.on_clicked(lambda e: self._run_quick_test())
+
+    def _clear_goal(self):
+        """Clear current goal and return to dreaming."""
+        self.current_goal = None
+        self.planned_actions = []
+        self.plan_step = 0
+        self.steps_in_current_action = 0
+        self.goal_queue = []  # Also clear queued goals
+        self.mind.clear_action()
+        self.current_action = None
+        self.last_input = "[CLEARED -> DREAMING]"
+
+    def _run_quick_test(self):
+        """Run a quick accuracy test."""
+        transitions = [
+            ('room_A', 'action_0', 'room_B'),
+            ('room_A', 'action_1', 'room_C'),
+            ('room_B', 'action_0', 'room_D'),
+        ]
+        correct = 0
+        for state, action, expected in transitions:
+            self.mind.reset()
+            self.mind.inject_text(state, 0.8)
+            action_dim = int(action.split('_')[1])
+            self.mind.set_action(f'action_{action_dim}')
+            for _ in range(30):
+                self.mind.step(0.1)
+            overlap = self.mind.pattern_overlap(expected)
+            if overlap > 0.2:
+                correct += 1
+        self.last_input = f"[TEST: {correct}/{len(transitions)} pass]"
+
+    def _make_phase_img(self):
+        """Phase as HSV image."""
+        from matplotlib.colors import hsv_to_rgb
+
+        padded_phase = np.zeros(self.mind.grid_size**2)
+        padded_phase[:self.mind.n] = self.mind.theta / (2 * np.pi)
+
+        padded_amp = np.zeros(self.mind.grid_size**2)
+        padded_amp[:self.mind.n] = self.mind.A
+
+        # Wrap hue to [0, 1] and clip all HSV values
+        h = np.clip(padded_phase.reshape(self.mind.grid_size, self.mind.grid_size) % 1.0, 0, 1)
+        s = np.ones_like(h)
+        v = np.clip(padded_amp.reshape(self.mind.grid_size, self.mind.grid_size) * 3, 0, 1)
+
+        return hsv_to_rgb(np.stack([h, s, v], axis=-1))
+
+    def _process_input(self):
+        """Process command queue."""
+        import queue as q
+        had_input = False
+        try:
+            while True:
+                text = self.input_queue.get_nowait().strip()
+                if not text:
+                    continue
+
+                had_input = True
+                if text.lower() in ('quit', 'exit'):
+                    self.plt.close(self.fig)
+                    return
+                elif text.lower() == 'reset':
+                    self.mind.reset()
+                    self._clear_goal()
+                    self.last_input = "[RESET]"
+                elif text.lower() == 'clear':
+                    self._clear_goal()
+                elif text.lower().startswith('goal '):
+                    # Queue goal (will execute after learning finishes)
+                    goal = text[5:].strip()
+                    if self.learning_queue:
+                        # Learning in progress - queue the goal
+                        self.goal_queue.append(goal)
+                        print(f"[GOAL QUEUED: {goal}] (waiting for {len(self.learning_queue)} learn tasks)")
+                        sys.stdout.flush()
+                        self.last_input = f"[GOAL Q: {goal}]"
+                    else:
+                        # No learning - start immediately
+                        self._set_goal(goal)
+                elif text.lower().startswith('learn '):
+                    parts = text[6:].split()
+                    if len(parts) >= 3:
+                        state, action_str, target = parts[0], parts[1], parts[2]
+                        try:
+                            action_dim = int(action_str)
+                        except:
+                            action_dim = int(action_str.split('_')[1]) if '_' in action_str else 0
+
+                        # Add to learning queue (one-shot learning)
+                        self.learning_queue.append({
+                            'state': state,
+                            'action_dim': action_dim,
+                            'target': target,
+                            'steps_done': 0,
+                            'total_steps': 30  # Just enough for Hebbian association to form
+                        })
+                        queue_len = len(self.learning_queue)
+                        print(f"[QUEUED: {state} + a{action_dim} -> {target}] ({queue_len} in queue)")
+                        sys.stdout.flush()
+                        self.last_input = f"[Q{queue_len}: {state}->{target}]"
+                    else:
+                        self.last_input = "[ERROR: learn <s> <a> <t>]"
+                elif text.lower() == 'benchmark':
+                    print("\nRunning benchmarks...")
+                    run_all_benchmarks()
+                    self.last_input = "[BENCHMARK DONE]"
+                else:
+                    # Inject as pattern (set current state)
+                    self.mind.inject_text(text, 0.8)
+                    self.last_input = f"[STATE: {text}]"
+
+        except q.Empty:
+            pass
+        return had_input
+
+    def _get_pattern(self, name):
+        """Convert a pattern name to an activation array."""
+        if name in self.mind.pattern_traces:
+            return self.mind.pattern_traces[name]
+        else:
+            # Generate pattern from name (same as pattern_overlap)
+            np.random.seed(hash(name) % 10000)
+            n_active = np.random.randint(20, 50)
+            units = np.random.choice(self.mind.n, n_active, replace=False)
+            pattern = np.zeros(self.mind.n)
+            pattern[units] = 1.0
+            return pattern
+
+    def _set_goal(self, goal):
+        """Set a goal - planning happens continuously during execution."""
+        self.current_goal = goal
+        self.goal_pattern = self._get_pattern(goal)
+        self.plan_step = 0
+        self.steps_in_current_action = 0
+        self.planning_iterations = 0
+        self.best_reward = 0.0
+
+        # Save starting state for planning (don't let it decay)
+        self.goal_start_state = self.mind.A.copy()
+
+        # Initialize FMC slots from current state
+        self.mind.init_planning()
+
+        # Get initial best action
+        self._update_best_plan()
+
+        print(f"\n[GOAL: {goal}] (continuous planning)")
+        sys.stdout.flush()
+        self.last_input = f"[GOAL: {goal}]"
+
+    def _update_best_plan(self):
+        """Get current best action sequence from FMC slots."""
+        virtual_rewards, rewards, _ = self.mind._compute_virtual_rewards(self.goal_pattern)
+        best_idx = np.argmax(rewards)
+        self.planned_actions = list(self.mind.slot_action_sequence[best_idx])
+        self.best_reward = rewards[best_idx]
+        return best_idx
+
+    def _do_planning_iteration(self):
+        """Run one FMC planning iteration (non-blocking)."""
+        # 1. Simulate each slot forward from START state (not decayed current state)
+        for i in range(self.mind.n_slots):
+            self.mind.slot_A[i] = self.goal_start_state.copy()  # Reset to start
+        for i in range(self.mind.n_slots):
+            self.mind._simulate_slot(i, steps=self.mind.plan_horizon)
+
+        # 2. Compute Virtual Rewards
+        virtual_rewards, rewards, distances = self.mind._compute_virtual_rewards(self.goal_pattern)
+
+        # 3. Clone low-VR slots with high-VR ones
+        self.mind._clone_step(virtual_rewards)
+
+        # 4. Perturb actions for exploration
+        self.mind._perturb_actions()
+
+        self.planning_iterations += 1
+
+        # Update best plan
+        self._update_best_plan()
+
+    def _dream_step(self):
+        """Execute one dream step (consolidation mode)."""
+        for _ in range(5):
+            # Inject random noise to trigger spontaneous activity
+            noise_units = np.random.choice(self.mind.n, size=3, replace=False)
+            self.mind.A[noise_units] += np.random.uniform(0.05, 0.15, len(noise_units))
+            self.mind.A = np.clip(self.mind.A, 0, 1)
+            self.mind.step(0.1, dream_mode=True)
+
+    def _learning_step(self):
+        """One-shot learning - single presentation per transition."""
+        if not self.learning_queue:
+            return
+
+        task = self.learning_queue[0]
+
+        # First step: set up the learning situation
+        if task['steps_done'] == 0:
+            self.mind.inject_text(task['state'], 0.9)
+            self.mind.set_action(f"action_{task['action_dim']}")
+            self.current_action = task['action_dim']
+            self.mind.set_target(task['target'], 1.0)
+
+        # Run steps - Hebbian learning happens automatically during step()
+        for _ in range(5):
+            self.mind.step(0.1, dream_mode=False)
+            task['steps_done'] += 1
+
+            if task['steps_done'] >= task['total_steps']:
+                # Done - clear and move to next
+                self.mind.clear_action()
+                self.mind.A_target *= 0
+                self.mind.target_strength = 0
+
+                print(f"[LEARNED: {task['state']} + a{task['action_dim']} -> {task['target']}] (one-shot)")
+                self.learning_queue.pop(0)
+
+                if self.learning_queue:
+                    next_task = self.learning_queue[0]
+                    self.last_input = f"[NEXT: {next_task['state']}]"
+                elif self.goal_queue:
+                    print(f"  Starting queued goal...")
+                    next_goal = self.goal_queue.pop(0)
+                    self._set_goal(next_goal)
+                else:
+                    print(f"  Done! Experiences: {len(self.mind.experience_buffer)}")
+                    self.last_input = "[DONE]"
+                sys.stdout.flush()
+                break
+
+        # Update display
+        if self.learning_queue:
+            remaining = len(self.learning_queue) - 1
+            self.last_input = f"[LEARN +{remaining}]"
+
+    def _execute_goal_step(self):
+        """Execute toward goal with continuous planning."""
+        # Check if we've reached the goal
+        goal_overlap = self.mind.pattern_overlap(self.current_goal)
+        if goal_overlap > self.goal_threshold:
+            print(f"\n[GOAL REACHED: {self.current_goal}] (overlap={goal_overlap:.2f}, {self.planning_iterations} iters)")
+            sys.stdout.flush()
+
+            if self.goal_queue:
+                # Start next queued goal
+                next_goal = self.goal_queue.pop(0)
+                print(f"  Next goal: {next_goal} ({len(self.goal_queue)} remaining)")
+                self.current_goal = None
+                self._set_goal(next_goal)
+            else:
+                self._clear_goal()
+                self.last_input = f"[GOAL REACHED!]"
+            return
+
+        # CONTINUOUS PLANNING: Run FMC iteration
+        self._do_planning_iteration()
+
+        # Execute current best action
+        if self.planned_actions:
+            best_action_pattern = self.planned_actions[0]
+            best_action_dim = self.mind._get_action_dim_from_pattern(best_action_pattern)
+
+            if best_action_dim is not None:
+                # ALWAYS set action (don't just set when changed - maintain it)
+                self.mind.set_action(f'action_{best_action_dim}')
+                self.current_action = best_action_dim
+
+        # Keep network alive - maintain starting state with some activation
+        # This prevents decay to zero while allowing dynamics to evolve
+        if np.mean(self.mind.A) < 0.05:
+            # Network dying - reinject start state
+            self.mind.A = np.clip(self.mind.A + 0.3 * self.goal_start_state, 0, 1)
+
+        # Step the actual network
+        for _ in range(5):
+            self.mind.step(0.1, dream_mode=False)
+
+        # Update start state if we're making progress (for re-planning)
+        if goal_overlap > 0.1:
+            # Blend current state into start state for re-planning
+            self.goal_start_state = 0.7 * self.goal_start_state + 0.3 * self.mind.A
+
+        # Update status
+        self.last_input = f"[g={goal_overlap:.2f} r={self.best_reward:.2f} i={self.planning_iterations}]"
+
+    def update(self, frame):
+        """Animation update - always-on behavior."""
+        self._process_input()
+
+        # Priority: Learning > Goal > Dream
+        if self.learning_queue:
+            # LEARNING MODE: Processing learning queue
+            self._learning_step()
+        elif self.current_goal is not None:
+            # GOAL MODE: Execute planned actions
+            self._execute_goal_step()
+        else:
+            # DREAM MODE: Consolidation with random noise
+            self._dream_step()
+
+        # Update activation
+        padded = np.zeros(self.mind.grid_size**2)
+        padded[:self.mind.n] = self.mind.A
+        self.act_img.set_data(padded.reshape(self.mind.grid_size, self.mind.grid_size))
+
+        # Update error
+        padded_err = np.zeros(self.mind.grid_size**2)
+        padded_err[:self.mind.n] = self.mind.prediction_error
+        self.err_img.set_data(padded_err.reshape(self.mind.grid_size, self.mind.grid_size))
+
+        # Update phase
+        self.phase_img.set_data(self._make_phase_img())
+
+        # Update action bars
+        action_strengths = [0] * self.mind.n_action_dims
+        for dim in range(self.mind.n_action_dims):
+            start = dim * self.mind.action_units_per_dim
+            end = start + self.mind.action_units_per_dim
+            action_strengths[dim] = np.mean(self.mind.A_action[start:end])
+        for bar, h in zip(self.action_bars, action_strengths):
+            bar.set_height(h)
+
+        # Update time series
+        t = self.mind.history['time'][-500:]
+        if t:
+            act = self.mind.history['mean_activation'][-500:]
+            err = self.mind.history['mean_pred_error'][-500:]
+            self.line_act.set_data(t, act)
+            self.line_err.set_data(t, err)
+            self.ax_ts.set_xlim(t[0], t[-1])
+            self.ax_ts.set_ylim(0, max(0.1, max(max(act), max(err)) * 1.1))
+
+            thresh = self.mind.history['threshold'][-500:]
+            frac = self.mind.history['active_fraction'][-500:]
+            self.line_thresh.set_data(t, thresh)
+            self.line_frac.set_data(t, frac)
+            self.ax_soc.set_xlim(t[0], t[-1])
+            self.ax_soc.set_ylim(0, max(0.5, max(max(thresh), max(frac)) * 1.1))
+
+        # Update weight histogram - W_longterm vs W_transition
+        self.ax_weights.clear()
+        # Show one action dim's weights
+        dim = 0
+        self.ax_weights.hist(self.mind.W_transition[dim], bins=40, alpha=0.5,
+                            label='W_trans', color='red', range=(-1, 1))
+        self.ax_weights.hist(self.mind.W_longterm[dim], bins=40, alpha=0.5,
+                            label='W_long', color='blue', range=(0, 1))
+        self.ax_weights.axvline(0, color='gray', linestyle='--', alpha=0.5)
+        self.ax_weights.set_title(f'Weights (action 0)')
+        self.ax_weights.legend(fontsize=7)
+
+        # Stats - mode display
+        if self.learning_queue:
+            task = self.learning_queue[0]
+            mode = f"LEARNING ({len(self.learning_queue)})"
+            goal_str = f"{task['state']}->{task['target']}"
+            if self.goal_queue:
+                plan_str = f"one-shot [+{len(self.goal_queue)} goals]"
+            else:
+                plan_str = "one-shot"
+        elif self.current_goal:
+            mode = "GOAL + PLANNING"
+            goal_overlap = self.mind.pattern_overlap(self.current_goal)
+            goal_str = f"{self.current_goal} ({goal_overlap:.2f})"
+            # Show: reward, iterations, queued goals
+            plan_parts = [f"r={self.best_reward:.2f}", f"i={self.planning_iterations}"]
+            if self.goal_queue:
+                plan_parts.append(f"+{len(self.goal_queue)}")
+            plan_str = " ".join(plan_parts)
+        else:
+            mode = "DREAMING"
+            goal_str = "none"
+            plan_str = "-"
+
+        action_str = f"a{self.current_action}" if self.current_action is not None else "-"
+        n_exp = len(self.mind.experience_buffer)
+        lt_sum = sum(np.sum(w > 0.1) for w in self.mind.W_longterm)
+
+        stats = f"""Mode: {mode}
+Goal: {goal_str}
+Plan: {plan_str}
+Action: {action_str}
+Time: {self.mind.t:.1f}
+Experiences: {n_exp}
+LT weights: {lt_sum}
+FMC alpha: {self.mind.fmc_alpha:.2f}
+
+{self.last_input[:25]}"""
+        self.stats_text.set_text(stats)
+
+        return [self.act_img, self.err_img, self.phase_img]
+
+    def run(self):
+        """Start interactive visualization."""
+        import threading
+        from matplotlib.animation import FuncAnimation
+
+        # Start input thread
+        self.input_thread = threading.Thread(target=self._input_loop, daemon=True)
+        self.input_thread.start()
+
+        self.anim = FuncAnimation(self.fig, self.update, interval=50,
+                                  blit=False, cache_frame_data=False)
+        self.plt.show()
+
+    def _input_loop(self):
+        """Background input loop."""
+        print("\n" + "=" * 70)
+        print("PLANNING SOC MIND - Goal-Driven Visualization")
+        print("=" * 70)
+        print()
+        print("ALWAYS-ON BEHAVIOR:")
+        print("  No goal  -> DREAMING (consolidating memories)")
+        print("  Goal set -> AUTO-PLAN + EXECUTE (FMC planning)")
+        print()
+        print("Commands:")
+        print("  <text>            - Set current state pattern")
+        print("  goal <text>       - Set goal (auto-plans & executes)")
+        print("  learn <s> <a> <t> - Teach transition (state+action->target)")
+        print("  clear             - Clear goal, return to dreaming")
+        print("  benchmark         - Run benchmark suite")
+        print("  reset             - Reset network")
+        print("  quit              - Exit")
+        print()
+        print("Example workflow:")
+        print("  learn room_A 0 room_B    # teach: room_A + action_0 -> room_B")
+        print("  learn room_B 1 room_C    # teach: room_B + action_1 -> room_C")
+        print("  room_A                   # set current state")
+        print("  goal room_C              # auto-plans and executes!")
+        print("=" * 70)
+        sys.stdout.flush()
+
+        while True:
+            try:
+                sys.stdout.write("> ")
+                sys.stdout.flush()
+                line = sys.stdin.readline()
+                if line:
+                    self.input_queue.put(line)
+            except:
+                break
+
+
+def run_interactive():
+    """Run interactive visualization."""
+    print("Starting Planning SOC Mind...")
+    mind = PlanningSOCMind(n_units=512, n_action_dims=4, n_slots=16)
+    viz = PlanningVisualizer(mind)
+    viz.run()
+
+
 def run_all_benchmarks():
     """Run all world modeling benchmarks."""
     print("\n" + "=" * 70)
@@ -1275,4 +1891,14 @@ def run_all_benchmarks():
 
 
 if __name__ == "__main__":
-    run_all_benchmarks()
+    import sys
+
+    if "--benchmark" in sys.argv or "-b" in sys.argv:
+        # Run benchmarks
+        run_all_benchmarks()
+    else:
+        # Default: interactive visualization
+        print("Starting interactive visualization...")
+        print("(Use --benchmark or -b to run benchmarks instead)")
+        print()
+        run_interactive()
