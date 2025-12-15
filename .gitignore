@@ -9,3 +9,4 @@
 .venv/
 */dataset
 *.pt
+**/nul

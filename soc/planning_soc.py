@@ -155,6 +155,253 @@ class PlanningSOCMind(PredictiveSOCMind):
         self._current_state_pattern = None
         self._current_target_pattern = None  # Track target for goal verification
 
+        # === SPATIAL ENCODING (Tile Coding) ===
+        # For continuous state spaces, we need patterns where nearby states
+        # have similar (overlapping) representations.
+        # Tile coding: multiple overlapping grids, each position activates tiles
+        # from each grid, nearby positions share tiles.
+        self._spatial_encoding_initialized = False
+        self._spatial_tilings = None
+        self._spatial_tile_to_units = None
+        self._spatial_state_dim = None
+
+        # === SUCCESSOR REPRESENTATION ===
+        # The most general approach for planning across any state space.
+        # M(s,s') = expected discounted future occupancy of s' starting from s
+        # Value(s, goal) = sum_s' M(s,s') * reward(s') = M(s) · goal_features
+        #
+        # Key insight: SR is GOAL-AGNOSTIC - learn once, evaluate any goal instantly.
+        # This is how the hippocampus supports flexible planning and transfer.
+        #
+        # For efficiency, we store M as row vectors: M[unit] = successor features
+        # When we observe transition from pattern_a to pattern_b:
+        #   For each active unit i in pattern_a:
+        #     M[i] += lr * (pattern_b + gamma * M[active_in_b] - M[i])
+        self.M_successor = np.zeros((self.n, self.n))  # Successor feature matrix
+        self.sr_gamma = 0.9  # Discount factor for future states (lower = faster convergence)
+        self.lr_successor = 0.2  # Learning rate for SR updates (higher = faster learning)
+
+    # ==========================================================================
+    # SPATIAL ENCODING - Place Cell Representation
+    # ==========================================================================
+
+    def init_spatial_encoding(self, state_dim, n_place_cells=300, field_radius=0.12):
+        """
+        Initialize place cell encoding for continuous state spaces.
+
+        Inspired by hippocampal place cells:
+        - Each place cell has a localized "place field" where it fires
+        - A location activates only cells whose field contains that location
+        - This creates SPARSE, DECORRELATED representations
+        - Nearby locations share SOME cells (at field boundaries) but not most
+
+        This differs from Gaussian RBF:
+        - RBF: Nearby locations very similar (80%+ overlap)
+        - Place cells: Nearby locations moderately similar (20-40% overlap)
+
+        The lower overlap enables Hebbian transition learning while still
+        providing some generalization at field boundaries.
+
+        Args:
+            state_dim: Dimensionality of state space (e.g., 2 for (x,y))
+            n_place_cells: Number of place cells (more = finer spatial resolution)
+            field_radius: Radius of each place field (smaller = sparser codes)
+        """
+        self._spatial_state_dim = state_dim
+        self._n_place_cells = n_place_cells
+        self._field_radius = field_radius
+
+        # Distribute place cell centers across the state space
+        # Using uniform random distribution (like biological place cells)
+        np.random.seed(12345)  # Deterministic for reproducibility
+        self._place_cell_centers = np.random.uniform(0, 1, (n_place_cells, state_dim))
+        # Each place cell maps to a specific network unit
+        self._place_cell_units = np.random.choice(self.n, n_place_cells, replace=False)
+        np.random.seed(None)
+
+        self._spatial_encoding_initialized = True
+
+        # Compute expected statistics
+        if state_dim == 2:
+            # Expected active cells = n_cells * (area of field / total area)
+            field_area = np.pi * field_radius**2
+            expected_active = n_place_cells * field_area
+            print(f"  Place cell encoding: {n_place_cells} cells, radius={field_radius}")
+            print(f"  Expected active cells per location: ~{expected_active:.1f}")
+
+        return self
+
+    def encode_continuous_state(self, state_vector):
+        """
+        Encode a continuous state using place cells.
+
+        Each place cell fires (binary 1.0) if the state is within its field radius.
+        This creates a sparse, decorrelated population code.
+
+        Args:
+            state_vector: Array of shape (state_dim,) with values in [0, 1]
+
+        Returns:
+            pattern: Sparse binary activation pattern of shape (n_units,)
+        """
+        if not self._spatial_encoding_initialized:
+            raise ValueError("Call init_spatial_encoding() first")
+
+        state = np.asarray(state_vector)
+        if state.shape != (self._spatial_state_dim,):
+            raise ValueError(f"Expected state dim {self._spatial_state_dim}, got {state.shape}")
+
+        # Clip to [0, 1]
+        state = np.clip(state, 0, 1)
+
+        # Compute distance from state to each place cell center
+        distances = np.linalg.norm(self._place_cell_centers - state, axis=1)
+
+        # Place cells fire if state is within their field (binary activation)
+        active_mask = distances < self._field_radius
+
+        # Create sparse pattern
+        pattern = np.zeros(self.n)
+        pattern[self._place_cell_units[active_mask]] = 1.0
+
+        return pattern
+
+    def inject_continuous_state(self, state_vector, strength=0.7):
+        """
+        Inject a continuous state as a place cell pattern.
+
+        Args:
+            state_vector: Array of shape (state_dim,) with values in [0, 1]
+            strength: Injection strength
+
+        Returns:
+            Pattern info dict
+        """
+        pattern = self.encode_continuous_state(state_vector)
+
+        # Get active units
+        units = np.where(pattern > 0.5)[0]
+
+        # Create coherent phase based on state
+        base_phase = (np.sum(state_vector) * 1.234) % (2 * np.pi)
+        phases = base_phase + np.random.normal(0, 0.2, len(units))
+
+        self.input_queue.append({
+            'units': units,
+            'strength': strength,
+            'phases': phases % (2 * np.pi)
+        })
+
+        # Store in pattern_traces for retrieval
+        state_name = self._state_to_name(state_vector)
+        self.pattern_traces[state_name] = pattern
+
+        return {'units': units, 'phases': phases, 'pattern': pattern}
+
+    def set_continuous_target(self, state_vector, strength=1.0):
+        """
+        Set a continuous state as the target.
+
+        Args:
+            state_vector: Array of shape (state_dim,) with values in [0, 1]
+            strength: Target strength
+        """
+        pattern = self.encode_continuous_state(state_vector)
+        self.A_target = pattern.copy()
+        self.target_strength = strength
+
+        # Store in pattern_traces
+        state_name = self._state_to_name(state_vector)
+        self.pattern_traces[state_name] = pattern
+
+        return pattern
+
+    def _state_to_name(self, state_vector):
+        """Convert state vector to a string name for storage."""
+        coords = '_'.join(f'{x:.3f}' for x in state_vector)
+        return f'state_{coords}'
+
+    # ==========================================================================
+    # SUCCESSOR REPRESENTATION - Goal-Agnostic Planning
+    # ==========================================================================
+
+    def update_successor(self, prev_pattern, curr_pattern):
+        """
+        Update successor representation based on observed transition.
+
+        TD learning rule for successor features:
+            M(s) += lr * (I(s) + gamma * M(s') - M(s))
+
+        Where I(s) is the one-hot (or in our case, the actual pattern).
+
+        For sparse patterns, we only update rows corresponding to active
+        units in prev_pattern (computational efficiency).
+
+        Args:
+            prev_pattern: Pattern before transition (source state)
+            curr_pattern: Pattern after transition (destination state)
+        """
+        # Find active units in both patterns
+        prev_active = np.where(prev_pattern > 0.3)[0]
+        curr_active = np.where(curr_pattern > 0.3)[0]
+
+        if len(prev_active) == 0 or len(curr_active) == 0:
+            return
+
+        # Compute successor features of next state
+        # Average the M rows of active units in curr_pattern
+        if len(curr_active) > 0:
+            next_sr = np.mean(self.M_successor[curr_active], axis=0)
+        else:
+            next_sr = np.zeros(self.n)
+
+        # Target successor features: current pattern + discounted future
+        target_sr = curr_pattern + self.sr_gamma * next_sr
+
+        # Update M rows for active units in prev_pattern
+        for i in prev_active:
+            td_error = target_sr - self.M_successor[i]
+            self.M_successor[i] += self.lr_successor * td_error
+
+        # Keep values bounded (higher limit for value propagation)
+        self.M_successor = np.clip(self.M_successor, 0, 10.0)
+
+    def compute_sr_value(self, state_pattern, goal_pattern):
+        """
+        Compute value of state w.r.t. goal using successor representation.
+
+        Value = E[sum of discounted goal overlap] = SR(state) · goal
+
+        This is the key benefit of SR: goal-agnostic learning, instant
+        evaluation for any goal.
+
+        Args:
+            state_pattern: Current state as activation pattern
+            goal_pattern: Goal as activation pattern
+
+        Returns:
+            value: Expected discounted overlap with goal from this state (normalized)
+        """
+        # Get active units in state
+        active = np.where(state_pattern > 0.3)[0]
+
+        if len(active) == 0:
+            return 0.0
+
+        # Average successor features of active units
+        sr_features = np.mean(self.M_successor[active], axis=0)
+
+        # Value is dot product with goal pattern
+        value = np.dot(sr_features, goal_pattern)
+
+        # Normalize by both goal magnitude and SR magnitude for comparability
+        goal_norm = np.linalg.norm(goal_pattern)
+        sr_norm = np.linalg.norm(sr_features)
+        if goal_norm > 1e-8 and sr_norm > 1e-8:
+            value = value / (goal_norm * sr_norm)  # Cosine similarity
+
+        return value
+
     # ==========================================================================
     # COMPLEMENTARY LEARNING SYSTEM - Memory & Consolidation
     # ==========================================================================
@@ -673,6 +920,10 @@ class PlanningSOCMind(PredictiveSOCMind):
             outcome_pattern = self.A_target.copy()
             self._store_experience(self._current_state_pattern, active_dim, outcome_pattern)
 
+            # === SUCCESSOR REPRESENTATION UPDATE ===
+            # Learn which states lead to which - goal-agnostic planning
+            self.update_successor(self._current_state_pattern, outcome_pattern)
+
     def _replay_to_longterm(self, dt):
         """
         Replay a random stored experience to W_longterm using CONTRASTIVE learning.
@@ -728,6 +979,10 @@ class PlanningSOCMind(PredictiveSOCMind):
         # Apply contrastive update
         self.W_action_longterm[action_dim] += dt * (dW_positive - dW_negative)
         self.W_action_longterm[action_dim] = np.clip(self.W_action_longterm[action_dim], 0, 1.0)
+
+        # === SUCCESSOR REPRESENTATION REPLAY ===
+        # Also consolidate SR during replay for goal-agnostic planning
+        self.update_successor(state_pattern, outcome_pattern)
 
     def _dream_action_learning(self, dt):
         """
@@ -845,29 +1100,51 @@ class PlanningSOCMind(PredictiveSOCMind):
 
     def _compute_virtual_rewards(self, goal_pattern):
         """
-        Compute Virtual Reward for each slot.
+        Compute Virtual Reward for each slot using SUCCESSOR REPRESENTATION.
 
         VR = Reward^α × Distance
 
         Where:
-        - Reward = similarity to goal × prediction confidence
+        - Reward = SR value (expected future goal overlap) OR direct similarity
         - Distance = difference from randomly chosen other slot
         - α = exploitation/exploration balance (0 = pure exploration)
 
+        The SR provides gradient even when patterns don't overlap directly.
         This is the core of FMC: balance exploitation (reward) with
         exploration (distance).
         """
         rewards = np.zeros(self.n_slots)
         distances = np.zeros(self.n_slots)
 
+        # Check if SR has been learned (has non-zero values)
+        sr_learned = np.max(self.M_successor) > 0.01
+
         for i in range(self.n_slots):
-            # Reward: cosine similarity to goal
-            slot_norm = np.linalg.norm(self.slot_A[i])
-            goal_norm = np.linalg.norm(goal_pattern)
-            if slot_norm > 1e-8 and goal_norm > 1e-8:
-                goal_sim = np.dot(self.slot_A[i], goal_pattern) / (slot_norm * goal_norm)
+            if sr_learned:
+                # Use SUCCESSOR REPRESENTATION for reward
+                # This gives expected future overlap with goal, providing gradient
+                # even when current state doesn't directly overlap with goal
+                sr_value = self.compute_sr_value(self.slot_A[i], goal_pattern)
+
+                # Also compute direct overlap (for when we're very close to goal)
+                slot_norm = np.linalg.norm(self.slot_A[i])
+                goal_norm = np.linalg.norm(goal_pattern)
+                if slot_norm > 1e-8 and goal_norm > 1e-8:
+                    direct_sim = np.dot(self.slot_A[i], goal_pattern) / (slot_norm * goal_norm)
+                else:
+                    direct_sim = 0.0
+
+                # Combine: use max of SR value and direct similarity
+                # SR provides gradient when far, direct_sim when at goal
+                goal_sim = max(sr_value, direct_sim)
             else:
-                goal_sim = 0.0
+                # Fall back to direct cosine similarity (for discrete patterns)
+                slot_norm = np.linalg.norm(self.slot_A[i])
+                goal_norm = np.linalg.norm(goal_pattern)
+                if slot_norm > 1e-8 and goal_norm > 1e-8:
+                    goal_sim = np.dot(self.slot_A[i], goal_pattern) / (slot_norm * goal_norm)
+                else:
+                    goal_sim = 0.0
 
             # Modulate by prediction confidence (how reliable is this future?)
             confidence_mod = np.mean(self.prediction_confidence) + 0.1
